@@ -1,20 +1,18 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
-from pydantic import BaseModel, ValidationError
+from pydantic_ai import Agent
+from pydantic import BaseModel
 from physics_modelling import generate_gprmax_input_file
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any
 import os
 import dotenv
 import asyncio
 import json
 import re
-import huggingface_hub
 from schema import GprSchema, WaveformSchema, AntennaSchema, LayerSchema, ExtractedParameters
 
 dotenv.load_dotenv()
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
-huggingface_hub.login(token=HUGGINGFACE_API_KEY)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 
 def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     """Generate GPRMax input file from complete GprSchema"""
@@ -68,145 +66,22 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
 def ask_user_for_inputs(missing_params: str) -> str:
     """Ask user for missing parameters"""
     return f"Please provide the following missing inputs:\n{missing_params}"
-
-
-class QwenExtractor:
-    """Extracts parameters from user query using Qwen3-8B model"""
-    
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-8B-Instruct"):
-        """Initialize Qwen model and tokenizer"""
-        self.model_name = model_name
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+def get_extraction_agent():
+    """Agent for extracting parameters from user query"""
+    return Agent(
+        name="Parameter Extractor",
+        system_prompt="""You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about GPRMax simulation setup.
         
-        print(f"Loading Qwen model: {model_name} on {self.device}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=self.dtype,
-            device_map="auto" if torch.cuda.is_available() else None,
-            trust_remote_code=True
-        )
-        if not torch.cuda.is_available():
-            self.model = self.model.to(self.device)
-        print("Model loaded successfully.")
-    
-    def extract_parameters(self, user_query: str, conversation_history: Optional[List[str]] = None) -> ExtractedParameters:
-        """
-        Extract parameters from user query using Qwen model.
+        Extract the following information:
+        - Number of layers and their properties (thickness_m, sand_pct, silt_pct, clay_pct, theta_v, bulk_density_gcm3, particle_density_gcm3, organic_fraction, salinity_class, porewater_sigma_Sm, name)
+        - Waveform properties (kind, amplitude, center_freq_hz, name)
+        - Antenna properties (kind, axis, tx_rx_offset_m)
+        - Model properties (model, title, source_height_m, domain_x, domain_y, cells_per_wavelength, max_cell_m, temperature_c, enforce_validity)
         
-        Args:
-            user_query: User's query string
-            conversation_history: Optional list of previous user responses
-            
-        Returns:
-            ExtractedParameters object
-        """
-        # Build the prompt with schema information
-        system_prompt = """You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about GPRMax simulation setup.
-
-Extract the following information:
-- Number of layers and their properties (thickness_m, sand_pct, silt_pct, clay_pct, theta_v, bulk_density_gcm3, particle_density_gcm3, organic_fraction, salinity_class, porewater_sigma_Sm, name)
-- Waveform properties (kind, amplitude, center_freq_hz, name)
-- Antenna properties (kind, axis, tx_rx_offset_m)
-- Model properties (model, title, source_height_m, domain_x, domain_y, cells_per_wavelength, max_cell_m, temperature_c, enforce_validity)
-
-Return ONLY the parameters that are explicitly mentioned. Do not make up any parameters. Strictly leave the fields as None if not mentioned.
-
-Return your response as a valid JSON object matching this schema:
-{
-  "num_layers": <int or null>,
-  "layers": [{"thickness_m": <float>, "sand_pct": <float>, "silt_pct": <float>, "clay_pct": <float>, "theta_v": <float>, ...}],
-  "waveform": {"kind": <str>, "amplitude": <float>, "center_freq_hz": <float>, "name": <str>},
-  "antenna": {"kind": <str>, "axis": <str>, "tx_rx_offset_m": <float>},
-  "model": <str>,
-  "title": <str>,
-  "source_height_m": <float>,
-  "domain_x": <float>,
-  "domain_y": <float>,
-  "cells_per_wavelength": <float>,
-  "max_cell_m": <float>,
-  "temperature_c": <float>,
-  "enforce_validity": <bool>
-}
-
-Return ONLY the JSON object, no additional text."""
-
-        # Combine conversation history if provided
-        full_query = user_query
-        if conversation_history:
-            full_query += "\n\nAdditional user responses:\n" + "\n".join(conversation_history)
-        
-        # Build messages
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_query}
-        ]
-        
-        # Apply chat template
-        text = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
-        # Tokenize and generate
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-        
-        with torch.no_grad():
-            generated_ids = self.model.generate(
-                **model_inputs,
-                max_new_tokens=2048,
-                temperature=0.1,
-                do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-        
-        # Decode response
-        generated_text = self.tokenizer.decode(
-            generated_ids[0][model_inputs.input_ids.shape[1]:],
-            skip_special_tokens=True
-        )
-        
-        # Extract JSON from response
-        json_text = self._extract_json(generated_text)
-        
-        # Parse JSON and create ExtractedParameters
-        try:
-            json_data = json.loads(json_text)
-            return ExtractedParameters(**json_data)
-        except (json.JSONDecodeError, ValidationError) as e:
-            # If parsing fails, try to create with minimal data
-            print(f"Warning: Failed to parse extracted JSON: {e}")
-            print(f"Generated text: {generated_text[:500]}")
-            return ExtractedParameters()
-    
-    def _extract_json(self, text: str) -> str:
-        """Extract JSON object from text response"""
-        # Try to find JSON in the response
-        # Look for { ... } pattern
-        start_idx = text.find('{')
-        if start_idx == -1:
-            return "{}"
-        
-        # Find matching closing brace
-        brace_count = 0
-        end_idx = start_idx
-        for i in range(start_idx, len(text)):
-            if text[i] == '{':
-                brace_count += 1
-            elif text[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    end_idx = i + 1
-                    break
-        
-        if end_idx > start_idx:
-            return text[start_idx:end_idx]
-        return "{}"
+        Return ONLY the parameters that are explicitly mentioned. Do not make up any parameters. Strictly leave the fields as None if not mentioned.""",
+        model="gpt-4.1",
+        output_type=ExtractedParameters
+    )
 
 
 def check_input_completeness(extracted: ExtractedParameters) -> tuple[bool, str]:
@@ -461,157 +336,125 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
     return True, ""
 
 
-def _convert_extracted_to_gpr_schema(extracted_params: ExtractedParameters) -> GprSchema:
-    """Convert ExtractedParameters to GprSchema format"""
-    # Build layers
-    layers = []
-    for layer_data in extracted_params.layers or []:
-        # Handle both dict and object access
-        if isinstance(layer_data, dict):
-            layer = LayerSchema(
-                name=layer_data.get("name"),
-                thickness_m=layer_data["thickness_m"],
-                sand_pct=layer_data["sand_pct"],
-                silt_pct=layer_data["silt_pct"],
-                clay_pct=layer_data["clay_pct"],
-                theta_v=layer_data["theta_v"],
-                bulk_density_gcm3=layer_data.get("bulk_density_gcm3"),
-                particle_density_gcm3=layer_data.get("particle_density_gcm3"),
-                organic_fraction=layer_data.get("organic_fraction"),
-                salinity_class=layer_data.get("salinity_class"),
-                porewater_sigma_Sm=layer_data.get("porewater_sigma_Sm"),
-            )
-        else:
-            # If it's already a Pydantic model or object
-            layer = LayerSchema(
-                name=getattr(layer_data, "name", None),
-                thickness_m=layer_data.thickness_m,
-                sand_pct=layer_data.sand_pct,
-                silt_pct=layer_data.silt_pct,
-                clay_pct=layer_data.clay_pct,
-                theta_v=layer_data.theta_v,
-                bulk_density_gcm3=getattr(layer_data, "bulk_density_gcm3", None),
-                particle_density_gcm3=getattr(layer_data, "particle_density_gcm3", None),
-                organic_fraction=getattr(layer_data, "organic_fraction", None),
-                salinity_class=getattr(layer_data, "salinity_class", None),
-                porewater_sigma_Sm=getattr(layer_data, "porewater_sigma_Sm", None),
-            )
-        layers.append(layer)
-    
-    # Build waveform - handle both dict and object access
-    waveform_dict = extracted_params.waveform
-    if isinstance(waveform_dict, dict):
-        waveform = WaveformSchema(
-            kind=waveform_dict["kind"],
-            amplitude=waveform_dict["amplitude"],
-            center_freq_hz=waveform_dict["center_freq_hz"],
-            name=waveform_dict["name"],
-        )
-    else:
-        waveform = WaveformSchema(
-            kind=waveform_dict.kind,
-            amplitude=waveform_dict.amplitude,
-            center_freq_hz=waveform_dict.center_freq_hz,
-            name=waveform_dict.name,
-        )
-    
-    # Build antenna - handle both dict and object access
-    antenna_dict = extracted_params.antenna
-    if isinstance(antenna_dict, dict):
-        antenna = AntennaSchema(
-            kind=antenna_dict["kind"],
-            axis=antenna_dict["axis"],
-            tx_rx_offset_m=antenna_dict["tx_rx_offset_m"],
-        )
-    else:
-        antenna = AntennaSchema(
-            kind=antenna_dict.kind,
-            axis=antenna_dict.axis,
-            tx_rx_offset_m=antenna_dict.tx_rx_offset_m,
-        )
-    
-    # Build complete GprSchema
-    gpr_data = GprSchema(
-        model=extracted_params.model,
-        title=extracted_params.title,
-        source_height_m=extracted_params.source_height_m,
-        domain_x=extracted_params.domain_x,
-        domain_y=extracted_params.domain_y,
-        cells_per_wavelength=extracted_params.cells_per_wavelength,
-        max_cell_m=extracted_params.max_cell_m,
-        temperature_c=extracted_params.temperature_c,
-        enforce_validity=extracted_params.enforce_validity if extracted_params.enforce_validity is not None else True,
-        waveform=waveform,
-        antenna=antenna,
-        layers=layers,
-    )
-    
-    return gpr_data
 
 
-class CentralOrchestratorAgent:
+# Main code entrypoint
+async def run_extraction_workflow(initial_input: str, user_responses: Optional[List[str]] = None):
     """
-    Central orchestrator agent that manages the complete workflow:
-    1. Takes user query
-    2. Calls extraction function (LLM parsing)
-    3. Calls completeness checker
-    4. Calls validity checker
-    5. If both pass, calls generate file function
-    6. Otherwise asks user to fix issues and re-runs loop
+    Run the workflow to extract parameters and generate GPRMax input file.
+    
+    Args:
+        initial_input: Initial user query
+        user_responses: Optional list of subsequent user responses (for iterative input collection)
+    
+    Returns:
+        dict with either:
+        - "status": "complete", "output": generated file info
+        - "status": "incomplete", "missing_params": formatted missing parameters message
     """
+    extraction_agent = get_extraction_agent()
+   
     
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-8B-Instruct"):
-        """Initialize the orchestrator with Qwen extractor"""
-        self.extractor = QwenExtractor(model_name)
+    # Combine initial input with any subsequent responses
+    full_context = initial_input
+    if user_responses:
+        full_context += "\n\nAdditional user responses:\n" + "\n".join(user_responses)
     
-    async def process_query(
-        self,
-        user_query: str,
-        conversation_history: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Process a user query through the complete workflow.
-        
-        Args:
-            user_query: User's query string
-            conversation_history: Optional list of previous user responses
-            
-        Returns:
-            dict with status and result information:
-            - "status": "complete", "incomplete", "validation_error", or "error"
-            - Additional fields based on status
-        """
+    # Step 1: Extract parameters from user query
+    extraction_result = await extraction_agent.run(full_context)
+    extracted_params = extraction_result.output
+    
+    # Step 2: Check input completeness
+    is_complete, missing_params = check_input_completeness(extracted_params)
+    
+    if is_complete:
+        # Step 3: All parameters are complete, generate the input file
+        # Convert extracted parameters to GprSchema format
         try:
-            # Step 1: Extract parameters from user query
-            extracted_params = self.extractor.extract_parameters(
-                user_query,
-                conversation_history
+            # Build layers
+            layers = []
+            for layer_data in extracted_params.layers:
+                # Handle both dict and object access
+                if isinstance(layer_data, dict):
+                    layer = LayerSchema(
+                        name=layer_data.get("name"),
+                        thickness_m=layer_data["thickness_m"],
+                        sand_pct=layer_data["sand_pct"],
+                        silt_pct=layer_data["silt_pct"],
+                        clay_pct=layer_data["clay_pct"],
+                        theta_v=layer_data["theta_v"],
+                        bulk_density_gcm3=layer_data.get("bulk_density_gcm3"),
+                        particle_density_gcm3=layer_data.get("particle_density_gcm3"),
+                        organic_fraction=layer_data.get("organic_fraction"),
+                        salinity_class=layer_data.get("salinity_class"),
+                        porewater_sigma_Sm=layer_data.get("porewater_sigma_Sm"),
+                    )
+                else:
+                    # If it's already a Pydantic model or object
+                    layer = LayerSchema(
+                        name=getattr(layer_data, "name", None),
+                        thickness_m=layer_data.thickness_m,
+                        sand_pct=layer_data.sand_pct,
+                        silt_pct=layer_data.silt_pct,
+                        clay_pct=layer_data.clay_pct,
+                        theta_v=layer_data.theta_v,
+                        bulk_density_gcm3=getattr(layer_data, "bulk_density_gcm3", None),
+                        particle_density_gcm3=getattr(layer_data, "particle_density_gcm3", None),
+                        organic_fraction=getattr(layer_data, "organic_fraction", None),
+                        salinity_class=getattr(layer_data, "salinity_class", None),
+                        porewater_sigma_Sm=getattr(layer_data, "porewater_sigma_Sm", None),
+                    )
+                layers.append(layer)
+            
+            # Build waveform - handle both dict and object access
+            waveform_dict = extracted_params.waveform
+            if isinstance(waveform_dict, dict):
+                waveform = WaveformSchema(
+                    kind=waveform_dict["kind"],
+                    amplitude=waveform_dict["amplitude"],
+                    center_freq_hz=waveform_dict["center_freq_hz"],
+                    name=waveform_dict["name"],
+                )
+            else:
+                waveform = WaveformSchema(
+                    kind=waveform_dict.kind,
+                    amplitude=waveform_dict.amplitude,
+                    center_freq_hz=waveform_dict.center_freq_hz,
+                    name=waveform_dict.name,
+                )
+            
+            # Build antenna - handle both dict and object access
+            antenna_dict = extracted_params.antenna
+            if isinstance(antenna_dict, dict):
+                antenna = AntennaSchema(
+                    kind=antenna_dict["kind"],
+                    axis=antenna_dict["axis"],
+                    tx_rx_offset_m=antenna_dict["tx_rx_offset_m"],
+                )
+            else:
+                antenna = AntennaSchema(
+                    kind=antenna_dict.kind,
+                    axis=antenna_dict.axis,
+                    tx_rx_offset_m=antenna_dict.tx_rx_offset_m,
+                )
+            
+            # Build complete GprSchema
+            gpr_data = GprSchema(
+                model=extracted_params.model,
+                title=extracted_params.title,
+                source_height_m=extracted_params.source_height_m,
+                domain_x=extracted_params.domain_x,
+                domain_y=extracted_params.domain_y,
+                cells_per_wavelength=extracted_params.cells_per_wavelength,
+                max_cell_m=extracted_params.max_cell_m,
+                temperature_c=extracted_params.temperature_c,
+                enforce_validity=extracted_params.enforce_validity if extracted_params.enforce_validity is not None else True,
+                waveform=waveform,
+                antenna=antenna,
+                layers=layers,
             )
             
-            # Step 2: Check input completeness
-            is_complete, missing_params = check_input_completeness(extracted_params)
-            
-            if not is_complete:
-                # Parameters incomplete, ask user for missing inputs
-                missing_msg = format_missing_params_message(missing_params)
-                user_message = ask_user_for_inputs(missing_msg)
-                
-                return {
-                    "status": "incomplete",
-                    "missing_params": missing_msg,
-                    "user_message": user_message
-                }
-            
-            # Step 3: All parameters are complete, convert to GprSchema
-            try:
-                gpr_data = _convert_extracted_to_gpr_schema(extracted_params)
-            except Exception as e:
-                return {
-                    "status": "error",
-                    "error": f"Failed to convert extracted parameters: {str(e)}"
-                }
-            
-            # Step 4: Validate parameters before generating the file
+            # Validate parameters before generating the file
             is_valid, validation_error = validate_gpr_parameters(gpr_data)
             if not is_valid:
                 validation_msg = format_validation_errors_message(validation_error)
@@ -623,7 +466,7 @@ class CentralOrchestratorAgent:
                     "user_message": user_message
                 }
             
-            # Step 5: Generate the file
+            # Generate the file
             result_message = generate_gprmax_input_file_tool(gpr_data)
             
             return {
@@ -631,113 +474,26 @@ class CentralOrchestratorAgent:
                 "output": result_message,
                 "data": gpr_data.model_dump()
             }
-            
         except Exception as e:
             return {
                 "status": "error",
                 "error": str(e)
             }
-    
-    async def run_interactive_loop(
-        self,
-        initial_input: str,
-        get_user_input_func: Optional[Callable[[str], str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Run interactive loop until all inputs are complete and valid.
+    else:
+        # Step 4: Parameters incomplete, ask user for missing inputs
+        missing_msg = format_missing_params_message(missing_params)
+        user_message = ask_user_for_inputs(missing_msg)
         
-        Args:
-            initial_input: Initial user query
-            get_user_input_func: Optional function to get user input.
-                                Should be a callable that takes a prompt string and returns user input string.
-        
-        Returns:
-            dict with workflow result
-        """
-        user_responses = []
-        max_iterations = 10  # Prevent infinite loops
-        
-        for iteration in range(max_iterations):
-            result = await self.process_query(initial_input, user_responses if user_responses else None)
-            
-            if result["status"] == "complete":
-                print("All parameters complete!")
-                print(result["output"])
-                return result
-            elif result["status"] == "incomplete":
-                print(f"\nMissing parameters (iteration {iteration + 1}):")
-                print(result["user_message"])
-                
-                # If we have a function to get user input, continue the loop
-                if get_user_input_func:
-                    try:
-                        user_response = get_user_input_func(result["user_message"])
-                        if user_response:
-                            user_responses.append(user_response)
-                            continue
-                    except Exception as e:
-                        print(f"Error getting user input: {e}")
-                
-                # Otherwise, return the missing params message
-                return result
-            elif result["status"] == "validation_error":
-                print(f"\nValidation error (iteration {iteration + 1}):")
-                print(result.get("user_message", result.get("validation_message", "Unknown validation error")))
-                
-                # If we have a function to get user input, continue the loop to allow corrections
-                if get_user_input_func:
-                    try:
-                        user_response = get_user_input_func(result.get("user_message", "Please correct the validation errors above."))
-                        if user_response:
-                            user_responses.append(user_response)
-                            continue
-                    except Exception as e:
-                        print(f"Error getting user input: {e}")
-                
-                # Otherwise, return the validation error message
-                return result
-            elif result["status"] == "error":
-                print(f"Error: {result['error']}")
-                return result
-        
-        print("✗ Maximum iterations reached. Please try again with more complete input.")
-        return {"status": "max_iterations_reached"}
-
-
-# Global orchestrator instance (lazy initialization)
-_orchestrator: Optional[CentralOrchestratorAgent] = None
-
-def get_orchestrator(model_name: str = "Qwen/Qwen2.5-8B-Instruct") -> CentralOrchestratorAgent:
-    """Get or create the global orchestrator instance"""
-    global _orchestrator
-    if _orchestrator is None:
-        _orchestrator = CentralOrchestratorAgent(model_name)
-    return _orchestrator
-
-
-# Main code entrypoint - Legacy functions for backward compatibility
-async def run_extraction_workflow(initial_input: str, user_responses: Optional[List[str]] = None):
-    """
-    Run the workflow to extract parameters and generate GPRMax input file.
-    Uses the central orchestrator agent.
-    
-    Args:
-        initial_input: Initial user query
-        user_responses: Optional list of subsequent user responses (for iterative input collection)
-    
-    Returns:
-        dict with either:
-        - "status": "complete", "output": generated file info
-        - "status": "incomplete", "missing_params": formatted missing parameters message
-    """
-    orchestrator = get_orchestrator()
-    return await orchestrator.process_query(initial_input, user_responses)
+        return {
+            "status": "incomplete",
+            "missing_params": missing_msg,
+            "user_message": user_message
+        }
 
 
 async def run_interactive_workflow(initial_input: str, get_user_input_func=None):
     """
     Interactive workflow that loops until all inputs are complete.
-    Uses the central orchestrator agent.
     
     Args:
         initial_input: Initial user query
@@ -747,14 +503,54 @@ async def run_interactive_workflow(initial_input: str, get_user_input_func=None)
     Returns:
         dict with workflow result
     """
-    orchestrator = get_orchestrator()
-    return await orchestrator.run_interactive_loop(initial_input, get_user_input_func)
-
-
-# # Alias for backward compatibility with app.py
-# async def run_workflow(initial_input: str, user_responses: Optional[List[str]] = None):
-#     """Alias for run_extraction_workflow for backward compatibility"""
-#     return await run_extraction_workflow(initial_input, user_responses)
+    user_responses = []
+    max_iterations = 10  # Prevent infinite loops
+    
+    for iteration in range(max_iterations):
+        result = await run_extraction_workflow(initial_input, user_responses if user_responses else None)
+        
+        if result["status"] == "complete":
+            print("All parameters complete!")
+            print(result["output"])
+            return result
+        elif result["status"] == "incomplete":
+            print(f"\nMissing parameters (iteration {iteration + 1}):")
+            print(result["user_message"])
+            
+            # If we have a function to get user input, continue the loop
+            if get_user_input_func:
+                try:
+                    user_response = get_user_input_func(result["user_message"])
+                    if user_response:
+                        user_responses.append(user_response)
+                        continue
+                except Exception as e:
+                    print(f"Error getting user input: {e}")
+            
+            # Otherwise, return the missing params message
+            return result
+        elif result["status"] == "validation_error":
+            print(f"\nValidation error (iteration {iteration + 1}):")
+            print(result.get("user_message", result.get("validation_message", "Unknown validation error")))
+            
+            # If we have a function to get user input, continue the loop to allow corrections
+            if get_user_input_func:
+                try:
+                    user_response = get_user_input_func(result.get("user_message", "Please correct the validation errors above."))
+                    if user_response:
+                        user_responses.append(user_response)
+                        continue
+                except Exception as e:
+                    print(f"Error getting user input: {e}")
+            
+            # Otherwise, return the validation error message
+            return result
+        elif result["status"] == "error":
+            print(f"Error: {result['error']}")
+            return result
+    
+    print("✗ Maximum iterations reached. Please try again with more complete input.")
+    return {"status": "max_iterations_reached"}
 
 
 if __name__ == "__main__":
