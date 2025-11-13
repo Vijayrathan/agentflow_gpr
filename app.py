@@ -2,8 +2,13 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import asyncio
 import json
-from generator_agent import run_workflow
+import logging
+from generator_agent import central_agent
 import os
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -11,9 +16,31 @@ CORS(app)
 # Store conversation history per session
 conversations = {}
 
+def agent_result_to_dict(result):
+    """Convert agent result to JSON-serializable dict"""
+    try:
+        # If result has model_dump method (Pydantic model), use it
+        if hasattr(result, 'model_dump'):
+            return result.model_dump()
+        # If result is a dict, return as is
+        elif isinstance(result, dict):
+            return result
+        # If result has output attribute, extract it
+        elif hasattr(result, 'output'):
+            return {
+                'output': str(result.output) if result.output is not None else '',
+                'messages': [str(msg) for msg in result.messages] if hasattr(result, 'messages') else [],
+                'data': result.data if hasattr(result, 'data') else None
+            }
+        # Otherwise, convert to string representation
+        else:
+            return {'output': str(result)}
+    except Exception as e:
+        return {'output': str(result), 'error': f'Error serializing result: {str(e)}'}
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Handle chat messages and process workflow"""
+    """Handle chat messages and pass through agent responses"""
     try:
         data = request.json
         message = data.get('message', '')
@@ -25,108 +52,109 @@ def chat():
         # Initialize conversation if new session
         if session_id not in conversations:
             conversations[session_id] = {
-                'messages': [],
-                'initial_input': message,
-                'user_responses': []
+                'messages': []
             }
+        
+        # Store user message in conversation history
+        conversations[session_id]['messages'].append({
+            'role': 'user',
+            'content': message
+        })
+        
+        # Build conversation context from history
+        # Include previous messages so agent has full context
+        if len(conversations[session_id]['messages']) > 1:
+            # Build conversation string from history
+            conversation_parts = []
+            for msg in conversations[session_id]['messages'][:-1]:  # Exclude current message
+                role = msg['role']
+                content = msg['content']
+                conversation_parts.append(f"{role.capitalize()}: {content}")
+            conversation_parts.append(f"User: {message}")
+            conversation_context = "\n\n".join(conversation_parts)
         else:
-            # Add to user responses for iterative workflow
-            conversations[session_id]['user_responses'].append(message)
+            # First message in conversation
+            conversation_context = message
         
-        # Run the workflow
-        initial_input = conversations[session_id]['initial_input']
-        user_responses = conversations[session_id]['user_responses']
-        
-        # Run async workflow
+        # Run async agent
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        result = loop.run_until_complete(
-            run_workflow(initial_input, user_responses if user_responses else None)
+        # Call the agent with the current message
+        # The agent orchestrates everything internally
+        agent_result = loop.run_until_complete(
+            central_agent(conversation_context)
         )
         
-        # Store message in conversation history
+        # Log the agent result structure for debugging
+        logger.info(f"Agent result type: {type(agent_result)}")
+        logger.info(f"Agent result attributes: {dir(agent_result)}")
+        if hasattr(agent_result, 'output'):
+            logger.info(f"Agent result.output: {agent_result.output}")
+            logger.info(f"Agent result.output type: {type(agent_result.output)}")
+        if hasattr(agent_result, 'messages'):
+            logger.info(f"Agent result.messages: {agent_result.messages}")
+        
+        # Convert agent result to dict
+        result_dict = agent_result_to_dict(agent_result)
+        logger.info(f"Result dict: {json.dumps(result_dict, indent=2, default=str)}")
+        
+        # Extract response message from agent output
+        # Try multiple ways to get the response content
+        response_content = ''
+        
+        # First, try to get from result_dict
+        if isinstance(result_dict, dict):
+            response_content = result_dict.get('output', '')
+            # If output is empty, try getting from messages
+            if not response_content and result_dict.get('messages'):
+                # Get the last message if available
+                messages = result_dict.get('messages', [])
+                if messages:
+                    response_content = str(messages[-1]) if messages else ''
+        
+        # If still empty, try directly from agent_result
+        if not response_content:
+            if hasattr(agent_result, 'output') and agent_result.output:
+                response_content = str(agent_result.output)
+            elif hasattr(agent_result, 'messages') and agent_result.messages:
+                # Get the last message from the agent
+                response_content = str(agent_result.messages[-1]) if agent_result.messages else ''
+        
+        # Fallback if still empty
+        if not response_content:
+            response_content = 'Processing your request...'
+        
+        logger.info(f"Final response_content: {response_content[:200]}...")
+        
+        # Store assistant response in conversation history
         conversations[session_id]['messages'].append({
-            'role': 'user',
-            'content': message
+            'role': 'assistant',
+            'content': response_content
         })
         
-        # Process result
-        if result.get("status") == "complete":
-            # Save output to file
-            output_data = result.get("data", {})
-            with open("output.json", "w") as f:
-                json.dump(output_data, f, indent=2)
-            
-            response_message = f"✅ Successfully generated GPRMax input file!\n\n{result.get('output', 'File generated successfully.')}\n\nThe configuration has been saved to output.json and the input file has been generated."
-            
-            conversations[session_id]['messages'].append({
-                'role': 'assistant',
-                'content': response_message
-            })
-            
-            return jsonify({
-                'status': 'complete',
-                'message': response_message,
-                'data': output_data
-            })
+        # Determine status based on response content
+        status = 'incomplete'
+        if 'successfully generated' in response_content.lower() or 'generated' in response_content.lower():
+            status = 'complete'
         
-        elif result.get("status") == "incomplete":
-            response_message = result.get("user_message", "Please provide the missing parameters.")
-            
-            conversations[session_id]['messages'].append({
-                'role': 'assistant',
-                'content': response_message
-            })
-            
-            return jsonify({
-                'status': 'incomplete',
-                'message': response_message,
-                'missing_params': result.get('missing_params', '')
-            })
-        
-        elif result.get("status") == "validation_error":
-            response_message = result.get("user_message", "Please correct the validation errors.")
-            
-            conversations[session_id]['messages'].append({
-                'role': 'assistant',
-                'content': response_message
-            })
-            
-            return jsonify({
-                'status': 'validation_error',
-                'message': response_message,
-                'error': result.get('error', '')
-            })
-        
-        elif result.get("status") == "error":
-            error_message = f"An error occurred: {result.get('error', 'Unknown error')}"
-            
-            conversations[session_id]['messages'].append({
-                'role': 'assistant',
-                'content': error_message
-            })
-            
-            return jsonify({
-                'status': 'error',
-                'message': error_message
-            }), 500
-        
-        else:
-            return jsonify({
-                'status': 'unknown',
-                'message': 'Unknown status returned from workflow'
-            }), 500
+        # Return response in format expected by frontend
+        return jsonify({
+            'message': response_content,  # Frontend expects 'message' field
+            'status': status,
+            'output': response_content,  # Keep for backward compatibility
+            'data': result_dict.get('data') if isinstance(result_dict, dict) else None
+        })
             
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({
-            'status': 'error',
-            'message': f'Server error: {str(e)}'
+            'error': f'Server error: {str(e)}',
+            'traceback': traceback.format_exc()
         }), 500
 
 @app.route('/api/reset', methods=['POST'])
@@ -143,10 +171,43 @@ def reset():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint - redirect to frontend"""
+    return jsonify({
+        'message': 'GPRMax Chatbot API',
+        'status': 'running',
+        'frontend': 'http://localhost:3000',
+        'endpoints': {
+            'health': '/api/health',
+            'chat': '/api/chat',
+            'file': '/api/file',
+            'reset': '/api/reset'
+        }
+    })
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'healthy'})
+
+@app.route('/api/file', methods=['GET'])
+def get_file():
+    """Get the generated.in file content"""
+    try:
+        file_path = 'generated.in'
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return jsonify({
+            'content': content,
+            'filename': 'generated.in'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5002))

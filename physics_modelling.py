@@ -618,6 +618,7 @@ def generate_gprmax_input_file(
     with open(output_filename, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"Wrote {output_filename}")
+    return text
 
     # # helper
     # eps_r_example, sigma_example = 9.0, 0.02

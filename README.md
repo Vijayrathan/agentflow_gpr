@@ -22,7 +22,7 @@ An intelligent chatbot interface for generating GPRMax input files through natur
 
 - Python 3.8+
 - Node.js 16+ and npm
-- OpenAI API key (set in `.env` file)
+- HuggingFace API token (set in `.env` file)
 
 ### Backend Setup
 
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 2. Create a `.env` file in the root directory:
 ```
-OPENAI_API_KEY=your_openai_api_key_here
+HF_TOKEN=your_huggingface_token_here
 ```
 
 3. Start the Flask backend server:
@@ -60,12 +60,12 @@ npm install
 npm start
 ```
 
-The frontend will run on `http://localhost:3000` and automatically proxy API requests to the backend.
+The frontend will run on `http://localhost:8004` and automatically proxy API requests to the backend.
 
 ## Usage
 
 1. Start both the backend and frontend servers
-2. Open `http://localhost:3000` in your browser
+2. Open `http://localhost:8004` in your browser
 3. Start a conversation by describing your GPRMax simulation
 4. The chatbot will guide you through providing all necessary parameters
 5. Once complete, the input file will be generated as `generated.in`

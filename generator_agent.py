@@ -5,17 +5,37 @@ from typing import List, Optional, Dict, Any
 import os
 import dotenv
 import asyncio
+import openai
 import json
 import re
+import logging
+import huggingface_hub
 from schema import GprSchema, WaveformSchema, AntennaSchema, LayerSchema, ExtractedParameters
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 dotenv.load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# HF_TOKEN = os.getenv("HF_TOKEN")
+# huggingface_hub.login(token=HF_TOKEN)
+# qwen_model = "Qwen/Qwen3-8B"
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+openai_model = "gpt-4.1"
+
+openai_client = openai.OpenAI(api_key=openai_api_key)
+
 
 
 def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     """Generate GPRMax input file from complete GprSchema"""
+    logger.info(f"[TOOL CALL] generate_gprmax_input_file_tool - Generating GPRMax input file for: {gpr_data.title}")
     # Convert GprSchema to the format expected by generate_gprmax_input_file
     
     layer_thicknesses_m = [layer.thickness_m for layer in gpr_data.layers]
@@ -30,7 +50,7 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     layer_porewater_sigmas_Sm = [layer.porewater_sigma_Sm for layer in gpr_data.layers]
     layer_names = [layer.name for layer in gpr_data.layers]
     
-    generate_gprmax_input_file(
+    text = generate_gprmax_input_file(
         layer_thicknesses_m=layer_thicknesses_m,
         layer_sand_pcts=layer_sand_pcts,
         layer_silt_pcts=layer_silt_pcts,
@@ -59,33 +79,15 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
         model=gpr_data.model,
         enforce_validity=gpr_data.enforce_validity,
     )
-    return f"Successfully generated GPRMax input file for: {gpr_data.title}"
+    result_msg = f"Successfully generated GPRMax input file for: {gpr_data.title} \n\n {text}"
+    logger.info(f"[TOOL RESULT] generate_gprmax_input_file_tool - {result_msg}")
+    return result_msg
 
-
-
-def ask_user_for_inputs(missing_params: str) -> str:
-    """Ask user for missing parameters"""
-    return f"Please provide the following missing inputs:\n{missing_params}"
-def get_extraction_agent():
-    """Agent for extracting parameters from user query"""
-    return Agent(
-        name="Parameter Extractor",
-        system_prompt="""You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about GPRMax simulation setup.
-        
-        Extract the following information:
-        - Number of layers and their properties (thickness_m, sand_pct, silt_pct, clay_pct, theta_v, bulk_density_gcm3, particle_density_gcm3, organic_fraction, salinity_class, porewater_sigma_Sm, name)
-        - Waveform properties (kind, amplitude, center_freq_hz, name)
-        - Antenna properties (kind, axis, tx_rx_offset_m)
-        - Model properties (model, title, source_height_m, domain_x, domain_y, cells_per_wavelength, max_cell_m, temperature_c, enforce_validity)
-        
-        Return ONLY the parameters that are explicitly mentioned. Do not make up any parameters. Strictly leave the fields as None if not mentioned.""",
-        model="gpt-4.1",
-        output_type=ExtractedParameters
-    )
 
 
 def check_input_completeness(extracted: ExtractedParameters) -> tuple[bool, str]:
     """Check if all required parameters are provided. Returns (is_complete, missing_params_message)"""
+    logger.info("[TOOL CALL] check_input_completeness - Checking if all required parameters are provided")
     missing = []
     
     # Check global parameters
@@ -189,7 +191,10 @@ def check_input_completeness(extracted: ExtractedParameters) -> tuple[bool, str]
     
     if missing:
         missing_msg = "\n".join(missing)
+        logger.info(f"[TOOL RESULT] check_input_completeness - Parameters incomplete. Missing: {len(missing)} parameter(s)")
+        logger.debug(f"[TOOL RESULT] check_input_completeness - Missing details: {missing_msg}")
         return False, missing_msg
+    logger.info("[TOOL RESULT] check_input_completeness - All required parameters are present")
     return True, ""
 
 
@@ -199,16 +204,16 @@ def format_missing_params_message(missing_params: str) -> str:
 
 {missing_params}
 
-Please provide all the missing information to proceed with generating the GPRMax input file."""
+Ask the user to provide all the missing information to proceed with generating the GPRMax input file."""
 
 
-def format_validation_errors_message(validation_error: str) -> str:
+def format_validation_errors_message(validation_errors: list[str]) -> str:
     """Format validation errors into a user-friendly message"""
     return f"""Parameter validation failed. Please correct the following errors:
 
-{validation_error}
+{validation_errors}
 
-Please provide corrected values for the parameters mentioned above."""
+Ask the user to provide corrected values for the parameters mentioned above."""
 
 
 def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
@@ -218,6 +223,7 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
     Returns:
         (is_valid, error_message) - if is_valid is False, error_message contains validation errors
     """
+    logger.info(f"[TOOL CALL] validate_gpr_parameters - Validating parameters for: {gpr_data.title}")
     errors = []
     
     # 1. Check model is valid
@@ -331,15 +337,15 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
     
     if errors:
         error_msg = "Validation errors found:\n" + "\n".join(f"  - {err}" for err in errors)
+        logger.warning(f"[TOOL RESULT] validate_gpr_parameters - Validation failed with {len(errors)} error(s)")
+        logger.debug(f"[TOOL RESULT] validate_gpr_parameters - Validation errors: {error_msg}")
         return False, error_msg
     
+    logger.info("[TOOL RESULT] validate_gpr_parameters - All parameters are valid")
     return True, ""
 
 
-
-
-# Main code entrypoint
-async def run_extraction_workflow(initial_input: str, user_responses: Optional[List[str]] = None):
+async def extraction_agent(initial_input: str, user_responses: Optional[List[str]] = None):
     """
     Run the workflow to extract parameters and generate GPRMax input file.
     
@@ -352,146 +358,29 @@ async def run_extraction_workflow(initial_input: str, user_responses: Optional[L
         - "status": "complete", "output": generated file info
         - "status": "incomplete", "missing_params": formatted missing parameters message
     """
-    extraction_agent = get_extraction_agent()
-   
-    
-    # Combine initial input with any subsequent responses
-    full_context = initial_input
-    if user_responses:
-        full_context += "\n\nAdditional user responses:\n" + "\n".join(user_responses)
-    
-    # Step 1: Extract parameters from user query
-    extraction_result = await extraction_agent.run(full_context)
-    extracted_params = extraction_result.output
-    
-    # Step 2: Check input completeness
-    is_complete, missing_params = check_input_completeness(extracted_params)
-    
-    if is_complete:
-        # Step 3: All parameters are complete, generate the input file
-        # Convert extracted parameters to GprSchema format
-        try:
-            # Build layers
-            layers = []
-            for layer_data in extracted_params.layers:
-                # Handle both dict and object access
-                if isinstance(layer_data, dict):
-                    layer = LayerSchema(
-                        name=layer_data.get("name"),
-                        thickness_m=layer_data["thickness_m"],
-                        sand_pct=layer_data["sand_pct"],
-                        silt_pct=layer_data["silt_pct"],
-                        clay_pct=layer_data["clay_pct"],
-                        theta_v=layer_data["theta_v"],
-                        bulk_density_gcm3=layer_data.get("bulk_density_gcm3"),
-                        particle_density_gcm3=layer_data.get("particle_density_gcm3"),
-                        organic_fraction=layer_data.get("organic_fraction"),
-                        salinity_class=layer_data.get("salinity_class"),
-                        porewater_sigma_Sm=layer_data.get("porewater_sigma_Sm"),
-                    )
-                else:
-                    # If it's already a Pydantic model or object
-                    layer = LayerSchema(
-                        name=getattr(layer_data, "name", None),
-                        thickness_m=layer_data.thickness_m,
-                        sand_pct=layer_data.sand_pct,
-                        silt_pct=layer_data.silt_pct,
-                        clay_pct=layer_data.clay_pct,
-                        theta_v=layer_data.theta_v,
-                        bulk_density_gcm3=getattr(layer_data, "bulk_density_gcm3", None),
-                        particle_density_gcm3=getattr(layer_data, "particle_density_gcm3", None),
-                        organic_fraction=getattr(layer_data, "organic_fraction", None),
-                        salinity_class=getattr(layer_data, "salinity_class", None),
-                        porewater_sigma_Sm=getattr(layer_data, "porewater_sigma_Sm", None),
-                    )
-                layers.append(layer)
-            
-            # Build waveform - handle both dict and object access
-            waveform_dict = extracted_params.waveform
-            if isinstance(waveform_dict, dict):
-                waveform = WaveformSchema(
-                    kind=waveform_dict["kind"],
-                    amplitude=waveform_dict["amplitude"],
-                    center_freq_hz=waveform_dict["center_freq_hz"],
-                    name=waveform_dict["name"],
-                )
-            else:
-                waveform = WaveformSchema(
-                    kind=waveform_dict.kind,
-                    amplitude=waveform_dict.amplitude,
-                    center_freq_hz=waveform_dict.center_freq_hz,
-                    name=waveform_dict.name,
-                )
-            
-            # Build antenna - handle both dict and object access
-            antenna_dict = extracted_params.antenna
-            if isinstance(antenna_dict, dict):
-                antenna = AntennaSchema(
-                    kind=antenna_dict["kind"],
-                    axis=antenna_dict["axis"],
-                    tx_rx_offset_m=antenna_dict["tx_rx_offset_m"],
-                )
-            else:
-                antenna = AntennaSchema(
-                    kind=antenna_dict.kind,
-                    axis=antenna_dict.axis,
-                    tx_rx_offset_m=antenna_dict.tx_rx_offset_m,
-                )
-            
-            # Build complete GprSchema
-            gpr_data = GprSchema(
-                model=extracted_params.model,
-                title=extracted_params.title,
-                source_height_m=extracted_params.source_height_m,
-                domain_x=extracted_params.domain_x,
-                domain_y=extracted_params.domain_y,
-                cells_per_wavelength=extracted_params.cells_per_wavelength,
-                max_cell_m=extracted_params.max_cell_m,
-                temperature_c=extracted_params.temperature_c,
-                enforce_validity=extracted_params.enforce_validity if extracted_params.enforce_validity is not None else True,
-                waveform=waveform,
-                antenna=antenna,
-                layers=layers,
-            )
-            
-            # Validate parameters before generating the file
-            is_valid, validation_error = validate_gpr_parameters(gpr_data)
-            if not is_valid:
-                validation_msg = format_validation_errors_message(validation_error)
-                user_message = ask_user_for_inputs(validation_msg)
-                return {
-                    "status": "validation_error",
-                    "error": validation_error,
-                    "validation_message": validation_msg,
-                    "user_message": user_message
-                }
-            
-            # Generate the file
-            result_message = generate_gprmax_input_file_tool(gpr_data)
-            
-            return {
-                "status": "complete",
-                "output": result_message,
-                "data": gpr_data.model_dump()
-            }
-        except Exception as e:
-            return {
-                "status": "error",
-                "error": str(e)
-            }
-    else:
-        # Step 4: Parameters incomplete, ask user for missing inputs
-        missing_msg = format_missing_params_message(missing_params)
-        user_message = ask_user_for_inputs(missing_msg)
+    logger.info("[TOOL CALL] extraction_agent - Extracting parameters from user input")
+    logger.debug(f"[TOOL CALL] extraction_agent - Input: {initial_input[:200]}..." if len(initial_input) > 200 else f"[TOOL CALL] extraction_agent - Input: {initial_input}")
+    system_prompt="""You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about GPRMax simulation setup.
         
-        return {
-            "status": "incomplete",
-            "missing_params": missing_msg,
-            "user_message": user_message
-        }
+        Extract the following information:
+        - Number of layers and their properties (thickness_m, sand_pct, silt_pct, clay_pct, theta_v, bulk_density_gcm3, particle_density_gcm3, organic_fraction, salinity_class, porewater_sigma_Sm, name)
+        - Waveform properties (kind, amplitude, center_freq_hz, name)
+        - Antenna properties (kind, axis, tx_rx_offset_m)
+        - Model properties (model, title, source_height_m, domain_x, domain_y, cells_per_wavelength, max_cell_m, temperature_c, enforce_validity)
+        
+        Return ONLY the parameters that are explicitly mentioned. Do not make up any parameters. Strictly leave the fields as None if not mentioned."""
+    
+    response = openai_client.responses.create(
+    model=openai_model,
+    input=f"{system_prompt} \n\n User query: {initial_input}",
+        )
+    result = response.output.model_dump() if response.output else None
+    logger.info("[TOOL RESULT] extraction_agent - Parameter extraction completed")
+    logger.debug(f"[TOOL RESULT] extraction_agent - Extracted parameters: {json.dumps(result, indent=2, default=str)}")
+    return result
 
 
-async def run_interactive_workflow(initial_input: str, get_user_input_func=None):
+async def central_agent(initial_input: str):
     """
     Interactive workflow that loops until all inputs are complete.
     
@@ -503,68 +392,47 @@ async def run_interactive_workflow(initial_input: str, get_user_input_func=None)
     Returns:
         dict with workflow result
     """
-    user_responses = []
-    max_iterations = 10  # Prevent infinite loops
+    central_agent = Agent(
+        name="Central Agent",
+        system_prompt="""You are a agent that coordinates the workflows.
+
+        You will be given a user query and you will need to extract the parameters from the user query
+        You will then need to check if the parameters are complete and valid.
+        If the parameters are complete and valid, you will need to generate the gprmax input file using the generate_gprmax_input_file_tool.
+        If the parameters are not complete or valid, you will need to ask the user for the missing or incorrect parameters. 
+        Repeat the process until the parameters are complete and valid and then generate the gprmax input file using the generate_gprmax_input_file_tool.
+
+
+        """,
+        model=openai_model,
+        tools=[generate_gprmax_input_file_tool,check_input_completeness,validate_gpr_parameters,extraction_agent],
+    )
     
-    for iteration in range(max_iterations):
-        result = await run_extraction_workflow(initial_input, user_responses if user_responses else None)
-        
-        if result["status"] == "complete":
-            print("All parameters complete!")
-            print(result["output"])
-            return result
-        elif result["status"] == "incomplete":
-            print(f"\nMissing parameters (iteration {iteration + 1}):")
-            print(result["user_message"])
-            
-            # If we have a function to get user input, continue the loop
-            if get_user_input_func:
-                try:
-                    user_response = get_user_input_func(result["user_message"])
-                    if user_response:
-                        user_responses.append(user_response)
-                        continue
-                except Exception as e:
-                    print(f"Error getting user input: {e}")
-            
-            # Otherwise, return the missing params message
-            return result
-        elif result["status"] == "validation_error":
-            print(f"\nValidation error (iteration {iteration + 1}):")
-            print(result.get("user_message", result.get("validation_message", "Unknown validation error")))
-            
-            # If we have a function to get user input, continue the loop to allow corrections
-            if get_user_input_func:
-                try:
-                    user_response = get_user_input_func(result.get("user_message", "Please correct the validation errors above."))
-                    if user_response:
-                        user_responses.append(user_response)
-                        continue
-                except Exception as e:
-                    print(f"Error getting user input: {e}")
-            
-            # Otherwise, return the validation error message
-            return result
-        elif result["status"] == "error":
-            print(f"Error: {result['error']}")
-            return result
+    try:
+        central_agent_result = await central_agent.run(initial_input)
+        return central_agent_result
+    except Exception as e:
+        logger.error(f"[CENTRAL AGENT] Error during workflow execution: {str(e)}", exc_info=True)
+        raise 
     
-    print("✗ Maximum iterations reached. Please try again with more complete input.")
-    return {"status": "max_iterations_reached"}
 
 
 if __name__ == "__main__":
   async def main():
     try:
       inp = """
-I want to simulate a model with 2 layers.
+title=my_simulation,
+enforce_validity=True,
+We need to create a simulation. Create a 3 layer simulation with each layer with following config
+* thickness=0.4 , sand percentage=60, silt percentage= 30, clay percentage= 10, moisture content= 0.10, bulk density= 1.3, particle_density=2.65, salinity class=fresh, name=l1
+* thickness=0.6 , sand percentage=35, silt percentage= 40, clay percentage= 25, moisture content= 0.18, bulk density= 1.5, particle_density=2.65, salinity class=brackish, name=l2
+* thickness=1.0 , sand percentage=20, silt percentage= 40, clay percentage= 40, moisture content= 0.25, bulk density= 1.6, organic fraction=0.2 ,particle_density=2.65, name=l3
+
+Waveform= Ricker with 1.0 amplitude, 1.5e9 center frequency and name of my_ricker,Antenna= hertzian_dipole with axis as z and tx_rx_offset of 0.08
+source_height=0.07,domain_xy= 0.8 and 0.4,cells per wavelength= 15,max cells= 0.003,temperature = 20.0,model= mironov
       """
-      result = await run_interactive_workflow(inp)
-      
-      if result.get("status") == "complete":
-        with open("output.json", "w") as f:
-          json.dump(result["data"], f, indent=2)
-        print("\n Output saved to output.json")
+      result = await central_agent(inp)
+      print(result.output)
     except Exception as e:
       print(f"Error: {e}")
       import traceback
