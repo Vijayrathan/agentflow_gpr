@@ -1,10 +1,10 @@
-# GPRMax Input File Generator - Chatbot UI
+# gprMax Input File Generator - Chatbot UI
 
-An intelligent chatbot interface for generating GPRMax input files through natural conversation. The system guides users through providing all necessary parameters until a complete input file is generated.
+An intelligent chatbot interface for generating gprMax input files through natural conversation. The system guides users through providing all necessary parameters until a complete input file is generated.
 
 ## Features
 
-- 🤖 **Intelligent Conversation**: Natural language interface for describing GPRMax simulations
+- 🤖 **Intelligent Conversation**: Natural language interface for describing gprMax simulations
 - 🎨 **Modern Dark Theme UI**: Beautiful, intuitive React-based chatbot interface
 - 🔄 **Iterative Workflow**: System asks for missing parameters until complete
 - ✅ **Validation**: Automatic parameter validation before file generation
@@ -27,16 +27,19 @@ An intelligent chatbot interface for generating GPRMax input files through natur
 ### Backend Setup
 
 1. Install Python dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
 2. Create a `.env` file in the root directory:
+
 ```
 HF_TOKEN=your_huggingface_token_here
 ```
 
 3. Start the Flask backend server:
+
 ```bash
 python app.py
 ```
@@ -46,16 +49,19 @@ The backend will run on `http://localhost:5002`
 ### Frontend Setup
 
 1. Navigate to the frontend directory:
+
 ```bash
 cd frontend
 ```
 
 2. Install dependencies:
+
 ```bash
 npm install
 ```
 
 3. Start the React development server:
+
 ```bash
 npm start
 ```
@@ -66,7 +72,7 @@ The frontend will run on `http://localhost:8004` and automatically proxy API req
 
 1. Start both the backend and frontend servers
 2. Open `http://localhost:8004` in your browser
-3. Start a conversation by describing your GPRMax simulation
+3. Start a conversation by describing your gprMax simulation
 4. The chatbot will guide you through providing all necessary parameters
 5. Once complete, the input file will be generated as `generated.in`
 
@@ -75,10 +81,11 @@ The frontend will run on `http://localhost:8004` and automatically proxy API req
 **User**: "I want to simulate a model with 2 layers."
 
 **Bot**: "The following parameters are missing or incomplete:
+
 - model (dielectric model: 'crim', 'peplinski', 'dobson', or 'mironov')
 - title (simulation title)
 - source_height_m (source height in meters)
-..."
+  ..."
 
 **User**: "Use mironov model, title is '2-layer test', source height 0.07m, domain 0.8m x 0.4m..."
 
@@ -98,7 +105,7 @@ The frontend will run on `http://localhost:8004` and automatically proxy API req
 intelligent_gpr/
 ├── app.py                 # Flask backend server
 ├── generator_agent.py     # Main workflow and agent logic
-├── physics_modelling.py   # GPRMax file generation
+├── physics_modelling.py   # gprMax file generation
 ├── requirements.txt       # Python dependencies
 ├── frontend/              # React frontend
 │   ├── src/
@@ -115,4 +122,3 @@ intelligent_gpr/
 - Each session tracks the initial input and subsequent user responses
 - The workflow continues until all parameters are provided and validated
 - Generated files are saved in the project root directory
-

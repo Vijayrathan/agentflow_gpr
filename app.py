@@ -85,7 +85,7 @@ def chat():
         
         # Call the agent with the current message
         # The agent orchestrates everything internally
-        agent_result = loop.run_until_complete(
+        agent_result, thought_process = loop.run_until_complete(
             central_agent(conversation_context)
         )
         
@@ -141,12 +141,27 @@ def chat():
         if 'successfully generated' in response_content.lower() or 'generated' in response_content.lower():
             status = 'complete'
         
+        # Serialize thought process for JSON response
+        serialized_thought_process = []
+        for step in thought_process:
+            serialized_step = {}
+            for key, value in step.items():
+                try:
+                    # Try to serialize the value
+                    json.dumps(value)
+                    serialized_step[key] = value
+                except (TypeError, ValueError):
+                    # If it can't be serialized, convert to string
+                    serialized_step[key] = str(value)
+            serialized_thought_process.append(serialized_step)
+        
         # Return response in format expected by frontend
         return jsonify({
             'message': response_content,  # Frontend expects 'message' field
             'status': status,
             'output': response_content,  # Keep for backward compatibility
-            'data': result_dict.get('data') if isinstance(result_dict, dict) else None
+            'data': result_dict.get('data') if isinstance(result_dict, dict) else None,
+            'thought_process': serialized_thought_process  # Add thought process
         })
             
     except Exception as e:
@@ -175,7 +190,7 @@ def reset():
 def root():
     """Root endpoint - redirect to frontend"""
     return jsonify({
-        'message': 'GPRMax Chatbot API',
+        'message': 'gprMax Chatbot API',
         'status': 'running',
         'frontend': 'http://localhost:3000',
         'endpoints': {

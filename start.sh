@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Start script for GPRMax Chatbot
+# Start script for gprMax Chatbot
 # This script starts both the Flask backend and React frontend
 
-echo "🚀 Starting GPRMax Chatbot..."
+echo "🚀 Starting gprMax Chatbot..."
 
 # Check if .env file exists
 if [ ! -f .env ]; then

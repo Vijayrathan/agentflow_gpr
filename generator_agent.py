@@ -34,8 +34,8 @@ openai_client = openai.OpenAI(api_key=openai_api_key)
 
 
 def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
-    """Generate GPRMax input file from complete GprSchema"""
-    logger.info(f"[TOOL CALL] generate_gprmax_input_file_tool - Generating GPRMax input file for: {gpr_data.title}")
+    """Generate gprMax input file from complete GprSchema"""
+    logger.info(f"[TOOL CALL] generate_gprmax_input_file_tool - Generating gprMax input file for: {gpr_data.title}")
     # Convert GprSchema to the format expected by generate_gprmax_input_file
     
     layer_thicknesses_m = [layer.thickness_m for layer in gpr_data.layers]
@@ -79,7 +79,7 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
         model=gpr_data.model,
         enforce_validity=gpr_data.enforce_validity,
     )
-    result_msg = f"Successfully generated GPRMax input file for: {gpr_data.title} \n\n {text}"
+    result_msg = f"Successfully generated gprMax input file for: {gpr_data.title} \n\n {text}"
     logger.info(f"[TOOL RESULT] generate_gprmax_input_file_tool - {result_msg}")
     return result_msg
 
@@ -204,7 +204,7 @@ def format_missing_params_message(missing_params: str) -> str:
 
 {missing_params}
 
-Ask the user to provide all the missing information to proceed with generating the GPRMax input file."""
+Ask the user to provide all the missing information to proceed with generating the gprMax input file."""
 
 
 def format_validation_errors_message(validation_errors: list[str]) -> str:
@@ -347,7 +347,7 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
 
 async def extraction_agent(initial_input: str, user_responses: Optional[List[str]] = None):
     """
-    Run the workflow to extract parameters and generate GPRMax input file.
+    Run the workflow to extract parameters and generate gprMax input file.
     
     Args:
         initial_input: Initial user query
@@ -360,7 +360,7 @@ async def extraction_agent(initial_input: str, user_responses: Optional[List[str
     """
     logger.info("[TOOL CALL] extraction_agent - Extracting parameters from user input")
     logger.debug(f"[TOOL CALL] extraction_agent - Input: {initial_input[:200]}..." if len(initial_input) > 200 else f"[TOOL CALL] extraction_agent - Input: {initial_input}")
-    system_prompt="""You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about GPRMax simulation setup.
+    system_prompt="""You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about gprMax simulation setup.
         
         Extract the following information:
         - Number of layers and their properties (thickness_m, sand_pct, silt_pct, clay_pct, theta_v, bulk_density_gcm3, particle_density_gcm3, organic_fraction, salinity_class, porewater_sigma_Sm, name)
@@ -390,7 +390,7 @@ async def central_agent(initial_input: str):
                             Should be a callable that takes a prompt string and returns user input string.
     
     Returns:
-        dict with workflow result
+        AgentRunResult with thought_process attribute containing structured thought process data
     """
     central_agent = Agent(
         name="Central Agent",
@@ -409,8 +409,138 @@ async def central_agent(initial_input: str):
     )
     
     try:
+        # Track thought process steps
+        thought_process = []
+        
+        # Run the agent and capture the result
         central_agent_result = await central_agent.run(initial_input)
-        return central_agent_result
+        
+        # Extract thought process from messages
+        # Try all_messages first, then fallback to new_messages
+        messages_to_process = []
+        if hasattr(central_agent_result, 'all_messages'):
+            all_messages = central_agent_result.all_messages
+            # Check if it's a method (callable) or a property
+            if callable(all_messages):
+                try:
+                    messages_to_process = all_messages()
+                except:
+                    pass
+            elif all_messages:
+                messages_to_process = all_messages
+        
+        if not messages_to_process and hasattr(central_agent_result, 'new_messages'):
+            new_messages = central_agent_result.new_messages
+            # Check if it's a method (callable) or a property
+            if callable(new_messages):
+                try:
+                    messages_to_process = new_messages()
+                except:
+                    pass
+            elif new_messages:
+                messages_to_process = new_messages
+        
+        for msg in messages_to_process:
+            msg_type = type(msg).__name__
+            
+            # Debug: log message structure to understand tool call format
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                logger.debug(f"Found tool_calls in message type {msg_type}: {len(msg.tool_calls)} tool calls")
+                if msg.tool_calls:
+                    logger.debug(f"First tool_call type: {type(msg.tool_calls[0])}, dir: {[x for x in dir(msg.tool_calls[0]) if not x.startswith('_')]}")
+            
+            # Extract message content
+            if hasattr(msg, 'content') and msg.content:
+                content = str(msg.content)
+                role = getattr(msg, 'role', 'unknown')
+                # Only add assistant/user messages, skip system messages
+                if role in ['assistant', 'user']:
+                    step = {
+                        'type': 'message',
+                        'role': role,
+                        'content': content
+                    }
+                    thought_process.append(step)
+            
+            # Extract tool calls
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tool_call in msg.tool_calls:
+                    # Try multiple ways to get tool name
+                    tool_name = 'unknown'
+                    try:
+                        # First, try direct attributes
+                        if hasattr(tool_call, 'name'):
+                            tool_name = str(tool_call.name)
+                        elif hasattr(tool_call, 'tool_name'):
+                            tool_name = str(tool_call.tool_name)
+                        elif hasattr(tool_call, 'function'):
+                            # Some formats have function.name
+                            func = tool_call.function
+                            if hasattr(func, 'name'):
+                                tool_name = str(func.name)
+                        elif isinstance(tool_call, dict):
+                            tool_name = str(tool_call.get('name', tool_call.get('tool_name', 'unknown')))
+                        else:
+                            # Try to get all attributes and look for name-like ones
+                            attrs = [attr for attr in dir(tool_call) if not attr.startswith('_')]
+                            logger.debug(f"Tool call attributes: {attrs}")
+                            # Try common attribute names
+                            for attr_name in ['name', 'tool_name', 'function_name', 'tool']:
+                                if hasattr(tool_call, attr_name):
+                                    attr_value = getattr(tool_call, attr_name)
+                                    if attr_value:
+                                        tool_name = str(attr_value)
+                                        break
+                    except Exception as e:
+                        logger.debug(f"Error extracting tool name: {e}, tool_call type: {type(tool_call)}")
+                    
+                    # Try multiple ways to get tool arguments
+                    tool_args = {}
+                    try:
+                        if hasattr(tool_call, 'args'):
+                            tool_args = tool_call.args
+                        elif hasattr(tool_call, 'arguments'):
+                            tool_args = tool_call.arguments
+                        elif hasattr(tool_call, 'function'):
+                            # Some formats have function.arguments
+                            func = tool_call.function
+                            if hasattr(func, 'arguments'):
+                                if isinstance(func.arguments, str):
+                                    try:
+                                        tool_args = json.loads(func.arguments)
+                                    except:
+                                        tool_args = {}
+                                else:
+                                    tool_args = func.arguments
+                        elif isinstance(tool_call, dict):
+                            tool_args = tool_call.get('args', tool_call.get('arguments', {}))
+                    except Exception as e:
+                        logger.debug(f"Error extracting tool args: {e}")
+                    
+                    step = {
+                        'type': 'tool_call',
+                        'tool_name': tool_name,
+                        'args': tool_args
+                    }
+                    thought_process.append(step)
+            
+            # Extract tool results
+            if hasattr(msg, 'tool_result') and msg.tool_result:
+                tool_result = msg.tool_result
+                step = {
+                    'type': 'tool_result',
+                    'result': str(tool_result)
+                }
+                thought_process.append(step)
+        
+        # Attach thought process to result
+        if hasattr(central_agent_result, '__dict__'):
+            central_agent_result.thought_process = thought_process
+        else:
+            # If it's a dataclass, we'll handle it in app.py
+            pass
+        
+        return central_agent_result, thought_process
     except Exception as e:
         logger.error(f"[CENTRAL AGENT] Error during workflow execution: {str(e)}", exc_info=True)
         raise 
@@ -431,7 +561,7 @@ We need to create a simulation. Create a 3 layer simulation with each layer with
 Waveform= Ricker with 1.0 amplitude, 1.5e9 center frequency and name of my_ricker,Antenna= hertzian_dipole with axis as z and tx_rx_offset of 0.08
 source_height=0.07,domain_xy= 0.8 and 0.4,cells per wavelength= 15,max cells= 0.003,temperature = 20.0,model= mironov
       """
-      result = await central_agent(inp)
+      result, thought_process = await central_agent(inp)
       print(result.output)
     except Exception as e:
       print(f"Error: {e}")

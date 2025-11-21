@@ -9,6 +9,7 @@ function App() {
     () => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
   );
   const [generatedFile, setGeneratedFile] = useState(null);
+  const [expandedThoughts, setExpandedThoughts] = useState(new Set());
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -26,7 +27,7 @@ function App() {
       {
         role: "assistant",
         content:
-          "Welcome! I'm here to help you generate GPRMax input files. Tell me about the simulation you want to create, and I'll guide you through the process.\n\nYou can describe your model, layers, waveform, antenna, and other parameters. I'll ask for any missing information until we have everything needed to generate the input file.",
+          "Welcome! I'm here to help you generate gprMax input files. Tell me about the simulation you want to create, and I'll guide you through the process.\n\nYou can describe your model, layers, waveform, antenna, and other parameters. I'll ask for any missing information until we have everything needed to generate the input file.",
       },
     ]);
   }, []);
@@ -79,6 +80,7 @@ function App() {
           role: "assistant",
           content: data.message || "Response received",
           status: data.status,
+          thought_process: data.thought_process || [],
         };
         setMessages((prev) => [...prev, assistantMessage]);
 
@@ -153,7 +155,7 @@ function App() {
         {
           role: "assistant",
           content:
-            "Conversation reset. How can I help you create a new GPRMax simulation?",
+            "Conversation reset. How can I help you create a new gprMax simulation?",
         },
       ]);
       setGeneratedFile(null);
@@ -175,12 +177,33 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const toggleThoughtProcess = (messageIndex) => {
+    setExpandedThoughts((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(messageIndex)) {
+        newSet.delete(messageIndex);
+      } else {
+        newSet.add(messageIndex);
+      }
+      return newSet;
+    });
+  };
+
+  const formatToolArgs = (args) => {
+    if (!args || typeof args !== "object") return "";
+    try {
+      return JSON.stringify(args, null, 2);
+    } catch {
+      return String(args);
+    }
+  };
+
   return (
     <div className="app">
       <div className="chat-container">
         <div className="chat-header">
           <div className="header-content">
-            <h1>GPRMax Generator</h1>
+            <h1>gprMax Generator</h1>
             <p>Intelligent Input File Creation</p>
           </div>
           <button
@@ -207,6 +230,66 @@ function App() {
                 {msg.status === "error" && (
                   <div className="status-badge error">Error</div>
                 )}
+                {msg.thought_process && msg.thought_process.length > 0 && (
+                  <div className="thought-process-container">
+                    <button
+                      className="thought-process-toggle"
+                      onClick={() => toggleThoughtProcess(idx)}
+                    >
+                      <span className="thought-process-icon">
+                        {expandedThoughts.has(idx) ? "▼" : "▶"}
+                      </span>
+                      <span>Thinking</span>
+                    </button>
+                    {expandedThoughts.has(idx) && (
+                      <div className="thought-process-content">
+                        {msg.thought_process.map((step, stepIdx) => (
+                          <div key={stepIdx} className="thought-step">
+                            {step.type === "message" && (
+                              <div className="thought-message">
+                                <span className="thought-label">
+                                  {step.role === "assistant"
+                                    ? "Assistant"
+                                    : "User"}
+                                  :
+                                </span>
+                                <div className="thought-text">
+                                  {step.content}
+                                </div>
+                              </div>
+                            )}
+                            {step.type === "tool_call" && (
+                              <div className="thought-tool-call">
+                                <span className="thought-label">
+                                  🔧 Tool Call:
+                                </span>
+                                <div className="thought-tool-name">
+                                  {step.tool_name}
+                                </div>
+                                {step.args &&
+                                  Object.keys(step.args).length > 0 && (
+                                    <pre className="thought-tool-args">
+                                      {formatToolArgs(step.args)}
+                                    </pre>
+                                  )}
+                              </div>
+                            )}
+                            {step.type === "tool_result" && (
+                              <div className="thought-tool-result">
+                                <span className="thought-label">
+                                  📊 Tool Result:
+                                </span>
+                                <div className="thought-text">
+                                  {step.result}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -224,10 +307,13 @@ function App() {
           {loading && (
             <div className="message assistant">
               <div className="message-content">
-                <div className="typing-indicator">
-                  <span></span>
-                  <span></span>
-                  <span></span>
+                <div className="thinking-indicator">
+                  <span className="thinking-dots">
+                    <span>.</span>
+                    <span>.</span>
+                    <span>.</span>
+                  </span>
+                  <span className="thinking-text">Thinking</span>
                 </div>
               </div>
             </div>
