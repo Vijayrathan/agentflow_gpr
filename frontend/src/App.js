@@ -10,6 +10,8 @@ function App() {
   );
   const [generatedFile, setGeneratedFile] = useState(null);
   const [expandedThoughts, setExpandedThoughts] = useState(new Set());
+  const [simulationLoading, setSimulationLoading] = useState(false);
+  const [simulationResult, setSimulationResult] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -19,6 +21,49 @@ function App() {
 
   useEffect(() => {
     scrollToBottom();
+  }, [messages, generatedFile]);
+
+  // Set generatedFile from messages if it contains a file but generatedFile is not set
+  useEffect(() => {
+    // Look for a message with file content, starting from the most recent
+    const fileMessage = [...messages]
+      .reverse()
+      .find(
+        (msg) =>
+          msg.role === "assistant" &&
+          (msg.file_content ||
+            msg.generated_file_path ||
+            (msg.content && parseInputParametersBlock(msg.content)))
+      );
+
+    if (fileMessage) {
+      const parsed = parseInputParametersBlock(fileMessage.content);
+      if (parsed && parsed.code) {
+        const newFile = {
+          content: parsed.code,
+          filename: fileMessage.generated_file_path
+            ? fileMessage.generated_file_path.split("/").pop()
+            : "generated.in",
+          file_path: fileMessage.generated_file_path,
+        };
+        // Only update if it's different to avoid infinite loops
+        if (!generatedFile || generatedFile.content !== newFile.content) {
+          setGeneratedFile(newFile);
+        }
+      } else if (fileMessage.file_content) {
+        const newFile = {
+          content: fileMessage.file_content,
+          filename: fileMessage.generated_file_path
+            ? fileMessage.generated_file_path.split("/").pop()
+            : "generated.in",
+          file_path: fileMessage.generated_file_path,
+        };
+        // Only update if it's different to avoid infinite loops
+        if (!generatedFile || generatedFile.content !== newFile.content) {
+          setGeneratedFile(newFile);
+        }
+      }
+    }
   }, [messages, generatedFile]);
 
   useEffect(() => {
@@ -81,24 +126,81 @@ function App() {
           content: data.message || "Response received",
           status: data.status,
           thought_process: data.thought_process || [],
+          generated_file_path: data.generated_file_path,
+          file_content: data.file_content,
         };
         setMessages((prev) => [...prev, assistantMessage]);
 
-        // If complete, fetch the generated file
+        // If complete, set the generated file from response or fetch it
         if (data.status === "complete") {
-          fetch("/api/file")
-            .then((res) => res.json())
-            .then((fileData) => {
-              if (fileData.content) {
-                setGeneratedFile({
-                  content: fileData.content,
-                  filename: fileData.filename || "generated.in",
-                });
-              }
-            })
-            .catch((err) => {
-              console.error("Error fetching file:", err);
+          // Try to extract file content from the message if not in data
+          const parsed = parseInputParametersBlock(data.message || "");
+          const fileContent =
+            data.file_content || (parsed && parsed.code) || null;
+
+          if (fileContent) {
+            setGeneratedFile({
+              content: fileContent,
+              filename: data.generated_file_path
+                ? data.generated_file_path.split("/").pop()
+                : "generated.in",
+              file_path: data.generated_file_path,
             });
+          } else if (data.generated_file_path) {
+            // Fallback: fetch the file if content not in response
+            fetch("/api/file")
+              .then((res) => res.json())
+              .then((fileData) => {
+                if (fileData.content) {
+                  setGeneratedFile({
+                    content: fileData.content,
+                    filename: fileData.filename || "generated.in",
+                    file_path: data.generated_file_path,
+                  });
+                }
+              })
+              .catch((err) => {
+                console.error("Error fetching file:", err);
+              });
+          } else if (parsed && parsed.code) {
+            // If we parsed file from message but no file_path, still set the file
+            setGeneratedFile({
+              content: parsed.code,
+              filename: "generated.in",
+              file_path: null, // Will try to find from messages
+            });
+          }
+
+          // Add a follow-up message asking if user wants to simulate
+          // Only add if we haven't already shown simulation prompt and file was generated
+          if (data.generated_file_path) {
+            // Use a small delay to ensure the file display is rendered first
+            setTimeout(() => {
+              setMessages((prev) => {
+                // Check if we already have a simulation prompt message
+                const hasSimulationPrompt = prev.some(
+                  (msg) =>
+                    msg.role === "assistant" &&
+                    msg.content &&
+                    (msg.content.includes("Would you like to run") ||
+                      msg.content.includes("Run Simulation"))
+                );
+
+                if (!hasSimulationPrompt) {
+                  return [
+                    ...prev,
+                    {
+                      role: "assistant",
+                      content:
+                        "The input file has been generated successfully! Would you like to run the simulation? Click the 'Run Simulation' button below the file to start.",
+                      status: "complete",
+                    },
+                  ];
+                }
+                return prev;
+              });
+            }, 200);
+          }
         }
       } else {
         setMessages((prev) => [
@@ -159,8 +261,86 @@ function App() {
         },
       ]);
       setGeneratedFile(null);
+      setSimulationResult(null);
     } catch (error) {
       console.error("Error resetting conversation:", error);
+    }
+  };
+
+  const runSimulation = async (filePath) => {
+    if (!filePath) {
+      console.error("No file path provided for simulation");
+      return;
+    }
+
+    setSimulationLoading(true);
+    setSimulationResult(null);
+
+    try {
+      const response = await fetch("/api/simulate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          file_path: filePath,
+          session_id: sessionId,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setSimulationResult({
+          status: "success",
+          message: data.message || "Simulation completed successfully",
+          result: data.result || "",
+        });
+        // Add simulation result as a message
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `Simulation completed successfully!\n\n${
+              data.result || data.message
+            }`,
+            status: "complete",
+          },
+        ]);
+      } else {
+        setSimulationResult({
+          status: "error",
+          message: data.message || data.error || "Simulation failed",
+          error: data.error || "",
+        });
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `Simulation failed: ${
+              data.message || data.error || "Unknown error"
+            }`,
+            status: "error",
+          },
+        ]);
+      }
+    } catch (error) {
+      const errorMessage = error.message || "Network error";
+      setSimulationResult({
+        status: "error",
+        message: errorMessage,
+        error: errorMessage,
+      });
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `Simulation error: ${errorMessage}`,
+          status: "error",
+        },
+      ]);
+    } finally {
+      setSimulationLoading(false);
     }
   };
 
@@ -187,6 +367,41 @@ function App() {
       }
       return newSet;
     });
+  };
+
+  const downloadContentAsFile = (content, filename = "generated.in") => {
+    if (!content) return;
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const parseInputParametersBlock = (text) => {
+    if (!text) return null;
+
+    const markerLower = "input parameters file:";
+    const lower = text.toLowerCase();
+    const markerIndex = lower.indexOf(markerLower);
+    if (markerIndex === -1) return null;
+
+    // Look for fenced code block after the marker
+    const firstFence = text.indexOf("```", markerIndex);
+    if (firstFence === -1) return null;
+    const secondFence = text.indexOf("```", firstFence + 3);
+    if (secondFence === -1) return null;
+
+    const before = text.slice(0, markerIndex).trim();
+    const header = text.slice(markerIndex, firstFence).trimEnd();
+    const code = text.slice(firstFence + 3, secondFence).trim();
+    const after = text.slice(secondFence + 3).trim();
+
+    return { before, header, code, after };
   };
 
   const formatToolArgs = (args) => {
@@ -220,12 +435,93 @@ function App() {
             <div key={idx} className={`message ${msg.role}`}>
               <div className="message-content">
                 <div className="message-text">
-                  {msg.content.split("\n").map((line, i) => (
-                    <React.Fragment key={i}>
-                      {line}
-                      {i < msg.content.split("\n").length - 1 && <br />}
-                    </React.Fragment>
-                  ))}
+                  {(() => {
+                    const parsed =
+                      msg.role === "assistant"
+                        ? parseInputParametersBlock(msg.content)
+                        : null;
+
+                    if (!parsed) {
+                      return msg.content.split("\n").map((line, i, arr) => (
+                        <React.Fragment key={i}>
+                          {line}
+                          {i < arr.length - 1 && <br />}
+                        </React.Fragment>
+                      ));
+                    }
+
+                    return (
+                      <>
+                        {parsed.before && (
+                          <div className="message-prefix">
+                            {parsed.before.split("\n").map((line, i, arr) => (
+                              <React.Fragment key={i}>
+                                {line}
+                                {i < arr.length - 1 && <br />}
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        )}
+                        <div className="input-file-block">
+                          <div className="input-file-header">
+                            <span>{parsed.header}</span>
+                            <div className="file-actions">
+                              <button
+                                className="download-button"
+                                onClick={() =>
+                                  downloadContentAsFile(
+                                    parsed.code,
+                                    "generated_from_chat.in"
+                                  )
+                                }
+                              >
+                                Download
+                              </button>
+                              {!simulationResult && (
+                                <button
+                                  className="simulate-button"
+                                  onClick={() => {
+                                    // Get file path from the message or find it in messages
+                                    const filePath =
+                                      msg.generated_file_path ||
+                                      messages.find(
+                                        (m) => m.generated_file_path
+                                      )?.generated_file_path;
+
+                                    if (filePath) {
+                                      runSimulation(filePath);
+                                    } else {
+                                      alert(
+                                        "File path not available. The file needs to be regenerated to run simulation."
+                                      );
+                                    }
+                                  }}
+                                  disabled={simulationLoading}
+                                >
+                                  {simulationLoading ? (
+                                    <span className="spinner-small"></span>
+                                  ) : (
+                                    "Run Simulation"
+                                  )}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <pre className="file-content">{parsed.code}</pre>
+                        </div>
+                        {parsed.after && (
+                          <div className="message-suffix">
+                            {parsed.after.split("\n").map((line, i, arr) => (
+                              <React.Fragment key={i}>
+                                {line}
+                                {i < arr.length - 1 && <br />}
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 {msg.status === "error" && (
                   <div className="status-badge error">Error</div>
@@ -297,11 +593,41 @@ function App() {
             <div className="file-display">
               <div className="file-header">
                 <span className="file-name">{generatedFile.filename}</span>
-                <button className="download-button" onClick={downloadFile}>
-                  Download
-                </button>
+                <div className="file-actions">
+                  <button className="download-button" onClick={downloadFile}>
+                    Download
+                  </button>
+                </div>
               </div>
               <pre className="file-content">{generatedFile.content}</pre>
+              {simulationLoading && (
+                <div className="simulation-loading">
+                  <span className="thinking-dots">
+                    <span>.</span>
+                    <span>.</span>
+                    <span>.</span>
+                  </span>
+                  <span>Running simulation...</span>
+                </div>
+              )}
+              {simulationResult && (
+                <div className={`simulation-result ${simulationResult.status}`}>
+                  <div className="simulation-result-header">
+                    <span className="simulation-status">
+                      {simulationResult.status === "success" ? "✓" : "✗"}{" "}
+                      Simulation{" "}
+                      {simulationResult.status === "success"
+                        ? "Completed"
+                        : "Failed"}
+                    </span>
+                  </div>
+                  <div className="simulation-result-content">
+                    <pre>
+                      {simulationResult.result || simulationResult.message}
+                    </pre>
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {loading && (

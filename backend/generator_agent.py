@@ -12,6 +12,7 @@ import logging
 import huggingface_hub
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 from schema import GprSchema, WaveformSchema, AntennaSchema, LayerSchema, ExtractedParameters
 
@@ -33,6 +34,27 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 openai_model = "gpt-4.1"
 
 openai_client = openai.OpenAI(api_key=openai_api_key)
+
+def get_workspace_directory() -> Path:
+    """
+    Get the workspace directory outside Flask's working directory.
+    This prevents file changes from triggering Flask's hot reload.
+    
+    Returns:
+        Path: Absolute path to the workspace directory
+    """
+    # Use environment variable if set, otherwise use /tmp or a directory outside project
+    workspace_base = os.getenv("GPR_WORKSPACE_DIR", None)
+    
+    if workspace_base:
+        workspace_dir = Path(workspace_base)
+    else:
+        # Default to /tmp/intelligent_gpr_workspace (outside Flask working directory)
+        workspace_dir = Path("/tmp/intelligent_gpr_workspace")
+    
+    # Create directory if it doesn't exist
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    return workspace_dir
 
 def run_gprmax_simulation_tool(input_file: str) -> str:
     """
@@ -93,30 +115,40 @@ def run_gprmax_simulation_tool(input_file: str) -> str:
             logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
             return error_msg
         
-        # Clone repository if it doesn't exist
-        gprmax_dir = Path("gprMax")
+        # Get workspace directory (outside Flask working directory)
+        workspace_dir = get_workspace_directory()
+        
+        # Clone repository to workspace directory if it doesn't exist
+        gprmax_dir = workspace_dir / "gprMax"
         if not gprmax_dir.exists():
-            logger.info("Cloning gprMax repository...")
+            logger.info(f"Cloning gprMax repository to {gprmax_dir}...")
+            # Change to workspace directory for cloning
+            original_dir = os.getcwd()
             try:
-                clone_result = subprocess.run(
-                    ["git", "clone", "https://github.com/gprMax/gprMax.git"],
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minutes timeout for clone
-                )
-                if clone_result.returncode != 0:
-                    error_msg = f"Failed to clone gprMax repository: {clone_result.stderr}"
+                os.chdir(workspace_dir)
+                try:
+                    clone_result = subprocess.run(
+                        ["git", "clone", "https://github.com/gprMax/gprMax.git"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minutes timeout for clone
+                    )
+                    if clone_result.returncode != 0:
+                        error_msg = f"Failed to clone gprMax repository: {clone_result.stderr}"
+                        logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
+                        return error_msg
+                    logger.info("Successfully cloned gprMax repository")
+                except subprocess.TimeoutExpired:
+                    error_msg = "Timeout while cloning gprMax repository"
                     logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
                     return error_msg
-                logger.info("Successfully cloned gprMax repository")
-            except subprocess.TimeoutExpired:
-                error_msg = "Timeout while cloning gprMax repository"
-                logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
-                return error_msg
-            except Exception as e:
-                error_msg = f"Error cloning gprMax repository: {str(e)}"
-                logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
-                return error_msg
+                except Exception as e:
+                    error_msg = f"Error cloning gprMax repository: {str(e)}"
+                    logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
+                    return error_msg
+            finally:
+                # Always restore original directory
+                os.chdir(original_dir)
         
         # Change to gprMax directory
         original_dir = os.getcwd()
@@ -191,38 +223,111 @@ def run_gprmax_simulation_tool(input_file: str) -> str:
             os.chdir(original_dir)
             return error_msg
     
-    # Run the simulation
+    # Run the simulation with live streaming to terminal
     logger.info(f"Running gprMax simulation with input file: {input_file}")
     try:
         # Use absolute path for input file
         abs_input_file = os.path.abspath(input_file)
         
-        # Check if we need to use conda run (if we just installed it)
-        if not gprmax_installed:
-            # Run using conda environment
-            sim_result = subprocess.run(
-                ["conda", "run", "-n", "gprMax", "python", "-m", "gprMax", abs_input_file],
-                capture_output=True,
-                text=True,
-                timeout=3600  # 1 hour timeout for simulation
-            )
-        else:
-            # Run directly
-            sim_result = subprocess.run(
-                ["python", "-m", "gprMax", abs_input_file],
-                capture_output=True,
-                text=True,
-                timeout=3600  # 1 hour timeout for simulation
-            )
+        # Build the command with unbuffered Python flag
+        # Set environment variable for unbuffered output
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        env['PYTHONIOENCODING'] = 'utf-8'
         
-        if sim_result.returncode != 0:
-            error_msg = f"gprMax simulation failed:\nSTDOUT: {sim_result.stdout}\nSTDERR: {sim_result.stderr}"
+        if not gprmax_installed:
+            # Get conda python executable path to avoid conda run buffering
+            # Try to find the python in the conda environment
+            conda_python = None
+            try:
+                # Get conda python path
+                conda_info = subprocess.run(
+                    ["conda", "info", "--base"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if conda_info.returncode == 0:
+                    conda_base = conda_info.stdout.strip()
+                    conda_python = os.path.join(conda_base, "envs", "gprMax", "bin", "python")
+                    if not os.path.exists(conda_python):
+                        # Try Windows path
+                        conda_python = os.path.join(conda_base, "envs", "gprMax", "python.exe")
+                    if not os.path.exists(conda_python):
+                        conda_python = None
+            except:
+                pass
+            
+            if conda_python and os.path.exists(conda_python):
+                # Use python directly from conda env (avoids conda run buffering)
+                cmd = [conda_python, "-u", "-m", "gprMax", abs_input_file]
+            else:
+                # Fallback to conda run with -u flag
+                cmd = ["conda", "run", "-n", "gprMax", "python", "-u", "-m", "gprMax", abs_input_file]
+        else:
+            cmd = ["python", "-u", "-m", "gprMax", abs_input_file]
+        
+        # Use Popen to stream output in real-time
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Combine stderr into stdout
+            text=True,
+            bufsize=1,  # Line buffered
+            universal_newlines=True,
+            env=env
+        )
+        
+        # Capture output and stream to terminal simultaneously
+        combined_output = ""
+        print("\n" + "="*80, flush=True)
+        print("gprMax Simulation Output (Live):", flush=True)
+        print("="*80 + "\n", flush=True)
+        
+        try:
+            # Read line by line and print immediately
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    # Process has finished
+                    break
+                if output:
+                    # Print to terminal immediately (no buffering)
+                    print(output, end='', flush=True)
+                    # Also capture for return value
+                    combined_output += output
+                    # Log important lines
+                    line_lower = output.lower()
+                    if any(keyword in line_lower for keyword in ['error', 'warning', 'completed', 'failed']):
+                        logger.info(f"[GPRMAX] {output.strip()}")
+            
+            # Get return code
+            return_code = process.poll()
+            
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            error_msg = "Simulation timed out after 1 hour"
+            logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
+            print(f"\n{error_msg}\n")
+            return error_msg
+        
+        print("\n" + "="*80)
+        print("Simulation Complete")
+        print("="*80 + "\n")
+        sys.stdout.flush()
+        
+        if return_code != 0:
+            error_msg = f"gprMax simulation failed (exit code: {process.returncode})\n\n{combined_output}"
             logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
             return error_msg
         
-        success_msg = f"Successfully ran gprMax simulation with input file: {input_file}\nSTDOUT: {sim_result.stdout}"
-        logger.info(f"[TOOL RESULT] run_gprmax_simulation_tool - {success_msg}")
-        return success_msg
+        # Return the full simulation logs
+        if combined_output:
+            return combined_output
+        else:
+            # Fallback if no output captured
+            return "Simulation completed successfully, but no output was captured."
         
     except subprocess.TimeoutExpired:
         error_msg = "Simulation timed out after 1 hour"
@@ -233,8 +338,12 @@ def run_gprmax_simulation_tool(input_file: str) -> str:
         logger.error(f"[TOOL RESULT] run_gprmax_simulation_tool - {error_msg}")
         return error_msg
 
+# Global variable to store the current output filename for the tool
+_current_output_filename = None
+
 def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     """Generate gprMax input file from complete GprSchema"""
+    global _current_output_filename
     logger.info(f"[TOOL CALL] generate_gprmax_input_file_tool - Generating gprMax input file for: {gpr_data.title}")
     # Convert GprSchema to the format expected by generate_gprmax_input_file
     
@@ -249,6 +358,9 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     layer_salinity_classes = [layer.salinity_class for layer in gpr_data.layers]
     layer_porewater_sigmas_Sm = [layer.porewater_sigma_Sm for layer in gpr_data.layers]
     layer_names = [layer.name for layer in gpr_data.layers]
+    
+    # Use the global output filename if set, otherwise use default
+    output_filename = _current_output_filename if _current_output_filename else "generated.in"
     
     text = generate_gprmax_input_file(
         layer_thicknesses_m=layer_thicknesses_m,
@@ -278,6 +390,7 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
         temperature_c=gpr_data.temperature_c,
         model=gpr_data.model,
         enforce_validity=gpr_data.enforce_validity,
+        output_filename=output_filename,
     )
     result_msg = f"Successfully generated gprMax input file for: {gpr_data.title} \n\n {text}"
     logger.info(f"[TOOL RESULT] generate_gprmax_input_file_tool - {result_msg}")
@@ -580,18 +693,43 @@ async def extraction_agent(initial_input: str, user_responses: Optional[List[str
     return result
 
 
-async def central_agent(initial_input: str):
+async def central_agent(initial_input: str, user_id: Optional[str] = None):
     """
     Interactive workflow that loops until all inputs are complete.
     
     Args:
         initial_input: Initial user query
+        user_id: Optional unique user/session ID for file naming. If provided, files will be saved to generated_files/ directory.
         get_user_input_func: Optional function to get user input. If None, will return on first missing params.
                             Should be a callable that takes a prompt string and returns user input string.
     
     Returns:
-        AgentRunResult with thought_process attribute containing structured thought process data
+        tuple: (AgentRunResult with thought_process attribute, generated_file_path)
+               generated_file_path will be None if no file was generated, or the path to the generated file
     """
+    global _current_output_filename
+    
+    # Set up output filename if user_id is provided
+    output_file_path = None
+    if user_id:
+        # Get workspace directory (outside Flask working directory)
+        workspace_dir = get_workspace_directory()
+        
+        # Create generated_files directory in workspace if it doesn't exist
+        generated_files_dir = workspace_dir / "generated_files"
+        generated_files_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create unique filename with user_id
+        output_file_path = str(generated_files_dir / f"generated_{user_id}.in")
+        _current_output_filename = output_file_path
+        logger.info(f"[CENTRAL AGENT] Will save generated file to: {output_file_path}")
+    else:
+        # Use default filename in workspace directory
+        workspace_dir = get_workspace_directory()
+        generated_files_dir = workspace_dir / "generated_files"
+        generated_files_dir.mkdir(parents=True, exist_ok=True)
+        output_file_path = str(generated_files_dir / "generated.in")
+        _current_output_filename = output_file_path
     central_agent = Agent(
         name="Central Agent",
         system_prompt="""You are a agent that coordinates the workflows.
@@ -601,11 +739,14 @@ async def central_agent(initial_input: str):
         If the parameters are complete and valid, you will need to generate the gprmax input file using the generate_gprmax_input_file_tool.
         If the parameters are not complete or valid, you will need to ask the user for the missing or incorrect parameters. 
         Repeat the process until the parameters are complete and valid and then generate the gprmax input file using the generate_gprmax_input_file_tool.
-
-
+        The generated should be displayed to the user in the following format:
+        Input parameters file:
+        ```
+        <gprmax input file>
+        ```
         """,
         model=openai_model,
-        tools=[generate_gprmax_input_file_tool,check_input_completeness,validate_gpr_parameters,extraction_agent],
+        tools=[generate_gprmax_input_file_tool,check_input_completeness,validate_gpr_parameters,extraction_agent,run_gprmax_simulation_tool],
     )
     
     try:
@@ -740,11 +881,77 @@ async def central_agent(initial_input: str):
             # If it's a dataclass, we'll handle it in app.py
             pass
         
-        return central_agent_result, thought_process
+        # Check if file was actually generated
+        final_file_path = None
+        if output_file_path and os.path.exists(output_file_path):
+            final_file_path = output_file_path
+            logger.info(f"[CENTRAL AGENT] File successfully generated at: {final_file_path}")
+        else:
+            # Check workspace directory for default file
+            workspace_dir = get_workspace_directory()
+            default_file = workspace_dir / "generated_files" / "generated.in"
+            if os.path.exists(str(default_file)):
+                final_file_path = str(default_file)
+                logger.info(f"[CENTRAL AGENT] File found at default location: {final_file_path}")
+        
+        # Reset global filename
+        _current_output_filename = None
+        
+        return central_agent_result, thought_process, final_file_path
     except Exception as e:
         logger.error(f"[CENTRAL AGENT] Error during workflow execution: {str(e)}", exc_info=True)
+        _current_output_filename = None  # Reset on error
         raise 
+
+async def runner_agent(input_file: str) -> str:
+    """
+    Agent that runs gprMax simulation with the given input file.
     
+    Args:
+        input_file: Path to the gprMax input file (.in file)
+    
+    Returns:
+        str: Result message from the simulation (success or error message)
+    """
+    runner_agent = Agent(
+        name="Runner Agent",
+        system_prompt="""You are a simulation runner agent. Your task is to run gprMax simulations.
+
+        When given an input file path, you should call the run_gprmax_simulation_tool with that file path.
+        The tool will handle running the simulation and return the result.
+        """,
+        model=openai_model,
+        tools=[run_gprmax_simulation_tool],
+    )
+    
+    try:
+        logger.info(f"[RUNNER AGENT] Starting simulation for input file: {input_file}")
+        
+        # Create a prompt for the agent to run the simulation
+        prompt = f"Run the gprMax simulation with input file: {input_file}"
+        
+        # Run the agent and capture the result
+        runner_agent_result = await runner_agent.run(prompt)
+        
+        # Extract the output from the result
+        result_output = ""
+        if hasattr(runner_agent_result, 'output') and runner_agent_result.output:
+            result_output = str(runner_agent_result.output)
+        elif hasattr(runner_agent_result, 'messages') and runner_agent_result.messages:
+            # Get the last message from the agent
+            result_output = str(runner_agent_result.messages[-1]) if runner_agent_result.messages else ""
+        
+        # Fallback if still empty
+        if not result_output:
+            result_output = "Simulation completed, but no output message was generated."
+        
+        logger.info(f"[RUNNER AGENT] Simulation completed. Result: {result_output[:200]}...")
+        return result_output
+        
+    except Exception as e:
+        error_msg = f"Error running gprMax simulation: {str(e)}"
+        logger.error(f"[RUNNER AGENT] {error_msg}", exc_info=True)
+        return error_msg
 
 
 if __name__ == "__main__":
@@ -761,8 +968,15 @@ We need to create a simulation. Create a 3 layer simulation with each layer with
 Waveform= Ricker with 1.0 amplitude, 1.5e9 center frequency and name of my_ricker,Antenna= hertzian_dipole with axis as z and tx_rx_offset of 0.08
 source_height=0.07,domain_xy= 0.8 and 0.4,cells per wavelength= 15,max cells= 0.003,temperature = 20.0,model= mironov
       """
-      result, thought_process = await central_agent(inp)
-      print(result.output)
+      result, thought_process, file_path = await central_agent(inp, user_id="test_user")
+      if file_path:
+          print(f"File generated at: {file_path}")
+          simulation_result = await runner_agent(file_path)
+          print(f"Simulation result: {simulation_result}")
+      else:
+          print("No file was generated")
+      if hasattr(result, 'output'):
+          print(result.output)
     except Exception as e:
       print(f"Error: {e}")
       import traceback

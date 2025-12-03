@@ -1,0 +1,18 @@
+#title: conf-1.3
+#domain: 0.8 0.4 2.088
+#dx_dy_dz: 0.003 0.003 0.003
+#time_window: 5.75273e-08
+
+#material: 5.2971055 0.023463884 1 0 l1
+#material: 8.6049065 0.15277778 1 0 l2
+#material: 11.844221 0.11530961 1 0 l3
+
+#waveform: ricker 1 1.5e+09 my_ricker
+#hertzian_dipole: z 0.4 0.2 0.158 my_ricker
+#rx: 0.48 0.2 0.158
+
+#box: 0 0 0.088 0.8 0.4 0.488 l1
+#box: 0 0 0.488 0.8 0.4 1.088 l2
+#box: 0 0 1.088 0.8 0.4 2.088 l3
+
+#geometry_view: 0 0 0 0.8 0.4 2.088 0.003 0.003 0.003 model_view n
