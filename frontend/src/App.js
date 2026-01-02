@@ -233,7 +233,10 @@ function App() {
       ]);
     } finally {
       setLoading(false);
-      inputRef.current?.focus();
+      if (inputRef.current) {
+        inputRef.current.style.height = "auto";
+        inputRef.current.focus();
+      }
     }
   };
 
@@ -243,6 +246,32 @@ function App() {
       sendMessage();
     }
   };
+
+  const adjustTextareaHeight = () => {
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+      const scrollHeight = inputRef.current.scrollHeight;
+      const maxHeight = window.innerHeight * 0.4; // 40% of viewport height
+      inputRef.current.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+      inputRef.current.style.overflowY =
+        scrollHeight > maxHeight ? "auto" : "hidden";
+    }
+  };
+
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [input]);
+
+  useEffect(() => {
+    // Initial resize on mount
+    adjustTextareaHeight();
+
+    const handleResize = () => {
+      adjustTextareaHeight();
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const resetConversation = async () => {
     try {
@@ -382,6 +411,28 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const copyToClipboard = async (text, label = "Code") => {
+    try {
+      await navigator.clipboard.writeText(text);
+      // Show a temporary success message
+      const notification = document.createElement("div");
+      notification.className = "copy-notification";
+      notification.textContent = `${label} copied to clipboard!`;
+      document.body.appendChild(notification);
+      setTimeout(() => {
+        notification.classList.add("show");
+      }, 10);
+      setTimeout(() => {
+        notification.classList.remove("show");
+        setTimeout(() => {
+          document.body.removeChild(notification);
+        }, 300);
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+    }
+  };
+
   const parseInputParametersBlock = (text) => {
     if (!text) return null;
 
@@ -418,13 +469,14 @@ function App() {
       <div className="chat-container">
         <div className="chat-header">
           <div className="header-content">
-            <h1>gprMax Generator</h1>
-            <p>Intelligent Input File Creation</p>
+            <h1>Intelligent GPR Simulator</h1>
+            <p>Generate gprMax input files and simulate them.</p>
           </div>
           <button
             className="reset-button"
             onClick={resetConversation}
             title="Reset Conversation"
+            aria-label="Reset conversation and start fresh"
           >
             Reset
           </button>
@@ -467,6 +519,16 @@ function App() {
                             <span>{parsed.header}</span>
                             <div className="file-actions">
                               <button
+                                className="copy-button"
+                                onClick={() =>
+                                  copyToClipboard(parsed.code, "Code")
+                                }
+                                aria-label="Copy code to clipboard"
+                                title="Copy code"
+                              >
+                                Copy
+                              </button>
+                              <button
                                 className="download-button"
                                 onClick={() =>
                                   downloadContentAsFile(
@@ -474,6 +536,8 @@ function App() {
                                     "generated_from_chat.in"
                                   )
                                 }
+                                aria-label="Download file"
+                                title="Download file"
                               >
                                 Download
                               </button>
@@ -497,9 +561,14 @@ function App() {
                                     }
                                   }}
                                   disabled={simulationLoading}
+                                  aria-label="Run simulation"
+                                  title="Run simulation"
                                 >
                                   {simulationLoading ? (
-                                    <span className="spinner-small"></span>
+                                    <span
+                                      className="spinner-small"
+                                      aria-hidden="true"
+                                    ></span>
                                   ) : (
                                     "Run Simulation"
                                   )}
@@ -531,8 +600,14 @@ function App() {
                     <button
                       className="thought-process-toggle"
                       onClick={() => toggleThoughtProcess(idx)}
+                      aria-label={
+                        expandedThoughts.has(idx)
+                          ? "Collapse thinking process"
+                          : "Expand thinking process"
+                      }
+                      aria-expanded={expandedThoughts.has(idx)}
                     >
-                      <span className="thought-process-icon">
+                      <span className="thought-process-icon" aria-hidden="true">
                         {expandedThoughts.has(idx) ? "▼" : "▶"}
                       </span>
                       <span>Thinking</span>
@@ -594,7 +669,22 @@ function App() {
               <div className="file-header">
                 <span className="file-name">{generatedFile.filename}</span>
                 <div className="file-actions">
-                  <button className="download-button" onClick={downloadFile}>
+                  <button
+                    className="copy-button"
+                    onClick={() =>
+                      copyToClipboard(generatedFile.content, "File")
+                    }
+                    aria-label="Copy file content to clipboard"
+                    title="Copy file content"
+                  >
+                    Copy
+                  </button>
+                  <button
+                    className="download-button"
+                    onClick={downloadFile}
+                    aria-label="Download file"
+                    title="Download file"
+                  >
                     Download
                   </button>
                 </div>
@@ -652,18 +742,26 @@ function App() {
             ref={inputRef}
             className="message-input"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              adjustTextareaHeight();
+            }}
             onKeyPress={handleKeyPress}
             placeholder="Type your message... (Press Enter to send, Shift+Enter for new line)"
-            rows={1}
             disabled={loading}
+            aria-label="Message input"
           />
           <button
             className="send-button"
             onClick={sendMessage}
             disabled={loading || !input.trim()}
+            aria-label="Send message"
           >
-            {loading ? <span className="spinner"></span> : <span>Send</span>}
+            {loading ? (
+              <span className="spinner" aria-hidden="true"></span>
+            ) : (
+              <span>Send</span>
+            )}
           </button>
         </div>
       </div>

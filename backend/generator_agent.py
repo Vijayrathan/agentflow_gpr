@@ -7,9 +7,7 @@ import dotenv
 import asyncio
 import openai
 import json
-import re
 import logging
-import huggingface_hub
 import subprocess
 import shutil
 import sys
@@ -732,13 +730,14 @@ async def central_agent(initial_input: str, user_id: Optional[str] = None):
         _current_output_filename = output_file_path
     central_agent = Agent(
         name="Central Agent",
-        system_prompt="""You are a agent that coordinates the workflows.
+        system_prompt="""You are an agent that coordinates the workflows.
 
         You will be given a user query and you will need to extract the parameters from the user query
         You will then need to check if the parameters are complete and valid.
         If the parameters are complete and valid, you will need to generate the gprmax input file using the generate_gprmax_input_file_tool.
         If the parameters are not complete or valid, you will need to ask the user for the missing or incorrect parameters. 
-        Repeat the process until the parameters are complete and valid and then generate the gprmax input file using the generate_gprmax_input_file_tool.
+        Repeat the process until the parameters are complete and valid. 
+        Once the parameters are complete and valid, then generate the gprmax input file using the generate_gprmax_input_file_tool.
         The generated should be displayed to the user in the following format:
         Input parameters file:
         ```

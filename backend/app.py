@@ -19,23 +19,43 @@ conversations = {}
 def agent_result_to_dict(result):
     """Convert agent result to JSON-serializable dict"""
     try:
-        # If result has model_dump method (Pydantic model), use it
-        if hasattr(result, 'model_dump'):
-            return result.model_dump()
+        # Handle None
+        if result is None:
+            return {'output': ''}
+        
+        # If result is a list, convert to dict format
+        if isinstance(result, list):
+            return {
+                'output': str(result[-1]) if result else '',
+                'messages': [str(msg) for msg in result],
+                'data': None
+            }
+        
         # If result is a dict, return as is
-        elif isinstance(result, dict):
+        if isinstance(result, dict):
             return result
+        
+        # If result has model_dump method (Pydantic model), use it
+        # But first check it's not a list (lists can have hasattr return True for some attributes)
+        if hasattr(result, 'model_dump') and not isinstance(result, (list, dict, str)):
+            try:
+                return result.model_dump()
+            except (AttributeError, TypeError):
+                # If model_dump fails, fall through to other methods
+                pass
+        
         # If result has output attribute, extract it
-        elif hasattr(result, 'output'):
+        if hasattr(result, 'output'):
             return {
                 'output': str(result.output) if result.output is not None else '',
-                'messages': [str(msg) for msg in result.messages] if hasattr(result, 'messages') else [],
+                'messages': [str(msg) for msg in result.messages] if hasattr(result, 'messages') and result.messages else [],
                 'data': result.data if hasattr(result, 'data') else None
             }
+        
         # Otherwise, convert to string representation
-        else:
-            return {'output': str(result)}
+        return {'output': str(result)}
     except Exception as e:
+        logger.error(f"Error in agent_result_to_dict: {str(e)}", exc_info=True)
         return {'output': str(result), 'error': f'Error serializing result: {str(e)}'}
 
 @app.route('/api/chat', methods=['POST'])
@@ -140,25 +160,101 @@ def chat():
         status = 'incomplete'
         file_content = None
         
+        # Helper function to check if response contains validation errors
+        def has_validation_errors(response_text):
+            """Check if the response indicates validation errors that need to be fixed"""
+            response_lower = response_text.lower()
+            error_indicators = [
+                'must be between',
+                'must be',
+                'required',
+                'validation error',
+                'validation issues',
+                'outside these required ranges',
+                'does not resolve',
+                'still apply',
+                'please:',
+                'please ',
+                'adjust the',
+                'select a',
+                'update these values',
+                'errors still',
+                'the following errors',
+                'error:',
+                'invalid',
+                'incorrect',
+                'missing',
+                'not valid',
+                'not complete'
+            ]
+            # Check if response contains error indicators but doesn't contain success indicators
+            has_errors = any(indicator in response_lower for indicator in error_indicators)
+            has_success = any(phrase in response_lower for phrase in [
+                'successfully generated',
+                'generated successfully',
+                'input file has been generated',
+                'file has been generated'
+            ])
+            # If it has errors and no success, it's a validation error response
+            return has_errors and not has_success
+        
+        # Helper function to check if model is presenting the file
+        def is_presenting_file(response_text):
+            """Check if the model's response indicates it is presenting the input file"""
+            response_lower = response_text.lower()
+            # Check if response already contains the file format (model is presenting it)
+            if 'input parameters file:' in response_text and '```' in response_text:
+                return True
+            # Check if response indicates successful generation without errors
+            success_phrases = [
+                'successfully generated',
+                'generated successfully',
+                'input file has been generated',
+                'file has been generated',
+                'here is the generated',
+                'the generated input file',
+                'gprmax input file:'
+            ]
+            has_success = any(phrase in response_lower for phrase in success_phrases)
+            has_errors = has_validation_errors(response_text)
+            return has_success and not has_errors
+        
         # If file was generated, read it and ensure it's included in the response
+        # BUT only if the model is actually presenting it (not when there are validation errors)
         if generated_file_path and os.path.exists(generated_file_path):
             logger.info(f"File generated at {generated_file_path}")
             try:
                 with open(generated_file_path, 'r', encoding='utf-8') as f:
                     file_content = f.read()
                 
-                # Check if the response already contains the file in the expected format
-                if 'Input parameters file:' not in response_content or '```' not in response_content:
-                    # Format the response to include the file content in the expected format
-                    response_content = f"{response_content}\n\nInput parameters file:\n```\n{file_content}\n```"
+                # Only append file if:
+                # 1. Model is already presenting it (contains "Input parameters file:"), OR
+                # 2. Model indicates successful generation without validation errors
+                should_append_file = (
+                    'Input parameters file:' in response_content or 
+                    is_presenting_file(response_content)
+                )
                 
-                status = 'complete'
+                if should_append_file:
+                    # Check if the response already contains the file in the expected format
+                    if 'Input parameters file:' not in response_content or '```' not in response_content:
+                        # Format the response to include the file content in the expected format
+                        response_content = f"{response_content}\n\nInput parameters file:\n```\n{file_content}\n```"
+                        logger.info("File appended to response - model is presenting it")
+                    status = 'complete'
+                else:
+                    # File exists but model is not presenting it (likely validation errors)
+                    logger.info("File exists but not appended - response contains validation errors or doesn't indicate success")
+                    # Don't set status to complete if there are validation errors
+                    if not has_validation_errors(response_content):
+                        status = 'complete'
             except Exception as e:
                 logger.error(f"Error reading generated file: {str(e)}", exc_info=True)
         
         # Also check if response indicates completion
         if 'successfully generated' in response_content.lower() or 'generated' in response_content.lower():
-            status = 'complete'
+            if not has_validation_errors(response_content):
+                status = 'complete'
         
         # Serialize thought process for JSON response
         serialized_thought_process = []

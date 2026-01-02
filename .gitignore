@@ -39,3 +39,6 @@ output.json
 generated.in
 .env
 
+
+retrieval_docs/
+qdrant_storage/
