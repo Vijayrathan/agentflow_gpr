@@ -20,6 +20,8 @@ dependencies = [
     "FlagEmbedding>=1.2.0",
     "qdrant-client>=1.7.0",
     "python-dotenv>=1.0.0",
+    "rapidocr-onnxruntime>=1.4.4",
+    "onnxruntime-gpu>=1.23.2",
 ]
 
 [tool.setuptools.packages.find]

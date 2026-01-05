@@ -230,6 +230,9 @@ class GeophysicsRAG:
         Step 3: Hybrid Retrieval + Reranking
         Only available in inference mode.
         """
+        # --- DEBUGGING BLOCK START ---
+        print(f"\n[DEBUG] Qdrant Client Type: {type(self.qdrant)}")
+        print(f"[DEBUG] Available methods: {[m for m in dir(self.qdrant) if 'search' in m]}")
         if self.mode != "inference":
             raise ValueError("search is only available in inference mode.")
         
@@ -269,6 +272,7 @@ class GeophysicsRAG:
         
         try:
             # Dense vector search
+            # FIXED: Changed search_points to search
             dense_results = self.qdrant.search(
                 collection_name=self.collection_name,
                 query_vector=("dense", q_dense),
@@ -283,7 +287,121 @@ class GeophysicsRAG:
                     candidate_map[point_id] = result
             
             # Sparse vector search
+            # FIXED: Changed search_points to search
             sparse_results = self.qdrant.search(
+                collection_name=self.collection_name,
+                query_vector=("sparse", models.SparseVector(indices=q_sparse_indices, values=q_sparse_values)),
+                limit=20,
+                with_payload=True
+            )
+            
+            for result in sparse_results:
+                point_id = result.id if hasattr(result, 'id') else str(result)
+                candidate_ids.add(point_id)
+                if point_id not in candidate_map:
+                    candidate_map[point_id] = result
+            
+            # Combine results (simple union for now)
+            points = list(candidate_map.values())
+            
+        except Exception as e:
+            print(f"⚠️  Error during hybrid search: {e}")
+            print("Trying fallback dense search...")
+            # Fallback to simple dense search
+            # FIXED: Changed search_points to search
+            points = self.qdrant.search(
+                collection_name=self.collection_name,
+                query_vector=("dense", q_dense),
+                limit=20,
+                with_payload=True
+            )
+        
+        # Extract documents from results
+        candidate_docs = []
+        for point in points:
+            if hasattr(point, 'payload') and point.payload and 'text' in point.payload:
+                candidate_docs.append(point.payload['text'])
+            elif isinstance(point, dict) and 'payload' in point and 'text' in point['payload']:
+                candidate_docs.append(point['payload']['text'])
+        
+        if not candidate_docs:
+            print("⚠️  No candidate documents found. The query might not match any indexed content.")
+            return []
+
+        print(f"Found {len(candidate_docs)} candidate documents for reranking...")
+        
+        # 3. Reranking (The "Geophysics Judge")
+        # Rerank the top 20 candidates to find the true best matches
+        print("Reranking candidates...")
+        pairs = [[query, doc] for doc in candidate_docs]
+        scores = self.reranker.compute_score(pairs)
+        
+        # Handle both single score and list of scores
+        if not isinstance(scores, list):
+            scores = [scores]
+        
+        # Combine docs with scores and sort
+        ranked_results = sorted(zip(candidate_docs, scores), key=lambda x: x[1], reverse=True)
+        
+        return ranked_results[:top_k]
+        """
+        Step 3: Hybrid Retrieval + Reranking
+        Only available in inference mode.
+        """
+        if self.mode != "inference":
+            raise ValueError("search is only available in inference mode.")
+        
+        if self.reranker is None:
+            raise ValueError("Reranker not initialized. Use inference mode.")
+        
+        # Check if collection has any documents
+        collection_info = self.qdrant.get_collection(self.collection_name)
+        if collection_info.points_count == 0:
+            print(f"⚠️  Warning: Collection '{self.collection_name}' is empty!")
+            print("   Please run in training mode first to index documents.")
+            return []
+        
+        print(f"Searching for: '{query}' (Collection has {collection_info.points_count} documents)")
+        
+        # 1. Encode Query
+        q_output = self.encoder.encode(query, return_dense=True, return_sparse=True)
+        
+        # Handle both single query and batch encoding
+        if isinstance(q_output['dense_vecs'], list):
+            q_dense = q_output['dense_vecs'][0] if len(q_output['dense_vecs']) > 0 else q_output['dense_vecs']
+        else:
+            q_dense = q_output['dense_vecs']
+        
+        # Convert query sparse weights to Qdrant format
+        q_sparse_weights = q_output['lexical_weights']
+        if isinstance(q_sparse_weights, list):
+            q_sparse_weights = q_sparse_weights[0] if len(q_sparse_weights) > 0 else {}
+        
+        q_sparse_indices = [int(k) for k in q_sparse_weights.keys()]
+        q_sparse_values = list(q_sparse_weights.values())
+
+        # 2. Hybrid Search (Fusion of Dense + Sparse)
+        # Search using both dense and sparse vectors, then combine results
+        candidate_ids = set()
+        candidate_map = {}
+        
+        try:
+            # Dense vector search
+            dense_results = self.qdrant.search_points(
+                collection_name=self.collection_name,
+                query_vector=("dense", q_dense),
+                limit=20,
+                with_payload=True
+            )
+            
+            for result in dense_results:
+                point_id = result.id if hasattr(result, 'id') else str(result)
+                candidate_ids.add(point_id)
+                if point_id not in candidate_map:
+                    candidate_map[point_id] = result
+            
+            # Sparse vector search
+            sparse_results = self.qdrant.search_points(
                 collection_name=self.collection_name,
                 query_vector=("sparse", models.SparseVector(indices=q_sparse_indices, values=q_sparse_values)),
                 limit=20,
@@ -303,7 +421,7 @@ class GeophysicsRAG:
             print(f"⚠️  Error during hybrid search: {e}")
             print("Trying fallback dense search...")
             # Fallback to simple dense search
-            points = self.qdrant.search(
+            points = self.qdrant.search_points(
                 collection_name=self.collection_name,
                 query_vector=("dense", q_dense),
                 limit=20,
