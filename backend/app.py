@@ -3,7 +3,7 @@ from flask_cors import CORS
 import asyncio
 import json
 import logging
-from generator_agent import central_agent, runner_agent, get_workspace_directory, run_gprmax_simulation_tool
+from supervisor_agent import supervisor_agent
 import os
 
 # Set up logging
@@ -103,10 +103,10 @@ def chat():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        # Call the agent with the current message
-        # The agent orchestrates everything internally
+        # Call the supervisor agent with the current message
+        # The supervisor orchestrates sub-agents internally
         agent_result, thought_process, generated_file_path = loop.run_until_complete(
-            central_agent(conversation_context, user_id=session_id)
+            supervisor_agent(conversation_context, user_id=session_id)
         )
         
         # Log the agent result structure for debugging
@@ -383,8 +383,17 @@ def simulate():
             asyncio.set_event_loop(loop)
         
         try:
-            # Call the tool directly to get raw simulation logs without agent processing
-            simulation_result = run_gprmax_simulation_tool(file_path)
+            # Read the file content
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+            except Exception as e:
+                error_msg = f"Failed to read input file: {str(e)}"
+                logger.error(error_msg)
+                return jsonify({'error': error_msg}), 500
+            
+            # Call the tool using invoke() method since it's a StructuredTool object
+            simulation_result = run_gprmax_simulation_tool.invoke({"input_file_content": file_content})
             
             # Check if the result indicates an error (contains "failed" or "exit code")
             if "failed" in simulation_result.lower() or "exit code" in simulation_result.lower():

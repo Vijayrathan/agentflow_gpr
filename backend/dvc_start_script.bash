@@ -19,20 +19,6 @@ if [ -z "$GDRIVE_CLIENT_ID" ] || [ -z "$GDRIVE_CLIENT_SECRET" ]; then
     exit 1
 fi
 
-# 2. Setup Environment (uv)
-echo "🐍 Setting up Python environment..."
-
-# Create venv if missing
-if [ ! -d ".venv" ]; then
-    uv venv
-fi
-
-# Activate venv
-source .venv/bin/activate
-
-# Install dependencies
-uv pip install -r requirements.txt
-uv pip install "dvc[gdrive]"
 
 # 3. Configure DVC & Pull
 echo "🔐 Configuring DVC and pulling data..."

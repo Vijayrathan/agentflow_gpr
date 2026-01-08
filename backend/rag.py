@@ -1,3 +1,9 @@
+# NumPy 2.0 compatibility: np.NINF was removed, use -np.inf instead
+# Patch must be applied before any dependencies import numpy
+import numpy as np
+if not hasattr(np, 'NINF'):
+    np.NINF = -np.inf
+
 import uuid
 import os
 from pathlib import Path

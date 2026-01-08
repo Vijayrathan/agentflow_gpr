@@ -15,13 +15,15 @@ dependencies = [
     "pydantic-ai>=0.0.1",
     "openai>=1.0.0",
     "docling>=1.0.0",
+    "langchain>=0.1.0",
+    "langchain-core>=0.1.0",
+    "langchain-openai>=0.0.5",
     "langchain-experimental>=0.0.50",
     "langchain-community>=0.0.20",
+    "langgraph>=0.0.20",
     "FlagEmbedding>=1.2.0",
     "qdrant-client>=1.7.0",
-    "python-dotenv>=1.0.0",
-    "rapidocr-onnxruntime>=1.4.4",
-    "onnxruntime-gpu>=1.23.2",
+    "python-dotenv>=1.0.0"
 ]
 
 [tool.setuptools.packages.find]
