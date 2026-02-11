@@ -236,9 +236,6 @@ class GeophysicsRAG:
         Step 3: Hybrid Retrieval + Reranking
         Only available in inference mode.
         """
-        # --- DEBUGGING BLOCK START ---
-        print(f"\n[DEBUG] Qdrant Client Type: {type(self.qdrant)}")
-        print(f"[DEBUG] Available methods: {[m for m in dir(self.qdrant) if 'search' in m]}")
         if self.mode != "inference":
             raise ValueError("search is only available in inference mode.")
         
@@ -278,13 +275,16 @@ class GeophysicsRAG:
         
         try:
             # Dense vector search
-            # FIXED: Changed search_points to search
-            dense_results = self.qdrant.search(
+            dense_response = self.qdrant.query_points(
                 collection_name=self.collection_name,
-                query_vector=("dense", q_dense),
+                query=q_dense,
+                using="dense",
                 limit=20,
                 with_payload=True
             )
+            
+            # Extract points from response
+            dense_results = dense_response.points if hasattr(dense_response, 'points') else dense_response
             
             for result in dense_results:
                 point_id = result.id if hasattr(result, 'id') else str(result)
@@ -293,126 +293,16 @@ class GeophysicsRAG:
                     candidate_map[point_id] = result
             
             # Sparse vector search
-            # FIXED: Changed search_points to search
-            sparse_results = self.qdrant.search(
+            sparse_response = self.qdrant.query_points(
                 collection_name=self.collection_name,
-                query_vector=("sparse", models.SparseVector(indices=q_sparse_indices, values=q_sparse_values)),
+                query=models.SparseVector(indices=q_sparse_indices, values=q_sparse_values),
+                using="sparse",
                 limit=20,
                 with_payload=True
             )
             
-            for result in sparse_results:
-                point_id = result.id if hasattr(result, 'id') else str(result)
-                candidate_ids.add(point_id)
-                if point_id not in candidate_map:
-                    candidate_map[point_id] = result
-            
-            # Combine results (simple union for now)
-            points = list(candidate_map.values())
-            
-        except Exception as e:
-            print(f"⚠️  Error during hybrid search: {e}")
-            print("Trying fallback dense search...")
-            # Fallback to simple dense search
-            # FIXED: Changed search_points to search
-            points = self.qdrant.search(
-                collection_name=self.collection_name,
-                query_vector=("dense", q_dense),
-                limit=20,
-                with_payload=True
-            )
-        
-        # Extract documents from results
-        candidate_docs = []
-        for point in points:
-            if hasattr(point, 'payload') and point.payload and 'text' in point.payload:
-                candidate_docs.append(point.payload['text'])
-            elif isinstance(point, dict) and 'payload' in point and 'text' in point['payload']:
-                candidate_docs.append(point['payload']['text'])
-        
-        if not candidate_docs:
-            print("⚠️  No candidate documents found. The query might not match any indexed content.")
-            return []
-
-        print(f"Found {len(candidate_docs)} candidate documents for reranking...")
-        
-        # 3. Reranking (The "Geophysics Judge")
-        # Rerank the top 20 candidates to find the true best matches
-        print("Reranking candidates...")
-        pairs = [[query, doc] for doc in candidate_docs]
-        scores = self.reranker.compute_score(pairs)
-        
-        # Handle both single score and list of scores
-        if not isinstance(scores, list):
-            scores = [scores]
-        
-        # Combine docs with scores and sort
-        ranked_results = sorted(zip(candidate_docs, scores), key=lambda x: x[1], reverse=True)
-        
-        return ranked_results[:top_k]
-        """
-        Step 3: Hybrid Retrieval + Reranking
-        Only available in inference mode.
-        """
-        if self.mode != "inference":
-            raise ValueError("search is only available in inference mode.")
-        
-        if self.reranker is None:
-            raise ValueError("Reranker not initialized. Use inference mode.")
-        
-        # Check if collection has any documents
-        collection_info = self.qdrant.get_collection(self.collection_name)
-        if collection_info.points_count == 0:
-            print(f"⚠️  Warning: Collection '{self.collection_name}' is empty!")
-            print("   Please run in training mode first to index documents.")
-            return []
-        
-        print(f"Searching for: '{query}' (Collection has {collection_info.points_count} documents)")
-        
-        # 1. Encode Query
-        q_output = self.encoder.encode(query, return_dense=True, return_sparse=True)
-        
-        # Handle both single query and batch encoding
-        if isinstance(q_output['dense_vecs'], list):
-            q_dense = q_output['dense_vecs'][0] if len(q_output['dense_vecs']) > 0 else q_output['dense_vecs']
-        else:
-            q_dense = q_output['dense_vecs']
-        
-        # Convert query sparse weights to Qdrant format
-        q_sparse_weights = q_output['lexical_weights']
-        if isinstance(q_sparse_weights, list):
-            q_sparse_weights = q_sparse_weights[0] if len(q_sparse_weights) > 0 else {}
-        
-        q_sparse_indices = [int(k) for k in q_sparse_weights.keys()]
-        q_sparse_values = list(q_sparse_weights.values())
-
-        # 2. Hybrid Search (Fusion of Dense + Sparse)
-        # Search using both dense and sparse vectors, then combine results
-        candidate_ids = set()
-        candidate_map = {}
-        
-        try:
-            # Dense vector search
-            dense_results = self.qdrant.search_points(
-                collection_name=self.collection_name,
-                query_vector=("dense", q_dense),
-                limit=20,
-                with_payload=True
-            )
-            
-            for result in dense_results:
-                point_id = result.id if hasattr(result, 'id') else str(result)
-                candidate_ids.add(point_id)
-                if point_id not in candidate_map:
-                    candidate_map[point_id] = result
-            
-            # Sparse vector search
-            sparse_results = self.qdrant.search_points(
-                collection_name=self.collection_name,
-                query_vector=("sparse", models.SparseVector(indices=q_sparse_indices, values=q_sparse_values)),
-                limit=20,
-                with_payload=True
-            )
+            # Extract points from response
+            sparse_results = sparse_response.points if hasattr(sparse_response, 'points') else sparse_response
             
             for result in sparse_results:
                 point_id = result.id if hasattr(result, 'id') else str(result)
@@ -427,12 +317,14 @@ class GeophysicsRAG:
             print(f"⚠️  Error during hybrid search: {e}")
             print("Trying fallback dense search...")
             # Fallback to simple dense search
-            points = self.qdrant.search_points(
+            fallback_response = self.qdrant.query_points(
                 collection_name=self.collection_name,
-                query_vector=("dense", q_dense),
+                query=q_dense,
+                using="dense",
                 limit=20,
                 with_payload=True
             )
+            points = fallback_response.points if hasattr(fallback_response, 'points') else fallback_response
         
         # Extract documents from results
         candidate_docs = []
@@ -462,6 +354,75 @@ class GeophysicsRAG:
         ranked_results = sorted(zip(candidate_docs, scores), key=lambda x: x[1], reverse=True)
         
         return ranked_results[:top_k]
+    
+    def generate(self, query: str, top_k: int = 3) -> str:
+        """
+        Step 4: Generate answer using LLM with retrieved context.
+        
+        Args:
+            query: User's question
+            top_k: Number of documents to retrieve for context
+            
+        Returns:
+            Generated answer as a string
+        """
+        from langchain_openai import ChatOpenAI
+        import os
+        
+        # Get retrieved documents
+        results = self.search(query, top_k=top_k)
+        
+        if not results:
+            return (
+                "I couldn't find specific information about that in the knowledge base. "
+                "However, I can help you create a GPR simulation. "
+                "Would you like to start setting up a simulation instead?"
+            )
+        
+        # Prepare context from retrieved documents
+        context_parts = []
+        for i, (doc, score) in enumerate(results, 1):
+            context_parts.append(f"[Source {i}] (Relevance: {score:.2f})\n{doc}\n")
+        
+        context = "\n".join(context_parts)
+        
+        # Create prompt for LLM
+        system_prompt = """You are a helpful assistant specializing in Ground Penetrating Radar (GPR) and geophysics.
+Your role is to answer questions based on the provided research documents and technical documentation.
+
+Guidelines:
+1. Answer the user's question directly and concisely
+2. Use information from the provided sources
+3. If the sources mention specific values, equations, or technical details, include them
+4. If the answer involves multiple sources, synthesize the information
+5. Be technical but clear
+6. If the sources don't fully answer the question, say so and provide what information is available
+7. At the end, offer to help with creating a GPR simulation if relevant"""
+
+        user_prompt = f"""Based on the following research documents, please answer this question:
+
+Question: {query}
+
+Retrieved Documents:
+{context}
+
+Please provide a clear, informative answer based on these sources."""
+
+        # Initialize LLM
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        
+        llm = ChatOpenAI(model=openai_model, api_key=openai_api_key, temperature=0.3)
+        
+        # Generate response
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        response = llm.invoke(messages)
+        
+        return response.content
     
     def close(self):
         """

@@ -172,8 +172,8 @@ def peplinski_mixture(theta_v: float, rho_b_gcm3: float, rho_s_gcm3: float,
     eps_real_corr = 1.156 * eps_L_real - 0.68  # Eq.(9) correction to real part
 
     # Effective conductivity σ_eff (Eq.(10)), sand/clay in percent, ρb in g/cm3
-    sigma_eff = 0.0467 + 0.2204 * rho_b_gcm3 - 0.4111 * (sand_pct / 100.0) * 100 + 0.6614 * (clay_pct / 100.0) * 100
-    # The last line simplifies to 0.0467 + 0.2204 ρb − 0.4111 Sand% + 0.6614 Clay%
+    # Use fractions (0.0 - 1.0) for the sigma formula
+    sigma_eff = 0.0467 + 0.2204 * rho_b_gcm3 - 0.4111 * (sand_pct / 100.0) + 0.6614 * (clay_pct / 100.0)    # The last line simplifies to 0.0467 + 0.2204 ρb − 0.4111 Sand% + 0.6614 Clay%
 
     # Build final complex ε: use corrected real part and combine imaginary part from Dobson water loss with σ_eff
     omega = 2 * math.pi * f_hz
@@ -261,15 +261,74 @@ class WaveformSpec:
 
 @dataclass
 class AntennaSpec:
-    kind: str  # 'hertzian_dipole'
+    kind: str  # 'hertzian_dipole' or 'voltage_source'
     axis: str  # 'x'|'y'|'z'
     tx_rx_offset_m: float = 0.05
+    source_type: str = "hertzian_dipole"  # 'hertzian_dipole' or 'voltage_source'
+    resistance: Optional[float] = None  # For voltage_source (Ohms)
 
     def validate(self) -> None:
-        if self.kind.lower() not in {"hertzian_dipole"}:
-            raise ValueError("Only 'hertzian_dipole' is supported")
+        if self.kind.lower() not in {"hertzian_dipole", "voltage_source"}:
+            raise ValueError("Only 'hertzian_dipole' and 'voltage_source' are supported")
         if self.axis.lower() not in {"x", "y", "z"}:
             raise ValueError("Axis must be 'x','y','z'")
+        if self.source_type == "voltage_source" and self.resistance is None:
+            raise ValueError("voltage_source requires resistance parameter")
+
+
+@dataclass
+class CylinderObject:
+    """Represents a cylindrical buried object (pipe, rod, etc.)"""
+    name: str
+    x1: float  # First face center coordinates
+    y1: float
+    z1: float
+    x2: float  # Second face center coordinates
+    y2: float
+    z2: float
+    radius: float
+    material: str  # Material ID (e.g., 'pec', 'free_space')
+    dielectric_smoothing: bool = True
+
+    def validate(self) -> None:
+        if self.radius <= 0:
+            raise ValueError(f"Cylinder {self.name}: radius must be positive")
+        if self.material not in {"pec", "free_space"}:
+            raise ValueError(f"Cylinder {self.name}: material must be 'pec' or 'free_space'")
+
+    def gprmax_line(self) -> str:
+        """Generate gprMax #cylinder command"""
+        smoothing = 'y' if self.dielectric_smoothing else 'n'
+        return f"#cylinder: {self.x1:.6g} {self.y1:.6g} {self.z1:.6g} {self.x2:.6g} {self.y2:.6g} {self.z2:.6g} {self.radius:.6g} {self.material} {smoothing}"
+
+
+@dataclass
+class BoxObject:
+    """Represents a box-shaped buried object (tank, container, etc.)"""
+    name: str
+    x1: float  # Lower corner coordinates
+    y1: float
+    z1: float
+    x2: float  # Upper corner coordinates
+    y2: float
+    z2: float
+    material: str  # Material ID (e.g., 'pec', 'free_space')
+    dielectric_smoothing: bool = True
+
+    def validate(self) -> None:
+        if self.x2 <= self.x1:
+            raise ValueError(f"Box {self.name}: x2 must be > x1")
+        if self.y2 <= self.y1:
+            raise ValueError(f"Box {self.name}: y2 must be > y1")
+        if self.z2 <= self.z1:
+            raise ValueError(f"Box {self.name}: z2 must be > z1")
+        if self.material not in {"pec", "free_space"}:
+            raise ValueError(f"Box {self.name}: material must be 'pec' or 'free_space'")
+
+    def gprmax_line(self) -> str:
+        """Generate gprMax #box command"""
+        smoothing = 'y' if self.dielectric_smoothing else 'n'
+        return f"#box: {self.x1:.6g} {self.y1:.6g} {self.z1:.6g} {self.x2:.6g} {self.y2:.6g} {self.z2:.6g} {self.material} {smoothing}"
 
 
 @dataclass
@@ -290,6 +349,8 @@ class ModelSpec:
     enforce_validity: bool = True
     # default porewater conductivity per salinity class
     salinity_defaults_Sm: Tuple[float, float, float] = (0.0, 0.5, 3.0)  # fresh, brackish, saline
+    # objects (cylinders, boxes, etc.)
+    objects: Optional[List[CylinderObject | BoxObject]] = None
 
     def build(self) -> str:
         if not self.layers:
@@ -358,6 +419,8 @@ class ModelSpec:
                 sigma_pore = 0.0
 
             # Compute ε_eff
+            print(f"Model: {self.model}")
+            self.model = self.model.lower().strip()
             if self.model == "crim":
                 eps_w = water_permittivity_debye(f0, self.temperature_c, sigma_ion=sigma_pore)
                 eps_eff = crim_mixture(L.theta_v, n, eps_s, eps_w)
@@ -445,27 +508,116 @@ class ModelSpec:
         lines.append(f"#time_window: {time_window:.6g}")
         lines.append("")
 
-        for eps_r, sigma, name in zip(eps_r_list, sigma_list, mat_names):
-            lines.append(f"#material: {eps_r:.8g} {sigma:.8g} 1 0 {name}")
-
+        # For Peplinski model, use native gprMax #soil_peplinski command
+        # For other models, use #material with pre-computed values OR Python block with Debye dispersion
+        if self.model == "peplinski":
+            # Use native gprMax soil_peplinski for dispersive materials
+            for i, L in enumerate(self.layers):
+                name = L.name if L.name else f"layer{i+1}"
+                sand_frac = L.sand_pct / 100.0
+                clay_frac = L.clay_pct / 100.0
+                rho_b = L.bulk_density_gcm3 if L.bulk_density_gcm3 is not None else 1.5
+                rho_s = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.65
+                # theta_v range for fractal_box (min, max)
+                theta_min = max(L.theta_v - 0.02, 0.001)
+                theta_max = min(L.theta_v + 0.02, 0.30)
+                lines.append(
+                    f"#soil_peplinski: {sand_frac:.6g} {clay_frac:.6g} {rho_b:.6g} {rho_s:.6g} "
+                    f"{theta_min:.6g} {theta_max:.6g} {name}"
+                )
+        else:
+            # For non-Peplinski models, use standard gprMax #material and #add_dispersion_debye commands
+            for i, (L, eps_r, sigma, name) in enumerate(zip(self.layers, eps_r_list, sigma_list, mat_names)):
+                # Calculate Debye parameters for dispersive behavior
+                eps_s_20 = 80.1
+                eps_inf_water = 4.9
+                tau_20 = 9.23e-12
+                d_epss_dT = -0.4
+                d_tau_dT = -0.15e-12
+                eps_s_water = eps_s_20 + d_epss_dT * (self.temperature_c - 20.0)
+                tau_water = max(tau_20 + d_tau_dT * (self.temperature_c - 20.0), 2e-12)
+                
+                if L.theta_v > 0.01:
+                    delta_eps = L.theta_v * (eps_s_water - eps_inf_water)
+                    
+                    if self.model == "mironov":
+                        max_bound = min(0.45, 0.005 * L.clay_pct)
+                        theta_bound = min(L.theta_v, max_bound)
+                        theta_free = max(L.theta_v - theta_bound, 0.0)
+                        
+                        tau_bound = 30e-12
+                        delta_eps_bound = theta_bound * (50.0 - eps_inf_water)
+                        delta_eps_free = theta_free * (eps_s_water - eps_inf_water)
+                        
+                        eps_inf = eps_r - delta_eps_bound - delta_eps_free
+                        eps_inf = max(eps_inf, 2.0)
+                        
+                        lines.append(f"#material: {eps_inf:.6g} {sigma:.6g} 1 0 {name}")
+                        if delta_eps_bound > 0.1 and delta_eps_free > 0.1:
+                            lines.append(
+                                f"#add_dispersion_debye: 2 {delta_eps_bound:.6g} {tau_bound:.6e} "
+                                f"{delta_eps_free:.6g} {tau_water:.6e} {name}"
+                            )
+                        elif delta_eps_free > 0.1:
+                            lines.append(
+                                f"#add_dispersion_debye: 1 {delta_eps_free:.6g} {tau_water:.6e} {name}"
+                            )
+                    else:
+                        eps_inf = eps_r - delta_eps
+                        eps_inf = max(eps_inf, 2.0)
+                        
+                        lines.append(f"#material: {eps_inf:.6g} {sigma:.6g} 1 0 {name}")
+                        if delta_eps > 0.1:
+                            lines.append(
+                                f"#add_dispersion_debye: 1 {delta_eps:.6g} {tau_water:.6e} {name}"
+                            )
+                else:
+                    lines.append(f"#material: {eps_r:.6g} {sigma:.6g} 1 0 {name}")
+        
         lines.append("")
-
         lines.append(self.waveform.gprmax_line())
-        k = self.antenna.kind.lower()
         axis = self.antenna.axis.lower()
-        if k == "hertzian_dipole":
+        source_type = self.antenna.source_type.lower()
+        
+        # Source definition
+        if source_type == "hertzian_dipole":
             lines.append(f"#hertzian_dipole: {axis} {x0:.6g} {y0:.6g} {z_tx:.6g} {self.waveform.name}")
-            lines.append(f"#rx: {rx_x:.6g} {rx_y:.6g} {rx_z:.6g}")
+        elif source_type == "voltage_source":
+            if self.antenna.resistance is None:
+                raise ValueError("voltage_source requires resistance parameter")
+            lines.append(f"#voltage_source: {axis} {x0:.6g} {y0:.6g} {z_tx:.6g} {self.antenna.resistance:.6g} {self.waveform.name}")
+        
+        # Receiver
+        lines.append(f"#rx: {rx_x:.6g} {rx_y:.6g} {rx_z:.6g}")
         lines.append("")
 
         z_cur = air_top
         for L, name in zip(self.layers, mat_names):
             z1 = z_cur
             z2 = z_cur + L.thickness_m
-            lines.append(f"#box: 0 0 {z1:.6g} {x_extent:.6g} {y_extent:.6g} {z2:.6g} {name}")
+            if self.model == "peplinski":
+                # Use #fractal_box with soil_peplinski material for proper dispersive behavior
+                # fractal_box: x1 y1 z1 x2 y2 z2 frac_dim weighting n1 n2 n3 seed material
+                # Using fractal dimension 1.5 (typical for soil), weighting 1 (normal), 
+                # n1=n2=n3=1 (single cell averaging), seed=1
+                lines.append(
+                    f"#fractal_box: 0 0 {z1:.6g} {x_extent:.6g} {y_extent:.6g} {z2:.6g} "
+                    f"1.5 1 1 1 1 1 {name}"
+                )
+            else:
+                # For non-Peplinski models, use standard #box with Python-defined material
+                lines.append(f"#box: 0 0 {z1:.6g} {x_extent:.6g} {y_extent:.6g} {z2:.6g} {name}")
             z_cur = z2
 
         lines.append("")
+        
+        # Add buried objects (cylinders, boxes, etc.)
+        if self.objects:
+            for obj in self.objects:
+                obj.validate()
+                lines.append(obj.gprmax_line())
+            lines.append("")
+
         lines.append(f"#geometry_view: 0 0 0 {x_extent:.6g} {y_extent:.6g} {z_extent:.6g} {dx:.6g} {dy:.6g} {dz:.6g} model_view n")
 
         return "\n".join(lines)
@@ -494,6 +646,10 @@ def generate_gprmax_input_file(
     antenna_kind: str = "hertzian_dipole",
     antenna_axis: str = "z",
     antenna_tx_rx_offset_m: float = 0.05,
+    antenna_source_type: str = "hertzian_dipole",
+    antenna_resistance: Optional[float] = None,
+    # Objects (cylinders, boxes, etc.)
+    objects: Optional[List[CylinderObject | BoxObject]] = None,
     # ModelSpec parameters
     model_title: str = "Layered soil with selectable dielectric model",
     source_height_m: float = 0.07,
@@ -593,6 +749,8 @@ def generate_gprmax_input_file(
         kind=antenna_kind,
         axis=antenna_axis,
         tx_rx_offset_m=antenna_tx_rx_offset_m,
+        source_type=antenna_source_type,
+        resistance=antenna_resistance,
     )
     
     # Create ModelSpec
@@ -611,6 +769,7 @@ def generate_gprmax_input_file(
         model=model,
         enforce_validity=enforce_validity,
         salinity_defaults_Sm=salinity_defaults_Sm,
+        objects=objects,
     )
     
     # Build and write the file

@@ -464,6 +464,41 @@ function App() {
     }
   };
 
+  // Function to parse text with **bold** markdown syntax
+  const parseMarkdownBold = (text) => {
+    if (!text) return null;
+    
+    const parts = [];
+    let lastIndex = 0;
+    const regex = /\*\*(.+?)\*\*/g;
+    let match;
+    let key = 0;
+
+    while ((match = regex.exec(text)) !== null) {
+      // Add text before the bold part
+      if (match.index > lastIndex) {
+        parts.push(text.substring(lastIndex, match.index));
+      }
+      // Add the bold part
+      parts.push(<strong key={`bold-${key++}`}>{match[1]}</strong>);
+      lastIndex = regex.lastIndex;
+    }
+
+    // Add remaining text after the last match
+    if (lastIndex < text.length) {
+      parts.push(text.substring(lastIndex));
+    }
+
+    // If no matches found, return the original text
+    return parts.length > 0 ? parts : text;
+  };
+
+  // Function to format a line with markdown bold support
+  const formatLineWithBold = (line) => {
+    const parts = parseMarkdownBold(line);
+    return Array.isArray(parts) ? parts : line;
+  };
+
   return (
     <div className="app">
       <div className="chat-container">
@@ -496,7 +531,7 @@ function App() {
                     if (!parsed) {
                       return msg.content.split("\n").map((line, i, arr) => (
                         <React.Fragment key={i}>
-                          {line}
+                          {formatLineWithBold(line)}
                           {i < arr.length - 1 && <br />}
                         </React.Fragment>
                       ));
@@ -508,7 +543,7 @@ function App() {
                           <div className="message-prefix">
                             {parsed.before.split("\n").map((line, i, arr) => (
                               <React.Fragment key={i}>
-                                {line}
+                                {formatLineWithBold(line)}
                                 {i < arr.length - 1 && <br />}
                               </React.Fragment>
                             ))}
@@ -582,7 +617,7 @@ function App() {
                           <div className="message-suffix">
                             {parsed.after.split("\n").map((line, i, arr) => (
                               <React.Fragment key={i}>
-                                {line}
+                                {formatLineWithBold(line)}
                                 {i < arr.length - 1 && <br />}
                               </React.Fragment>
                             ))}
@@ -625,7 +660,12 @@ function App() {
                                   :
                                 </span>
                                 <div className="thought-text">
-                                  {step.content}
+                                  {step.content && step.content.split("\n").map((line, lineIdx, arr) => (
+                                    <React.Fragment key={lineIdx}>
+                                      {formatLineWithBold(line)}
+                                      {lineIdx < arr.length - 1 && <br />}
+                                    </React.Fragment>
+                                  ))}
                                 </div>
                               </div>
                             )}
@@ -651,7 +691,12 @@ function App() {
                                   📊 Tool Result:
                                 </span>
                                 <div className="thought-text">
-                                  {step.result}
+                                  {step.result && step.result.split("\n").map((line, lineIdx, arr) => (
+                                    <React.Fragment key={lineIdx}>
+                                      {formatLineWithBold(line)}
+                                      {lineIdx < arr.length - 1 && <br />}
+                                    </React.Fragment>
+                                  ))}
                                 </div>
                               </div>
                             )}

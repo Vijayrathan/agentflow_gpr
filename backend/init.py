@@ -17,6 +17,6 @@ dotenv.load_dotenv()
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-openai_model = "gpt-4.1"
+openai_model = "gpt-4.1-mini"
 
 openai_client = openai.OpenAI(api_key=openai_api_key)

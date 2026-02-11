@@ -3,8 +3,12 @@ from flask_cors import CORS
 import asyncio
 import json
 import logging
-from supervisor_agent import supervisor_agent
 import os
+from langchain_core.messages import HumanMessage
+
+# Import LangGraph workflow
+from langgraph_workflow import langgraph_app
+from simulation_agent import run_gprmax_simulation_tool
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -13,54 +17,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Store conversation history per session
-conversations = {}
-
-def agent_result_to_dict(result):
-    """Convert agent result to JSON-serializable dict"""
-    try:
-        # Handle None
-        if result is None:
-            return {'output': ''}
-        
-        # If result is a list, convert to dict format
-        if isinstance(result, list):
-            return {
-                'output': str(result[-1]) if result else '',
-                'messages': [str(msg) for msg in result],
-                'data': None
-            }
-        
-        # If result is a dict, return as is
-        if isinstance(result, dict):
-            return result
-        
-        # If result has model_dump method (Pydantic model), use it
-        # But first check it's not a list (lists can have hasattr return True for some attributes)
-        if hasattr(result, 'model_dump') and not isinstance(result, (list, dict, str)):
-            try:
-                return result.model_dump()
-            except (AttributeError, TypeError):
-                # If model_dump fails, fall through to other methods
-                pass
-        
-        # If result has output attribute, extract it
-        if hasattr(result, 'output'):
-            return {
-                'output': str(result.output) if result.output is not None else '',
-                'messages': [str(msg) for msg in result.messages] if hasattr(result, 'messages') and result.messages else [],
-                'data': result.data if hasattr(result, 'data') else None
-            }
-        
-        # Otherwise, convert to string representation
-        return {'output': str(result)}
-    except Exception as e:
-        logger.error(f"Error in agent_result_to_dict: {str(e)}", exc_info=True)
-        return {'output': str(result), 'error': f'Error serializing result: {str(e)}'}
+# No longer needed - LangGraph state is already a dict
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Handle chat messages and pass through agent responses"""
+    """Handle chat messages using LangGraph workflow"""
     try:
         data = request.json
         message = data.get('message', '')
@@ -69,96 +30,55 @@ def chat():
         if not message:
             return jsonify({'error': 'Message is required'}), 400
         
-        # Initialize conversation if new session
-        if session_id not in conversations:
-            conversations[session_id] = {
-                'messages': []
-            }
+        logger.info(f"[CHAT] Session: {session_id}, Message: {message[:100]}...")
         
-        # Store user message in conversation history
-        conversations[session_id]['messages'].append({
-            'role': 'user',
-            'content': message
-        })
+        # Configure LangGraph with thread_id for persistence
+        config = {"configurable": {"thread_id": session_id}}
         
-        # Build conversation context from history
-        # Include previous messages so agent has full context
-        if len(conversations[session_id]['messages']) > 1:
-            # Build conversation string from history
-            conversation_parts = []
-            for msg in conversations[session_id]['messages'][:-1]:  # Exclude current message
-                role = msg['role']
-                content = msg['content']
-                conversation_parts.append(f"{role.capitalize()}: {content}")
-            conversation_parts.append(f"User: {message}")
-            conversation_context = "\n\n".join(conversation_parts)
-        else:
-            # First message in conversation
-            conversation_context = message
-        
-        # Run async agent
+        # Run async LangGraph workflow
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        # Call the supervisor agent with the current message
-        # The supervisor orchestrates sub-agents internally
-        agent_result, thought_process, generated_file_path = loop.run_until_complete(
-            supervisor_agent(conversation_context, user_id=session_id)
+        # Invoke LangGraph workflow with new user message
+        result = loop.run_until_complete(
+            langgraph_app.ainvoke(
+                {"messages": [HumanMessage(content=message)]},
+                config=config
+            )
         )
         
-        # Log the agent result structure for debugging
-        logger.info(f"Agent result type: {type(agent_result)}")
-        logger.info(f"Agent result attributes: {dir(agent_result)}")
-        if hasattr(agent_result, 'output'):
-            logger.info(f"Agent result.output: {agent_result.output}")
-            logger.info(f"Agent result.output type: {type(agent_result.output)}")
-        if hasattr(agent_result, 'messages'):
-            logger.info(f"Agent result.messages: {agent_result.messages}")
+        logger.info(f"[CHAT] LangGraph result keys: {result.keys()}")
         
-        # Convert agent result to dict
-        result_dict = agent_result_to_dict(agent_result)
-        logger.info(f"Result dict: {json.dumps(result_dict, indent=2, default=str)}")
+        # Extract response from LangGraph state
+        messages = result.get("messages", [])
+        response_content = ""
         
-        # Extract response message from agent output
-        # Try multiple ways to get the response content
-        response_content = ''
+        if messages:
+            # Get the last AI message
+            for msg in reversed(messages):
+                if hasattr(msg, 'content') and msg.type != "human":
+                    response_content = msg.content
+                    break
         
-        # First, try to get from result_dict
-        if isinstance(result_dict, dict):
-            response_content = result_dict.get('output', '')
-            # If output is empty, try getting from messages
-            if not response_content and result_dict.get('messages'):
-                # Get the last message if available
-                messages = result_dict.get('messages', [])
-                if messages:
-                    response_content = str(messages[-1]) if messages else ''
-        
-        # If still empty, try directly from agent_result
         if not response_content:
-            if hasattr(agent_result, 'output') and agent_result.output:
-                response_content = str(agent_result.output)
-            elif hasattr(agent_result, 'messages') and agent_result.messages:
-                # Get the last message from the agent
-                response_content = str(agent_result.messages[-1]) if agent_result.messages else ''
+            response_content = "Processing your request..."
         
-        # Fallback if still empty
-        if not response_content:
-            response_content = 'Processing your request...'
+        logger.info(f"[CHAT] Response: {response_content[:200]}...")
         
-        logger.info(f"Final response_content: {response_content[:200]}...")
+        # Extract state information
+        file_path = result.get("file_path")
+        file_content = result.get("file_content")
+        file_generated = result.get("file_generated", False)
+        validation_errors = result.get("validation_errors", {})
+        parameters_complete = result.get("parameters_complete", False)
         
-        # Store assistant response in conversation history
-        conversations[session_id]['messages'].append({
-            'role': 'assistant',
-            'content': response_content
-        })
+        # Determine status
+        status = 'complete' if file_generated else 'incomplete'
         
-        # Determine status based on response content
-        status = 'incomplete'
-        file_content = None
+        logger.info(f"[CHAT] Status: {status}, File generated: {file_generated}")
         
         # Helper function to check if response contains validation errors
         def has_validation_errors(response_text):
@@ -219,69 +139,19 @@ def chat():
             has_errors = has_validation_errors(response_text)
             return has_success and not has_errors
         
-        # If file was generated, read it and ensure it's included in the response
-        # BUT only if the model is actually presenting it (not when there are validation errors)
-        if generated_file_path and os.path.exists(generated_file_path):
-            logger.info(f"File generated at {generated_file_path}")
-            try:
-                with open(generated_file_path, 'r', encoding='utf-8') as f:
-                    file_content = f.read()
-                
-                # Only append file if:
-                # 1. Model is already presenting it (contains "Input parameters file:"), OR
-                # 2. Model indicates successful generation without validation errors
-                should_append_file = (
-                    'Input parameters file:' in response_content or 
-                    is_presenting_file(response_content)
-                )
-                
-                if should_append_file:
-                    # Check if the response already contains the file in the expected format
-                    if 'Input parameters file:' not in response_content or '```' not in response_content:
-                        # Format the response to include the file content in the expected format
-                        response_content = f"{response_content}\n\nInput parameters file:\n```\n{file_content}\n```"
-                        logger.info("File appended to response - model is presenting it")
-                    status = 'complete'
-                else:
-                    # File exists but model is not presenting it (likely validation errors)
-                    logger.info("File exists but not appended - response contains validation errors or doesn't indicate success")
-                    # Don't set status to complete if there are validation errors
-                    if not has_validation_errors(response_content):
-                        status = 'complete'
-            except Exception as e:
-                logger.error(f"Error reading generated file: {str(e)}", exc_info=True)
-        
-        # Also check if response indicates completion
-        if 'successfully generated' in response_content.lower() or 'generated' in response_content.lower():
-            if not has_validation_errors(response_content):
-                status = 'complete'
-        
-        # Serialize thought process for JSON response
-        serialized_thought_process = []
-        for step in thought_process:
-            serialized_step = {}
-            for key, value in step.items():
-                try:
-                    # Try to serialize the value
-                    json.dumps(value)
-                    serialized_step[key] = value
-                except (TypeError, ValueError):
-                    # If it can't be serialized, convert to string
-                    serialized_step[key] = str(value)
-            serialized_thought_process.append(serialized_step)
-        
         # Return response in format expected by frontend
         response_data = {
-            'message': response_content,  # Frontend expects 'message' field
+            'message': response_content,
             'status': status,
-            'output': response_content,  # Keep for backward compatibility
-            'data': result_dict.get('data') if isinstance(result_dict, dict) else None,
-            'thought_process': serialized_thought_process  # Add thought process
+            'output': response_content,
+            'parameters_complete': parameters_complete,
+            'validation_errors': validation_errors,
+            'file_generated': file_generated,
         }
         
         # Include file path and content if available
-        if generated_file_path:
-            response_data['generated_file_path'] = generated_file_path
+        if file_path:
+            response_data['generated_file_path'] = file_path
         if file_content:
             response_data['file_content'] = file_content
         
@@ -302,10 +172,11 @@ def reset():
         data = request.json
         session_id = data.get('session_id', 'default')
         
-        if session_id in conversations:
-            del conversations[session_id]
+        # LangGraph handles persistence via checkpoints
+        # User can just start a new session with a different thread_id
+        # No manual cleanup needed
         
-        return jsonify({'status': 'success', 'message': 'Conversation reset'})
+        return jsonify({'status': 'success', 'message': 'Conversation reset. Use a new session_id for a fresh start.'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -334,6 +205,8 @@ def health():
 def get_file():
     """Get the generated.in file content"""
     try:
+        from sim_setup_agent import get_workspace_directory
+        
         # Check workspace directory for generated files
         workspace_dir = get_workspace_directory()
         generated_files_dir = workspace_dir / "generated_files"
