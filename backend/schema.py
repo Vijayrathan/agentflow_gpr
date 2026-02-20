@@ -149,27 +149,36 @@ class GprSchema(BaseModel):
 
 class ExtractedLayerParams(BaseModel):
     """Single layer as extracted by the layer subagent.
-    Accepts both user-friendly terms (texture_class, moisture_state) and
-    raw numeric overrides (sand_pct, theta_v).  The resolver merges them."""
+    Only explicit numeric min/max ranges are accepted for the core parameters."""
     name: Optional[str] = None
-    thickness_m: Optional[float] = None
 
-    # User-friendly descriptors (resolved via lookup tables)
-    texture_class: Optional[str] = None
-    moisture_state: Optional[str] = None
-    organic_level: Optional[str] = None
-    salinity_environment: Optional[str] = None
-    compaction_level: Optional[str] = None
+    # Thickness range (required)
+    thickness_m_min: Optional[float] = None
+    thickness_m_max: Optional[float] = None
 
-    # Expert numeric overrides (take precedence over descriptors)
-    sand_pct: Optional[float] = None
-    silt_pct: Optional[float] = None
-    clay_pct: Optional[float] = None
-    theta_v: Optional[float] = None
-    bulk_density_gcm3: Optional[float] = None
-    particle_density_gcm3: Optional[float] = None
+    # Texture fractions — ranges (required; must sum to 100 after sampling)
+    sand_pct_min: Optional[float] = None
+    sand_pct_max: Optional[float] = None
+    silt_pct_min: Optional[float] = None
+    silt_pct_max: Optional[float] = None
+    clay_pct_min: Optional[float] = None
+    clay_pct_max: Optional[float] = None
+
+    # Volumetric water content range (required for physics models)
+    theta_v_min: Optional[float] = None
+    theta_v_max: Optional[float] = None
+
+    # Optional density ranges
+    bulk_density_gcm3_min: Optional[float] = None
+    bulk_density_gcm3_max: Optional[float] = None
+    particle_density_gcm3_min: Optional[float] = None
+    particle_density_gcm3_max: Optional[float] = None
+
+    # Categorical — list of allowed classes (one chosen randomly per sample)
+    salinity_classes: Optional[List[str]] = None  # e.g. ["fresh", "brackish"]
+
+    # Single values (not ranged)
     organic_fraction: Optional[float] = None
-    salinity_class: Optional[str] = None
     porewater_sigma_Sm: Optional[float] = None
 
 
@@ -208,6 +217,7 @@ class ExtractedModelConfig(BaseModel):
     max_cell_m: Optional[float] = None
     temperature_c: Optional[float] = None
     enforce_validity: Optional[bool] = None
+    num_samples: Optional[int] = None
 
 
 class ExtractedOptionalParams(BaseModel):
@@ -233,3 +243,43 @@ class AggregatedExtraction(BaseModel):
     antenna_waveform: ExtractedAntennaWaveform
     model_params: ExtractedModelConfig
     optional_params: ExtractedOptionalParams
+
+
+# ---------------------------------------------------------------------------
+# Dataset generation result schemas
+# ---------------------------------------------------------------------------
+
+class SampledLayerValues(BaseModel):
+    """Concrete single-valued layer produced by sampling from a ResolvedLayerRange."""
+    name: Optional[str] = None
+    thickness_m: float
+    sand_pct: float
+    silt_pct: float
+    clay_pct: float
+    theta_v: float
+    bulk_density_gcm3: Optional[float] = None
+    particle_density_gcm3: Optional[float] = None
+    organic_fraction: float
+    salinity_class: Optional[str] = None
+
+
+class SampleRecord(BaseModel):
+    """One generated .in file and its sampled parameter values."""
+    sample_index: int
+    filename: str
+    filepath: str
+    layers: List[SampledLayerValues]
+
+
+class DatasetGenerationResult(BaseModel):
+    """Summary returned after batch generation."""
+    status: str          # "complete" | "partial" | "error"
+    dataset_name: str
+    output_dir: str
+    num_requested: int
+    num_generated: int
+    num_failed: int
+    manifest_csv_path: str
+    manifest_json_path: str
+    samples: List[SampleRecord]
+    errors: List[str]

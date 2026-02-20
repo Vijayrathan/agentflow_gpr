@@ -809,6 +809,114 @@
   outline-offset: 2px;
 }
 
+/* copy-notification toast */
+.copy-notification {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: #238636;
+  color: #ffffff;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 9999;
+  pointer-events: none;
+}
+.copy-notification.show {
+  opacity: 1;
+}
+
+/* Dataset generation result summary */
+.dataset-result-summary {
+  margin-top: 12px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #30363d;
+}
+
+.dataset-result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dataset-result-header.complete {
+  background: rgba(35, 134, 54, 0.15);
+  border-bottom: 1px solid rgba(35, 134, 54, 0.3);
+  color: #3fb950;
+}
+
+.dataset-result-header.partial {
+  background: rgba(210, 153, 34, 0.15);
+  border-bottom: 1px solid rgba(210, 153, 34, 0.3);
+  color: #d29922;
+}
+
+.dataset-result-icon {
+  font-size: 14px;
+}
+
+.dataset-result-body {
+  background: #161b22;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dataset-result-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.dataset-result-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8b949e;
+  flex-shrink: 0;
+  min-width: 100px;
+}
+
+.dataset-result-value {
+  font-size: 12px;
+  color: #c9d1d9;
+  word-break: break-all;
+}
+
+.dataset-result-value.mono {
+  font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+}
+
+.dataset-result-errors {
+  margin-top: 6px;
+}
+
+.dataset-result-errors .dataset-result-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #f85149;
+}
+
+.dataset-result-errors ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.dataset-error-item {
+  font-size: 12px;
+  color: #f85149;
+  line-height: 1.6;
+  font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+}
+
 /* Responsive design */
 @media (max-width: 768px) {
   .app {

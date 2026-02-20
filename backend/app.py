@@ -121,6 +121,16 @@ def chat():
             response_data["validation_errors"] = result["validation_errors"]
         if result.get("sources"):
             response_data["sources"] = result["sources"]
+        if result.get("dataset_result"):
+            dr = result["dataset_result"]
+            response_data["num_generated"] = dr.get("num_generated")
+            response_data["num_failed"] = dr.get("num_failed")
+            response_data["num_requested"] = dr.get("num_requested")
+            response_data["dataset_output_dir"] = dr.get("output_dir")
+            response_data["manifest_csv_path"] = dr.get("manifest_csv_path")
+            response_data["manifest_json_path"] = dr.get("manifest_json_path")
+            if dr.get("errors"):
+                response_data["dataset_errors"] = dr.get("errors")
 
         return jsonify(response_data)
 

@@ -23,8 +23,9 @@ from schema import (
     ExtractedModelConfig,
     ExtractedOptionalParams,
     AggregatedExtraction,
+    SampledLayerValues, SampleRecord, DatasetGenerationResult,
 )
-from resolvers import merge_extractions, merge_aggregations
+from resolvers import merge_extractions, merge_aggregations, resolve_layers
 from rag import GeophysicsRAG
 
 # Set up logging
@@ -664,39 +665,52 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
 _layer_extraction_agent = Agent(
     name="Layer Extraction Subagent",
     system_prompt="""You are a soil-layer parameter extraction assistant for gprMax GPR simulations.
-Extract ONLY the soil layer information from the user's message. Ignore antenna, waveform, model, and other parameters.
+Extract ONLY the soil layer PARAMETER RANGES from the user's message. Ignore antenna, waveform, model, and other parameters.
 
 CONTEXT: You may receive a "CURRENT PARAMETERS" block showing previously collected values.
 - Extract ONLY new or changed values from the user's latest message.
 - If the user is NOT mentioning any layer information at all, return num_layers=0 and layers=[].
-- If the user asks to modify a specific layer (e.g. "change layer 2 thickness to 0.5"), return
+- If the user asks to modify a specific layer (e.g. "change layer 2 thickness to 0.2-0.6"), return
   the FULL updated layer list with that modification applied (use existing values from CURRENT PARAMETERS
   for unchanged fields).
 - If the user provides entirely new layers, return those and ignore previous layers.
 
-For each layer, extract:
+For each layer, extract EXPLICIT MIN and MAX numeric values for:
   REQUIRED:
-    - thickness_m: layer thickness in meters (must be > 0)
-  
-  SOIL COMPOSITION (provide EITHER texture_class OR explicit percentages):
-    - texture_class: USDA class — one of: sand, loamy_sand, sandy_loam, loam, silt_loam, silt,
-      sandy_clay_loam, clay_loam, silty_clay_loam, sandy_clay, silty_clay, clay
-    - sand_pct, silt_pct, clay_pct: explicit soil percentages (must sum to 100)
-  
-  MOISTURE (provide EITHER moisture_state OR explicit theta_v):
-    - moisture_state: one of dry, normal, wet, saturated
-    - theta_v: volumetric water content (0.0 to 1.0)
-  
+    - thickness_m_min, thickness_m_max: layer thickness range in meters (must be > 0)
+    - sand_pct_min, sand_pct_max: sand percentage range (0-100)
+    - silt_pct_min, silt_pct_max: silt percentage range (0-100)
+    - clay_pct_min, clay_pct_max: clay percentage range (0-100)
+    - theta_v_min, theta_v_max: volumetric water content range (0.0 to 1.0)
+
   OPTIONAL:
+    - bulk_density_gcm3_min, bulk_density_gcm3_max: bulk density range in g/cm³
+    - particle_density_gcm3_min, particle_density_gcm3_max: particle density range in g/cm³
+    - salinity_classes: list of allowed salinity classes
+      (valid values: "fresh", "slightly_saline", "brackish", "saline")
+    - organic_fraction: single value (0.0 to 1.0), NOT a range
+    - porewater_sigma_Sm: porewater conductivity in S/m, single value
     - name: layer name/label
-    - organic_level: none, low, moderate, high_peaty
-    - organic_fraction: explicit organic fraction (0.0 to 1.0)
-    - salinity_environment: fresh, slightly_saline, brackish, seawater
-    - salinity_class: explicit salinity class string
-    - compaction_level: loose, normal, compacted
-    - bulk_density_gcm3: bulk density in g/cm³
-    - particle_density_gcm3: particle density in g/cm³
-    - porewater_sigma_Sm: porewater conductivity in S/m
+
+EXAMPLES:
+  "thickness 0.2 to 0.5m"       → thickness_m_min=0.2, thickness_m_max=0.5
+  "thickness between 0.3 and 0.7m" → thickness_m_min=0.3, thickness_m_max=0.7
+  "sand between 40 and 70%"      → sand_pct_min=40, sand_pct_max=70
+  "sand 40–70%"                  → sand_pct_min=40, sand_pct_max=70
+  "water content 0.05–0.3"       → theta_v_min=0.05, theta_v_max=0.3
+  "fresh or brackish"            → salinity_classes=["fresh","brackish"]
+  "fresh water"                  → salinity_classes=["fresh"]
+  "thickness 0.4m" (single value, no range) → thickness_m_min=0.4, thickness_m_max=0.4
+
+IMPORTANT:
+- Prefer extracting RANGES (min < max). Single values (min == max) are only acceptable when
+  the user explicitly states a fixed/exact value AND other parameters in the same or other layers
+  do have real ranges.
+- If the user gives a single value with no range context, set min=max=that value. The system
+  will warn if ALL parameters end up as point ranges when multiple samples are requested.
+- Do NOT invent values not mentioned by the user. Leave unmentioned fields as None.
+- Do NOT use texture_class, moisture_state, organic_level, compaction_level, or salinity_environment.
+  Only extract explicit numeric ranges.
 
 Count the number of layers and set num_layers accordingly.
 Return ONLY parameters that are explicitly mentioned or modified. Leave unmentioned fields as None.""",
@@ -761,6 +775,8 @@ Parameters to extract:
   - max_cell_m: maximum cell size in meters
   - temperature_c: temperature in Celsius
   - enforce_validity: whether to check model-specific frequency/moisture validity constraints (boolean)
+  - num_samples: number of simulation .in files to generate for the dataset
+    (e.g. "100 samples", "generate 50 files", "I want 200 simulations", "create 10 examples")
 
 Return ONLY parameters that are explicitly mentioned or changed. Leave unmentioned fields as None.""",
     model=openai_model,
@@ -970,22 +986,53 @@ async def simulate_workflow(
                 "params": params_dump,
             }
 
-        # 4. Generate the .in file
-        logger.info("[WORKFLOW] Step 3: Generating gprMax input file")
-        file_content = generate_gprmax_input_file_tool(gpr_schema)
+        # 4. Generate dataset (.in files + manifest)
+        logger.info("[WORKFLOW] Step 3: Generating dataset")
+        from dataset_generator import generate_dataset
 
-        generated_file_text = None
-        if output_file_path and os.path.exists(output_file_path):
-            with open(output_file_path, "r", encoding="utf-8") as f:
-                generated_file_text = f.read()
+        num_samples = merged_state.model_params.num_samples or 1
+        dataset_name = gpr_schema.title or f"dataset_{user_id or 'default'}"
+        title_prefix = dataset_name
+
+        resolved_ranges = resolve_layers(merged_state.layers)
+
+        dataset_result = generate_dataset(
+            resolved_layer_ranges=resolved_ranges,
+            gpr_schema_template=gpr_schema,
+            num_samples=num_samples,
+            dataset_name=dataset_name,
+            title_prefix=title_prefix,
+        )
 
         _current_output_filename = None
+
+        if dataset_result.num_generated == 0:
+            status = "error"
+            message = (
+                f"Dataset generation failed — no files were produced.\n\n"
+                f"Errors:\n" + "\n".join(dataset_result.errors)
+            )
+        elif dataset_result.num_failed > 0:
+            status = "partial"
+            message = (
+                f"Generated {dataset_result.num_generated}/{num_samples} files "
+                f"({dataset_result.num_failed} failed) in {dataset_result.output_dir}\n\n"
+                f"Manifest: {dataset_result.manifest_csv_path}\n\n"
+                + (f"Errors:\n" + "\n".join(dataset_result.errors) if dataset_result.errors else "")
+            )
+        else:
+            status = "complete"
+            message = (
+                f"Generated {dataset_result.num_generated}/{num_samples} files "
+                f"in {dataset_result.output_dir}\n\n"
+                f"Manifest CSV: {dataset_result.manifest_csv_path}\n"
+                f"Manifest JSON: {dataset_result.manifest_json_path}"
+            )
+
         return {
-            "status": "complete",
-            "message": file_content,
-            "file_path": output_file_path,
-            "file_content": generated_file_text,
-            "gpr_schema": gpr_schema.model_dump(),
+            "status": status,
+            "message": message,
+            "dataset_result": dataset_result.model_dump(),
             "params": params_dump,
         }
 
@@ -1110,21 +1157,19 @@ if __name__ == "__main__":
     async def main():
         try:
             inp = """
-title=my_simulation,
-enforce_validity=True,
-We need to create a simulation. Create a 3 layer simulation with each layer with following config
-* thickness=0.4 , sand percentage=60, silt percentage= 30, clay percentage= 10, moisture content= 0.10, bulk density= 1.3, particle_density=2.65, salinity class=fresh, name=l1
-* thickness=0.6 , sand percentage=35, silt percentage= 40, clay percentage= 25, moisture content= 0.18, bulk density= 1.5, particle_density=2.65, salinity class=brackish, name=l2
-* thickness=1.0 , sand percentage=20, silt percentage= 40, clay percentage= 40, moisture content= 0.25, bulk density= 1.6, organic fraction=0.2 ,particle_density=2.65, name=l3
-
-Waveform= Ricker with 1.0 amplitude, 1.5e9 center frequency and name of my_ricker,Antenna= hertzian_dipole with axis as z and tx_rx_offset of 0.08
-source_height=0.07,domain_xy= 0.8 and 0.4,cells per wavelength= 15,max cells= 0.003,temperature = 20.0,model= mironov
+Generate 5 samples. title=test_dataset, enforce_validity=False.
+Layer 1: thickness 0.2 to 0.4m, sand 50 to 70%, silt 15 to 35%, clay 5 to 20%, water content 0.05 to 0.25, fresh or brackish, name=topsoil.
+Layer 2: thickness 0.3 to 0.6m, sand 20 to 40%, silt 30 to 50%, clay 15 to 35%, water content 0.10 to 0.30, name=subsoil.
+400 MHz ricker waveform, tx_rx_offset 0.08m.
+CRIM model, domain 0.6 x 0.4m, source height 0.07m, cells per wavelength 15, max cell 0.003, temperature 20.
             """
             result = await simulate_workflow(inp, user_id="test_user")
             print(f"Status: {result['status']}")
             print(f"Message: {result['message'][:500]}")
-            if result.get("file_path"):
-                print(f"File generated at: {result['file_path']}")
+            if result.get("dataset_result"):
+                dr = result["dataset_result"]
+                print(f"Generated: {dr['num_generated']}/{dr['num_requested']} files")
+                print(f"Output dir: {dr['output_dir']}")
         except Exception as e:
             print(f"Error: {e}")
             import traceback

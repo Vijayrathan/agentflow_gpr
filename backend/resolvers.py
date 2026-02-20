@@ -1,13 +1,11 @@
 """
 Resolver functions that convert user-friendly extraction results (from subagents)
 into fully-resolved schemas ready for gprMax file generation.
-
-Uses lookup tables from soil_setup to fill defaults when users provide
-descriptive terms like texture_class="sandy_loam" instead of raw percentages.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from schema import (
@@ -23,105 +21,152 @@ from schema import (
     AggregatedExtraction,
 )
 from soil_setup import (
-    TEXTURE_DEFAULTS,
-    THETA_V_BY_TEXTURE_AND_STATE,
-    PARTICLE_DENSITY_DEFAULT,
-    ORGANIC_FRACTION_BY_LEVEL,
-    BULK_DENSITY_PRIOR,
-    SALINITY_CLASS_MAP,
-    POREWATER_SIGMA_PRIOR,
     ANTENNA_PRESET_TO_FREQ_HZ,
     ANTENNA_PRESET_TO_TXRX_OFFSET_M,
     QUALITY_TO_MESH,
-    _texture_bucket,
 )
 
 logger = logging.getLogger(__name__)
 
+VALID_SALINITY_CLASSES = {"fresh", "slightly_saline", "brackish", "saline"}
+
 
 # ---------------------------------------------------------------------------
-# Layer resolver
+# Resolved layer range dataclass
 # ---------------------------------------------------------------------------
 
-def resolve_layer(layer: ExtractedLayerParams) -> LayerSchema:
-    """Resolve a single extracted layer into a fully-specified LayerSchema."""
+@dataclass
+class ResolvedLayerRange:
+    """Validated min/max ranges for a single layer, ready for sampling."""
+    name: Optional[str]
+    thickness_m_min: float
+    thickness_m_max: float
+    sand_pct_min: float
+    sand_pct_max: float
+    silt_pct_min: float
+    silt_pct_max: float
+    clay_pct_min: float
+    clay_pct_max: float
+    theta_v_min: float
+    theta_v_max: float
+    bulk_density_gcm3_min: Optional[float]
+    bulk_density_gcm3_max: Optional[float]
+    particle_density_gcm3_min: Optional[float]
+    particle_density_gcm3_max: Optional[float]
+    organic_fraction: float          # single value, defaults to 0.0
+    salinity_classes: Optional[List[str]]
+    porewater_sigma_Sm: Optional[float]
 
-    # Texture fractions: prefer explicit overrides, fall back to texture_class lookup
-    if layer.sand_pct is not None and layer.silt_pct is not None and layer.clay_pct is not None:
-        sand, silt, clay = layer.sand_pct, layer.silt_pct, layer.clay_pct
-    elif layer.texture_class and layer.texture_class in TEXTURE_DEFAULTS:
-        sand, silt, clay = TEXTURE_DEFAULTS[layer.texture_class]
+
+# ---------------------------------------------------------------------------
+# Layer resolver — returns a ResolvedLayerRange (validation only, no sampling)
+# ---------------------------------------------------------------------------
+
+def resolve_layer(layer: ExtractedLayerParams) -> ResolvedLayerRange:
+    """Validate and promote ExtractedLayerParams into a ResolvedLayerRange."""
+    errors = []
+
+    # Thickness
+    t_min = layer.thickness_m_min
+    t_max = layer.thickness_m_max
+    if t_min is None or t_max is None:
+        errors.append("thickness_m_min and thickness_m_max are required")
     else:
-        sand, silt, clay = None, None, None
+        if t_min <= 0:
+            errors.append("thickness_m_min must be > 0")
+        if t_max < t_min:
+            errors.append("thickness_m_max must be >= thickness_m_min")
 
-    # Volumetric water content
-    if layer.theta_v is not None:
-        theta_v = layer.theta_v
-    elif layer.texture_class and layer.moisture_state:
-        table = THETA_V_BY_TEXTURE_AND_STATE.get(layer.texture_class, {})
-        theta_v = table.get(layer.moisture_state)
+    # Sand/silt/clay ranges
+    for param, lo, hi in [
+        ("sand_pct", layer.sand_pct_min, layer.sand_pct_max),
+        ("silt_pct", layer.silt_pct_min, layer.silt_pct_max),
+        ("clay_pct", layer.clay_pct_min, layer.clay_pct_max),
+    ]:
+        if lo is None or hi is None:
+            errors.append(f"{param}_min and {param}_max are required")
+        else:
+            if not (0 <= lo <= 100):
+                errors.append(f"{param}_min must be in [0, 100]")
+            if not (0 <= hi <= 100):
+                errors.append(f"{param}_max must be in [0, 100]")
+            if hi < lo:
+                errors.append(f"{param}_max must be >= {param}_min")
+
+    # Theta_v ranges
+    tv_min = layer.theta_v_min
+    tv_max = layer.theta_v_max
+    if tv_min is None or tv_max is None:
+        errors.append("theta_v_min and theta_v_max are required")
     else:
-        theta_v = None
+        if not (0 <= tv_min <= 1):
+            errors.append("theta_v_min must be in [0, 1]")
+        if not (0 <= tv_max <= 1):
+            errors.append("theta_v_max must be in [0, 1]")
+        if tv_max < tv_min:
+            errors.append("theta_v_max must be >= theta_v_min")
 
-    # Organic fraction
-    if layer.organic_fraction is not None:
-        organic_fraction = layer.organic_fraction
-    elif layer.organic_level and layer.organic_level in ORGANIC_FRACTION_BY_LEVEL:
-        organic_fraction = ORGANIC_FRACTION_BY_LEVEL[layer.organic_level]
-    else:
-        organic_fraction = 0.0
+    # Optional density ranges
+    bd_min = layer.bulk_density_gcm3_min
+    bd_max = layer.bulk_density_gcm3_max
+    if bd_min is not None or bd_max is not None:
+        if bd_min is None or bd_max is None:
+            errors.append("bulk_density_gcm3_min and _max must both be provided or both omitted")
+        else:
+            if bd_min <= 0:
+                errors.append("bulk_density_gcm3_min must be > 0")
+            if bd_max < bd_min:
+                errors.append("bulk_density_gcm3_max must be >= bulk_density_gcm3_min")
 
-    # Particle density
-    if layer.particle_density_gcm3 is not None:
-        particle_density = layer.particle_density_gcm3
-    else:
-        organic_lvl = layer.organic_level or "none"
-        particle_density = 2.30 if organic_lvl == "high_peaty" else PARTICLE_DENSITY_DEFAULT
+    pd_min = layer.particle_density_gcm3_min
+    pd_max = layer.particle_density_gcm3_max
+    if pd_min is not None or pd_max is not None:
+        if pd_min is None or pd_max is None:
+            errors.append("particle_density_gcm3_min and _max must both be provided or both omitted")
+        else:
+            if pd_min <= 0:
+                errors.append("particle_density_gcm3_min must be > 0")
+            if pd_max < pd_min:
+                errors.append("particle_density_gcm3_max must be >= particle_density_gcm3_min")
 
-    # Bulk density
-    if layer.bulk_density_gcm3 is not None:
-        bulk_density = layer.bulk_density_gcm3
-    elif layer.texture_class:
-        organic_lvl = layer.organic_level or "none"
-        compaction = layer.compaction_level or "normal"
-        bucket = _texture_bucket(layer.texture_class, organic_lvl)
-        bulk_density = BULK_DENSITY_PRIOR.get(bucket, {}).get(compaction, 1.35)
-    else:
-        bulk_density = None
+    # Salinity classes
+    sal_classes = layer.salinity_classes
+    if sal_classes is not None:
+        invalid = [c for c in sal_classes if c not in VALID_SALINITY_CLASSES]
+        if invalid:
+            errors.append(
+                f"Invalid salinity_classes: {invalid}. "
+                f"Valid values: {sorted(VALID_SALINITY_CLASSES)}"
+            )
 
-    # Salinity class
-    if layer.salinity_class is not None:
-        salinity_class = layer.salinity_class
-    elif layer.salinity_environment and layer.salinity_environment in SALINITY_CLASS_MAP:
-        salinity_class = SALINITY_CLASS_MAP[layer.salinity_environment]
-    else:
-        salinity_class = None
+    if errors:
+        name_label = f"layer '{layer.name}'" if layer.name else "layer"
+        raise ValueError(f"Validation errors for {name_label}: " + "; ".join(errors))
 
-    # Porewater conductivity
-    if layer.porewater_sigma_Sm is not None:
-        porewater_sigma = layer.porewater_sigma_Sm
-    elif layer.salinity_environment and layer.salinity_environment in POREWATER_SIGMA_PRIOR:
-        porewater_sigma = POREWATER_SIGMA_PRIOR[layer.salinity_environment]
-    else:
-        porewater_sigma = None
-
-    return LayerSchema(
+    return ResolvedLayerRange(
         name=layer.name,
-        thickness_m=layer.thickness_m,
-        sand_pct=sand,
-        silt_pct=silt,
-        clay_pct=clay,
-        theta_v=theta_v,
-        bulk_density_gcm3=bulk_density,
-        particle_density_gcm3=particle_density,
-        organic_fraction=organic_fraction,
-        salinity_class=salinity_class,
-        porewater_sigma_Sm=porewater_sigma,
+        thickness_m_min=t_min,
+        thickness_m_max=t_max,
+        sand_pct_min=layer.sand_pct_min,
+        sand_pct_max=layer.sand_pct_max,
+        silt_pct_min=layer.silt_pct_min,
+        silt_pct_max=layer.silt_pct_max,
+        clay_pct_min=layer.clay_pct_min,
+        clay_pct_max=layer.clay_pct_max,
+        theta_v_min=tv_min,
+        theta_v_max=tv_max,
+        bulk_density_gcm3_min=bd_min,
+        bulk_density_gcm3_max=bd_max,
+        particle_density_gcm3_min=pd_min,
+        particle_density_gcm3_max=pd_max,
+        organic_fraction=layer.organic_fraction if layer.organic_fraction is not None else 0.0,
+        salinity_classes=sal_classes,
+        porewater_sigma_Sm=layer.porewater_sigma_Sm,
     )
 
 
-def resolve_layers(extracted: ExtractedLayers) -> List[LayerSchema]:
-    """Resolve all extracted layers."""
+def resolve_layers(extracted: ExtractedLayers) -> List[ResolvedLayerRange]:
+    """Resolve all extracted layers into ResolvedLayerRange objects."""
     return [resolve_layer(layer) for layer in extracted.layers]
 
 
@@ -253,22 +298,37 @@ def merge_aggregations(
 # ---------------------------------------------------------------------------
 
 def _check_layer_completeness(layer: ExtractedLayerParams, index: int) -> List[str]:
-    """Check if a raw extracted layer has enough data to be resolved."""
+    """Check if a raw extracted layer has enough range data to be resolved."""
     problems = []
-    if layer.thickness_m is None:
-        problems.append("thickness_m")
 
-    has_pcts = (layer.sand_pct is not None and layer.silt_pct is not None and layer.clay_pct is not None)
-    has_texture = (layer.texture_class is not None and layer.texture_class in TEXTURE_DEFAULTS)
-    if not has_pcts and not has_texture:
-        problems.append("sand_pct/silt_pct/clay_pct (or texture_class)")
+    if layer.thickness_m_min is None or layer.thickness_m_max is None:
+        problems.append("thickness_m_min and thickness_m_max")
 
-    has_theta = layer.theta_v is not None
-    has_moisture = (layer.texture_class is not None and layer.moisture_state is not None)
-    if not has_theta and not has_moisture:
-        problems.append("theta_v (or texture_class + moisture_state)")
+    has_sand = layer.sand_pct_min is not None and layer.sand_pct_max is not None
+    has_silt = layer.silt_pct_min is not None and layer.silt_pct_max is not None
+    has_clay = layer.clay_pct_min is not None and layer.clay_pct_max is not None
+    if not (has_sand and has_silt and has_clay):
+        problems.append("sand_pct_min/max, silt_pct_min/max, clay_pct_min/max (all required)")
+
+    has_theta = layer.theta_v_min is not None and layer.theta_v_max is not None
+    if not has_theta:
+        problems.append("theta_v_min and theta_v_max")
 
     return [f"- Layer {index}: {', '.join(problems)}"] if problems else []
+
+
+def _layer_has_any_range(layer: ExtractedLayerParams) -> bool:
+    """Return True if at least one ranged parameter has min < max (genuine variability)."""
+    pairs = [
+        (layer.thickness_m_min, layer.thickness_m_max),
+        (layer.sand_pct_min, layer.sand_pct_max),
+        (layer.silt_pct_min, layer.silt_pct_max),
+        (layer.clay_pct_min, layer.clay_pct_max),
+        (layer.theta_v_min, layer.theta_v_max),
+        (layer.bulk_density_gcm3_min, layer.bulk_density_gcm3_max),
+        (layer.particle_density_gcm3_min, layer.particle_density_gcm3_max),
+    ]
+    return any(lo is not None and hi is not None and hi > lo for lo, hi in pairs)
 
 
 def merge_extractions(
@@ -288,12 +348,31 @@ def merge_extractions(
     """
     missing: List[str] = []
 
+    # --- num_samples ---
+    if model_result.num_samples is None or model_result.num_samples < 1:
+        missing.append("- num_samples (number of .in files to generate, e.g. '100 samples')")
+
     # --- Layers (check raw data, don't resolve yet) ---
+    num_samples = model_result.num_samples or 0
     if not layers_result.layers:
         missing.append("- At least one soil layer is required")
     else:
         for i, layer in enumerate(layers_result.layers, 1):
             missing.extend(_check_layer_completeness(layer, i))
+
+        # When generating >1 sample, require at least one layer to have genuine ranges.
+        # If every parameter in every layer has min == max, all samples would be identical.
+        if num_samples > 1:
+            any_layer_has_range = any(
+                _layer_has_any_range(layer) for layer in layers_result.layers
+            )
+            if not any_layer_has_range:
+                missing.append(
+                    "- At least one layer parameter must be a range (min < max) when generating "
+                    f"multiple samples (you requested {num_samples}). "
+                    "Example: 'thickness 0.2 to 0.5m', 'sand 40 to 70%', 'theta_v 0.05 to 0.25'. "
+                    "Without ranges all generated files will be identical."
+                )
 
     # --- Antenna + Waveform (safe — returns None when incomplete) ---
     antenna, waveform = resolve_antenna_waveform(antenna_wf_result)
@@ -323,8 +402,40 @@ def merge_extractions(
     if missing:
         return None, missing
 
-    # Everything present — safe to resolve layers into strict LayerSchema
-    resolved_layers = resolve_layers(layers_result)
+    # Everything present — safe to resolve layers into ResolvedLayerRange then build a
+    # template GprSchema with a placeholder single layer for validation purposes.
+    # The real per-sample layers are built by dataset_generator.
+    resolved_ranges = resolve_layers(layers_result)
+
+    # Build a representative GprSchema using the midpoint of each range for validation.
+    # dataset_generator.py will build per-sample GprSchema objects.
+    def _mid(lo, hi):
+        return (lo + hi) / 2.0 if lo is not None and hi is not None else None
+
+    template_layers = []
+    for r in resolved_ranges:
+        sand_mid = _mid(r.sand_pct_min, r.sand_pct_max)
+        silt_mid = _mid(r.silt_pct_min, r.silt_pct_max)
+        clay_mid = _mid(r.clay_pct_min, r.clay_pct_max)
+        # Normalise to 100
+        total = sand_mid + silt_mid + clay_mid
+        if total > 0:
+            sand_mid = round(100 * sand_mid / total, 6)
+            silt_mid = round(100 * silt_mid / total, 6)
+            clay_mid = round(100 - sand_mid - silt_mid, 6)
+        template_layers.append(LayerSchema(
+            name=r.name,
+            thickness_m=_mid(r.thickness_m_min, r.thickness_m_max),
+            sand_pct=sand_mid,
+            silt_pct=silt_mid,
+            clay_pct=clay_mid,
+            theta_v=_mid(r.theta_v_min, r.theta_v_max),
+            bulk_density_gcm3=_mid(r.bulk_density_gcm3_min, r.bulk_density_gcm3_max),
+            particle_density_gcm3=_mid(r.particle_density_gcm3_min, r.particle_density_gcm3_max),
+            organic_fraction=r.organic_fraction,
+            salinity_class=r.salinity_classes[0] if r.salinity_classes else None,
+            porewater_sigma_Sm=r.porewater_sigma_Sm,
+        ))
 
     gpr = GprSchema(
         model=model_dict["model"],
@@ -338,7 +449,7 @@ def merge_extractions(
         enforce_validity=model_dict["enforce_validity"],
         waveform=waveform,
         antenna=antenna,
-        layers=resolved_layers,
+        layers=template_layers,
         surface_roughness=optional_result.surface_roughness,
         snapshots=optional_result.snapshots,
         rx_array=optional_result.rx_array,

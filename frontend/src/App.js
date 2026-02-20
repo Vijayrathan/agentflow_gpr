@@ -150,6 +150,14 @@ function App() {
           thought_process: data.thought_process || [],
           generated_file_path: data.generated_file_path,
           file_content: data.file_content,
+          // Dataset generation fields
+          num_generated: data.num_generated,
+          num_failed: data.num_failed,
+          num_requested: data.num_requested,
+          dataset_output_dir: data.dataset_output_dir,
+          manifest_csv_path: data.manifest_csv_path,
+          manifest_json_path: data.manifest_json_path,
+          dataset_errors: data.dataset_errors,
         };
         setMessages((prev) => [...prev, assistantMessage]);
 
@@ -643,6 +651,49 @@ function App() {
                     );
                   })()}
                 </div>
+                {msg.num_generated != null && (
+                  <div className="dataset-result-summary">
+                    <div className={`dataset-result-header ${msg.num_failed > 0 ? "partial" : "complete"}`}>
+                      <span className="dataset-result-icon">
+                        {msg.num_failed === 0 ? "✓" : "⚠"}
+                      </span>
+                      <span className="dataset-result-title">
+                        Dataset Generated: {msg.num_generated}/{msg.num_requested} files
+                        {msg.num_failed > 0 && ` (${msg.num_failed} failed)`}
+                      </span>
+                    </div>
+                    <div className="dataset-result-body">
+                      {msg.dataset_output_dir && (
+                        <div className="dataset-result-row">
+                          <span className="dataset-result-label">Output:</span>
+                          <span className="dataset-result-value mono">{msg.dataset_output_dir}</span>
+                        </div>
+                      )}
+                      {msg.manifest_csv_path && (
+                        <div className="dataset-result-row">
+                          <span className="dataset-result-label">Manifest CSV:</span>
+                          <span className="dataset-result-value mono">{msg.manifest_csv_path}</span>
+                        </div>
+                      )}
+                      {msg.manifest_json_path && (
+                        <div className="dataset-result-row">
+                          <span className="dataset-result-label">Manifest JSON:</span>
+                          <span className="dataset-result-value mono">{msg.manifest_json_path}</span>
+                        </div>
+                      )}
+                      {msg.dataset_errors && msg.dataset_errors.length > 0 && (
+                        <div className="dataset-result-errors">
+                          <span className="dataset-result-label">Errors ({msg.dataset_errors.length}):</span>
+                          <ul>
+                            {msg.dataset_errors.map((err, ei) => (
+                              <li key={ei} className="dataset-error-item">{err}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {msg.status === "error" && (
                   <div className="status-badge error">Error</div>
                 )}
