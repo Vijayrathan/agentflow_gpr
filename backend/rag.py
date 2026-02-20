@@ -230,6 +230,9 @@ class GeophysicsRAG:
         Step 3: Hybrid Retrieval + Reranking
         Only available in inference mode.
         """
+        # --- DEBUGGING BLOCK START ---
+        print(f"\n[DEBUG] Qdrant Client Type: {type(self.qdrant)}")
+        print(f"[DEBUG] Available methods: {[m for m in dir(self.qdrant) if 'search' in m]}")
         if self.mode != "inference":
             raise ValueError("search is only available in inference mode.")
         
@@ -269,6 +272,7 @@ class GeophysicsRAG:
         
         try:
             # Dense vector search
+            # FIXED: Changed search_points to search
             dense_results = self.qdrant.search(
                 collection_name=self.collection_name,
                 query_vector=("dense", q_dense),
@@ -283,6 +287,7 @@ class GeophysicsRAG:
                     candidate_map[point_id] = result
             
             # Sparse vector search
+            # FIXED: Changed search_points to search
             sparse_results = self.qdrant.search(
                 collection_name=self.collection_name,
                 query_vector=("sparse", models.SparseVector(indices=q_sparse_indices, values=q_sparse_values)),
@@ -296,13 +301,14 @@ class GeophysicsRAG:
                 if point_id not in candidate_map:
                     candidate_map[point_id] = result
             
-            # Combine results (simple union for now, could use RRF scoring)
+            # Combine results (simple union for now)
             points = list(candidate_map.values())
             
         except Exception as e:
             print(f"⚠️  Error during hybrid search: {e}")
             print("Trying fallback dense search...")
             # Fallback to simple dense search
+            # FIXED: Changed search_points to search
             points = self.qdrant.search(
                 collection_name=self.collection_name,
                 query_vector=("dense", q_dense),
@@ -338,6 +344,7 @@ class GeophysicsRAG:
         ranked_results = sorted(zip(candidate_docs, scores), key=lambda x: x[1], reverse=True)
         
         return ranked_results[:top_k]
+       
     
     def close(self):
         """

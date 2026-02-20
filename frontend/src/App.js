@@ -8,6 +8,7 @@ function App() {
   const [sessionId] = useState(
     () => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
   );
+  const [mode, setMode] = useState(null); // "simulate" or "qa"
   const [generatedFile, setGeneratedFile] = useState(null);
   const [expandedThoughts, setExpandedThoughts] = useState(new Set());
   const [simulationLoading, setSimulationLoading] = useState(false);
@@ -67,18 +68,38 @@ function App() {
   }, [messages, generatedFile]);
 
   useEffect(() => {
-    // Welcome message
     setMessages([
       {
         role: "assistant",
-        content:
-          "Welcome! I'm here to help you generate gprMax input files. Tell me about the simulation you want to create, and I'll guide you through the process.\n\nYou can describe your model, layers, waveform, antenna, and other parameters. I'll ask for any missing information until we have everything needed to generate the input file.",
+        content: "Welcome to the Intelligent GPR Simulator! What would you like to do?",
+        type: "mode_select",
       },
     ]);
   }, []);
 
+  const selectMode = (selectedMode) => {
+    setMode(selectedMode);
+    const modeLabel = selectedMode === "simulate" ? "Simulation" : "Q&A";
+    const followUp =
+      selectedMode === "simulate"
+        ? "Describe your simulation — layers, antenna, waveform, model, and any other parameters. I'll ask for anything that's missing."
+        : "Ask me anything about Ground Penetrating Radar (GPR) or geophysics, and I'll find the answer for you.";
+
+    setMessages((prev) => {
+      const updated = prev.map((msg) =>
+        msg.type === "mode_select" ? { ...msg, type: "mode_selected" } : msg
+      );
+      return [
+        ...updated,
+        { role: "user", content: modeLabel },
+        { role: "assistant", content: followUp },
+      ];
+    });
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
+    if (!mode) return; // mode must be selected first
 
     const userMessage = input.trim();
     setInput("");
@@ -97,6 +118,7 @@ function App() {
         body: JSON.stringify({
           message: userMessage,
           session_id: sessionId,
+          mode: mode,
         }),
       });
 
@@ -282,11 +304,12 @@ function App() {
         },
         body: JSON.stringify({ session_id: sessionId }),
       });
+      setMode(null);
       setMessages([
         {
           role: "assistant",
-          content:
-            "Conversation reset. How can I help you create a new gprMax simulation?",
+          content: "Welcome to the Intelligent GPR Simulator! What would you like to do?",
+          type: "mode_select",
         },
       ]);
       setGeneratedFile(null);
@@ -488,6 +511,34 @@ function App() {
               <div className="message-content">
                 <div className="message-text">
                   {(() => {
+                    // Mode selection buttons
+                    if (msg.type === "mode_select") {
+                      return (
+                        <>
+                          {msg.content.split("\n").map((line, i, arr) => (
+                            <React.Fragment key={i}>
+                              {line}
+                              {i < arr.length - 1 && <br />}
+                            </React.Fragment>
+                          ))}
+                          <div className="mode-select-buttons">
+                            <button
+                              className="mode-button simulate"
+                              onClick={() => selectMode("simulate")}
+                            >
+                              Simulation
+                            </button>
+                            <button
+                              className="mode-button qa"
+                              onClick={() => selectMode("qa")}
+                            >
+                              Q&A
+                            </button>
+                          </div>
+                        </>
+                      );
+                    }
+
                     const parsed =
                       msg.role === "assistant"
                         ? parseInputParametersBlock(msg.content)
@@ -747,8 +798,8 @@ function App() {
               adjustTextareaHeight();
             }}
             onKeyPress={handleKeyPress}
-            placeholder="Type your message... (Press Enter to send, Shift+Enter for new line)"
-            disabled={loading}
+            placeholder={mode ? "Type your message... (Press Enter to send, Shift+Enter for new line)" : "Please select Simulation or Q&A above to get started"}
+            disabled={loading || !mode}
             aria-label="Message input"
           />
           <button

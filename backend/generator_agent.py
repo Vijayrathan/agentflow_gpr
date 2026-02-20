@@ -1,7 +1,11 @@
 from pydantic_ai import Agent
 from pydantic import BaseModel
-from physics_modelling import generate_gprmax_input_file
-from typing import List, Optional, Dict, Any
+from physics_modelling import (
+    generate_gprmax_input_file, VALID_WAVEFORMS,
+    CylinderObject, BoxObject, SphereObject, CustomMaterial,
+    SurfaceRoughnessConfig, RxArrayConfig, SnapshotConfig,
+)
+from typing import List, Optional, Dict, Any, Tuple
 import os
 import dotenv
 import asyncio
@@ -12,7 +16,16 @@ import subprocess
 import shutil
 import sys
 from pathlib import Path
-from schema import GprSchema, WaveformSchema, AntennaSchema, LayerSchema, ExtractedParameters
+from schema import (
+    GprSchema, WaveformSchema, AntennaSchema, LayerSchema,
+    ExtractedLayers, ExtractedLayerParams,
+    ExtractedAntennaWaveform,
+    ExtractedModelConfig,
+    ExtractedOptionalParams,
+    AggregatedExtraction,
+)
+from resolvers import merge_extractions, merge_aggregations
+from rag import GeophysicsRAG
 
 # Set up logging
 logging.basicConfig(
@@ -32,6 +45,18 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 openai_model = "gpt-4.1"
 
 openai_client = openai.OpenAI(api_key=openai_api_key)
+
+def call_rag(query: str) -> List[str]:
+    """
+    Call the RAG model to retrieve relevant information from the database.
+    """
+    rag = GeophysicsRAG(mode="inference")
+    results = rag.search(query)
+    relevant_docs = []
+    for i, (doc, score) in enumerate(results, 1):
+        if score > 0.5:
+            relevant_docs.append(doc)
+    return relevant_docs
 
 def get_workspace_directory() -> Path:
     """
@@ -343,8 +368,7 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     """Generate gprMax input file from complete GprSchema"""
     global _current_output_filename
     logger.info(f"[TOOL CALL] generate_gprmax_input_file_tool - Generating gprMax input file for: {gpr_data.title}")
-    # Convert GprSchema to the format expected by generate_gprmax_input_file
-    
+
     layer_thicknesses_m = [layer.thickness_m for layer in gpr_data.layers]
     layer_sand_pcts = [layer.sand_pct for layer in gpr_data.layers]
     layer_silt_pcts = [layer.silt_pct for layer in gpr_data.layers]
@@ -356,10 +380,48 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
     layer_salinity_classes = [layer.salinity_class for layer in gpr_data.layers]
     layer_porewater_sigmas_Sm = [layer.porewater_sigma_Sm for layer in gpr_data.layers]
     layer_names = [layer.name for layer in gpr_data.layers]
-    
-    # Use the global output filename if set, otherwise use default
+
     output_filename = _current_output_filename if _current_output_filename else "generated.in"
-    
+
+    # Build objects list from schema (not yet wired through GprSchema but ready for future)
+    objects = None
+
+    # Convert surface_roughness schema to dataclass
+    surface_roughness = None
+    if gpr_data.surface_roughness is not None:
+        sr = gpr_data.surface_roughness
+        surface_roughness = SurfaceRoughnessConfig(
+            fractal_dim=sr.fractal_dim,
+            weight_x=sr.weight_x,
+            weight_y=sr.weight_y,
+            amplitude_m=sr.amplitude_m,
+            add_water=sr.add_water,
+            water_depth_m=sr.water_depth_m,
+            seed=sr.seed,
+        )
+
+    # Convert rx_array schema to dataclass
+    rx_array = None
+    if gpr_data.rx_array is not None:
+        ra = gpr_data.rx_array
+        rx_array = RxArrayConfig(
+            x1=ra.x1, y1=ra.y1, z1=ra.z1,
+            x2=ra.x2, y2=ra.y2, z2=ra.z2,
+            dx=ra.dx, dy=ra.dy, dz=ra.dz,
+        )
+
+    # Convert snapshots schema to dataclass list
+    snapshots = None
+    if gpr_data.snapshots is not None:
+        snapshots = []
+        for s in gpr_data.snapshots:
+            snapshots.append(SnapshotConfig(
+                time_s=s.time_s, filename=s.filename,
+                dx=s.dx, dy=s.dy, dz=s.dz,
+                x1=s.x1, y1=s.y1, z1=s.z1,
+                x2=s.x2, y2=s.y2, z2=s.z2,
+            ))
+
     text = generate_gprmax_input_file(
         layer_thicknesses_m=layer_thicknesses_m,
         layer_sand_pcts=layer_sand_pcts,
@@ -379,6 +441,8 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
         antenna_kind=gpr_data.antenna.kind,
         antenna_axis=gpr_data.antenna.axis,
         antenna_tx_rx_offset_m=gpr_data.antenna.tx_rx_offset_m,
+        antenna_source_start_time=gpr_data.antenna.source_start_time,
+        antenna_source_end_time=gpr_data.antenna.source_end_time,
         model_title=gpr_data.title,
         source_height_m=gpr_data.source_height_m,
         domain_xy_m=(gpr_data.domain_x, gpr_data.domain_y),
@@ -389,6 +453,13 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
         model=gpr_data.model,
         enforce_validity=gpr_data.enforce_validity,
         output_filename=output_filename,
+        objects=objects,
+        pml_cells=gpr_data.pml_cells,
+        num_threads=gpr_data.num_threads,
+        output_dir=gpr_data.output_dir,
+        surface_roughness=surface_roughness,
+        snapshots=snapshots,
+        rx_array=rx_array,
     )
     result_msg = f"Successfully generated gprMax input file for: {gpr_data.title} \n\n {text}"
     logger.info(f"[TOOL RESULT] generate_gprmax_input_file_tool - {result_msg}")
@@ -396,115 +467,27 @@ def generate_gprmax_input_file_tool(gpr_data: GprSchema) -> str:
 
 
 
-def check_input_completeness(extracted: ExtractedParameters) -> tuple[bool, str]:
-    """Check if all required parameters are provided. Returns (is_complete, missing_params_message)"""
+def check_input_completeness(aggregated: AggregatedExtraction) -> tuple[bool, str]:
+    """Check if all required parameters are present after subagent extraction.
+
+    Uses the resolver's merge_extractions which returns a list of missing fields.
+    Returns (is_complete, missing_params_message).
+    """
     logger.info("[TOOL CALL] check_input_completeness - Checking if all required parameters are provided")
-    missing = []
-    
-    # Check global parameters
-    if extracted.model is None:
-        missing.append("- model (dielectric model: 'crim', 'peplinski', 'dobson', or 'mironov')")
-    if extracted.title is None:
-        missing.append("- title (simulation title)")
-    if extracted.source_height_m is None:
-        missing.append("- source_height_m (source height in meters)")
-    if extracted.domain_x is None:
-        missing.append("- domain_x (domain size in x direction, meters)")
-    if extracted.domain_y is None:
-        missing.append("- domain_y (domain size in y direction, meters)")
-    if extracted.cells_per_wavelength is None:
-        missing.append("- cells_per_wavelength (grid resolution)")
-    if extracted.max_cell_m is None:
-        missing.append("- max_cell_m (maximum cell size in meters)")
-    if extracted.temperature_c is None:
-        missing.append("- temperature_c (temperature in Celsius)")
-    if extracted.enforce_validity is None:
-        missing.append("- enforce_validity (boolean)")
-    
-    # Check waveform
-    if extracted.waveform is None:
-        missing.append("- waveform (kind, amplitude, center_freq_hz, name)")
-    else:
-        # Handle both dict and object access
-        if isinstance(extracted.waveform, dict):
-            if "kind" not in extracted.waveform or extracted.waveform["kind"] is None:
-                missing.append("- waveform.kind ('ricker' or 'gaussian')")
-            if "amplitude" not in extracted.waveform or extracted.waveform["amplitude"] is None:
-                missing.append("- waveform.amplitude")
-            if "center_freq_hz" not in extracted.waveform or extracted.waveform["center_freq_hz"] is None:
-                missing.append("- waveform.center_freq_hz (center frequency in Hz)")
-            if "name" not in extracted.waveform or extracted.waveform["name"] is None:
-                missing.append("- waveform.name")
-        else:
-            if not hasattr(extracted.waveform, "kind") or getattr(extracted.waveform, "kind", None) is None:
-                missing.append("- waveform.kind ('ricker' or 'gaussian')")
-            if not hasattr(extracted.waveform, "amplitude") or getattr(extracted.waveform, "amplitude", None) is None:
-                missing.append("- waveform.amplitude")
-            if not hasattr(extracted.waveform, "center_freq_hz") or getattr(extracted.waveform, "center_freq_hz", None) is None:
-                missing.append("- waveform.center_freq_hz (center frequency in Hz)")
-            if not hasattr(extracted.waveform, "name") or getattr(extracted.waveform, "name", None) is None:
-                missing.append("- waveform.name")
-    
-    # Check antenna
-    if extracted.antenna is None:
-        missing.append("- antenna (kind, axis, tx_rx_offset_m)")
-    else:
-        # Handle both dict and object access
-        if isinstance(extracted.antenna, dict):
-            if "kind" not in extracted.antenna or extracted.antenna["kind"] is None:
-                missing.append("- antenna.kind ('hertzian_dipole')")
-            if "axis" not in extracted.antenna or extracted.antenna["axis"] is None:
-                missing.append("- antenna.axis ('x', 'y', or 'z')")
-            if "tx_rx_offset_m" not in extracted.antenna or extracted.antenna["tx_rx_offset_m"] is None:
-                missing.append("- antenna.tx_rx_offset_m (transmitter-receiver offset in meters)")
-        else:
-            if not hasattr(extracted.antenna, "kind") or getattr(extracted.antenna, "kind", None) is None:
-                missing.append("- antenna.kind ('hertzian_dipole')")
-            if not hasattr(extracted.antenna, "axis") or getattr(extracted.antenna, "axis", None) is None:
-                missing.append("- antenna.axis ('x', 'y', or 'z')")
-            if not hasattr(extracted.antenna, "tx_rx_offset_m") or getattr(extracted.antenna, "tx_rx_offset_m", None) is None:
-                missing.append("- antenna.tx_rx_offset_m (transmitter-receiver offset in meters)")
-    
-    # Check layers
-    if extracted.num_layers is None or extracted.num_layers <= 0:
-        missing.append("- num_layers (number of layers, must be > 0)")
-    elif extracted.layers is None or len(extracted.layers) != extracted.num_layers:
-        missing.append(f"- layers (need {extracted.num_layers} layer(s) with complete data)")
-    else:
-        for i, layer in enumerate(extracted.layers, 1):
-            layer_missing = []
-            # Handle both dict and object access
-            if isinstance(layer, dict):
-                if "thickness_m" not in layer or layer["thickness_m"] is None:
-                    layer_missing.append("thickness_m")
-                if "sand_pct" not in layer or layer["sand_pct"] is None:
-                    layer_missing.append("sand_pct")
-                if "silt_pct" not in layer or layer["silt_pct"] is None:
-                    layer_missing.append("silt_pct")
-                if "clay_pct" not in layer or layer["clay_pct"] is None:
-                    layer_missing.append("clay_pct")
-                if "theta_v" not in layer or layer["theta_v"] is None:
-                    layer_missing.append("theta_v (volumetric water content)")
-            else:
-                if not hasattr(layer, "thickness_m") or getattr(layer, "thickness_m", None) is None:
-                    layer_missing.append("thickness_m")
-                if not hasattr(layer, "sand_pct") or getattr(layer, "sand_pct", None) is None:
-                    layer_missing.append("sand_pct")
-                if not hasattr(layer, "silt_pct") or getattr(layer, "silt_pct", None) is None:
-                    layer_missing.append("silt_pct")
-                if not hasattr(layer, "clay_pct") or getattr(layer, "clay_pct", None) is None:
-                    layer_missing.append("clay_pct")
-                if not hasattr(layer, "theta_v") or getattr(layer, "theta_v", None) is None:
-                    layer_missing.append("theta_v (volumetric water content)")
-            
-            if layer_missing:
-                missing.append(f"- Layer {i}: {', '.join(layer_missing)}")
-    
+
+    _, missing = merge_extractions(
+        aggregated.layers,
+        aggregated.antenna_waveform,
+        aggregated.model_params,
+        aggregated.optional_params,
+    )
+
     if missing:
         missing_msg = "\n".join(missing)
         logger.info(f"[TOOL RESULT] check_input_completeness - Parameters incomplete. Missing: {len(missing)} parameter(s)")
         logger.debug(f"[TOOL RESULT] check_input_completeness - Missing details: {missing_msg}")
         return False, missing_msg
+
     logger.info("[TOOL RESULT] check_input_completeness - All required parameters are present")
     return True, ""
 
@@ -577,8 +560,8 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
     
     # 4. Validate waveform (WaveformSpec rules)
     waveform_kind_lower = gpr_data.waveform.kind.lower()
-    if waveform_kind_lower not in {'ricker', 'gaussian'}:
-        errors.append(f"Invalid waveform.kind '{gpr_data.waveform.kind}'. Must be 'ricker' or 'gaussian'")
+    if waveform_kind_lower not in VALID_WAVEFORMS:
+        errors.append(f"Invalid waveform.kind '{gpr_data.waveform.kind}'. Must be one of: {', '.join(sorted(VALID_WAVEFORMS))}")
     
     # 5. Validate antenna (AntennaSpec.validate rules)
     antenna_kind_lower = gpr_data.antenna.kind.lower()
@@ -623,29 +606,47 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
             # CRIM has no restrictions
     
     # 7. Check source height constraint (from ModelSpec.build)
-    # This is approximate - we'd need to compute z_extent exactly, but we can check basic constraints
     total_layers_thick = sum(layer.thickness_m for layer in gpr_data.layers)
-    air_top = max(gpr_data.source_height_m + 6 * gpr_data.max_cell_m, 0.05)
+    air_top = max(gpr_data.source_height_m + 15 * gpr_data.max_cell_m, 0.10)
     z_extent = air_top + total_layers_thick
-    z_tx = air_top + gpr_data.source_height_m
-    
+    z_tx = air_top - gpr_data.source_height_m
+
     if z_tx >= z_extent:
         errors.append(f"Source height ({gpr_data.source_height_m} m) would exceed model z-extent. Consider reducing source_height_m or increasing domain size.")
-    
+
     # 8. Check domain dimensions are positive
     if gpr_data.domain_x <= 0:
         errors.append("domain_x must be > 0")
     if gpr_data.domain_y <= 0:
         errors.append("domain_y must be > 0")
-    
+
     # 9. Check cells_per_wavelength is positive
     if gpr_data.cells_per_wavelength <= 0:
         errors.append("cells_per_wavelength must be > 0")
-    
+
     # 10. Check max_cell_m is positive
     if gpr_data.max_cell_m <= 0:
         errors.append("max_cell_m must be > 0")
-    
+
+    # 11. pml_cells >= 2 if set
+    if gpr_data.pml_cells is not None and gpr_data.pml_cells < 2:
+        errors.append("pml_cells must be >= 2 if set")
+
+    # 12. Surface roughness validations
+    if gpr_data.surface_roughness is not None:
+        sr = gpr_data.surface_roughness
+        if sr.amplitude_m <= 0:
+            errors.append("surface_roughness.amplitude_m must be > 0")
+        if sr.fractal_dim < 0:
+            errors.append("surface_roughness.fractal_dim must be >= 0")
+        if sr.add_water and sr.water_depth_m >= sr.amplitude_m:
+            errors.append("surface_roughness.water_depth_m must be < amplitude_m when add_water=True")
+
+    # 13. Antenna source timing
+    if gpr_data.antenna.source_start_time is not None and gpr_data.antenna.source_end_time is not None:
+        if gpr_data.antenna.source_start_time >= gpr_data.antenna.source_end_time:
+            errors.append("antenna.source_start_time must be < source_end_time")
+
     if errors:
         error_msg = "Validation errors found:\n" + "\n".join(f"  - {err}" for err in errors)
         logger.warning(f"[TOOL RESULT] validate_gpr_parameters - Validation failed with {len(errors)} error(s)")
@@ -656,251 +657,403 @@ def validate_gpr_parameters(gpr_data: GprSchema) -> tuple[bool, str]:
     return True, ""
 
 
-async def extraction_agent(initial_input: str, user_responses: Optional[List[str]] = None):
-    """
-    Run the workflow to extract parameters and generate gprMax input file.
-    
-    Args:
-        initial_input: Initial user query
-        user_responses: Optional list of subsequent user responses (for iterative input collection)
-    
-    Returns:
-        dict with either:
-        - "status": "complete", "output": generated file info
-        - "status": "incomplete", "missing_params": formatted missing parameters message
-    """
-    logger.info("[TOOL CALL] extraction_agent - Extracting parameters from user input")
-    logger.debug(f"[TOOL CALL] extraction_agent - Input: {initial_input[:200]}..." if len(initial_input) > 200 else f"[TOOL CALL] extraction_agent - Input: {initial_input}")
-    system_prompt="""You are a parameter extraction assistant. Extract all parameters mentioned in the user's query about gprMax simulation setup.
-        
-        Extract the following information:
-        - Number of layers and their properties (thickness_m, sand_pct, silt_pct, clay_pct, theta_v, bulk_density_gcm3, particle_density_gcm3, organic_fraction, salinity_class, porewater_sigma_Sm, name)
-        - Waveform properties (kind, amplitude, center_freq_hz, name)
-        - Antenna properties (kind, axis, tx_rx_offset_m)
-        - Model properties (model, title, source_height_m, domain_x, domain_y, cells_per_wavelength, max_cell_m, temperature_c, enforce_validity)
-        
-        Return ONLY the parameters that are explicitly mentioned. Do not make up any parameters. Strictly leave the fields as None if not mentioned."""
-    
-    response = openai_client.responses.create(
+# ---------------------------------------------------------------------------
+# Subagent definitions (4 focused extraction agents)
+# ---------------------------------------------------------------------------
+
+_layer_extraction_agent = Agent(
+    name="Layer Extraction Subagent",
+    system_prompt="""You are a soil-layer parameter extraction assistant for gprMax GPR simulations.
+Extract ONLY the soil layer information from the user's message. Ignore antenna, waveform, model, and other parameters.
+
+CONTEXT: You may receive a "CURRENT PARAMETERS" block showing previously collected values.
+- Extract ONLY new or changed values from the user's latest message.
+- If the user is NOT mentioning any layer information at all, return num_layers=0 and layers=[].
+- If the user asks to modify a specific layer (e.g. "change layer 2 thickness to 0.5"), return
+  the FULL updated layer list with that modification applied (use existing values from CURRENT PARAMETERS
+  for unchanged fields).
+- If the user provides entirely new layers, return those and ignore previous layers.
+
+For each layer, extract:
+  REQUIRED:
+    - thickness_m: layer thickness in meters (must be > 0)
+  
+  SOIL COMPOSITION (provide EITHER texture_class OR explicit percentages):
+    - texture_class: USDA class — one of: sand, loamy_sand, sandy_loam, loam, silt_loam, silt,
+      sandy_clay_loam, clay_loam, silty_clay_loam, sandy_clay, silty_clay, clay
+    - sand_pct, silt_pct, clay_pct: explicit soil percentages (must sum to 100)
+  
+  MOISTURE (provide EITHER moisture_state OR explicit theta_v):
+    - moisture_state: one of dry, normal, wet, saturated
+    - theta_v: volumetric water content (0.0 to 1.0)
+  
+  OPTIONAL:
+    - name: layer name/label
+    - organic_level: none, low, moderate, high_peaty
+    - organic_fraction: explicit organic fraction (0.0 to 1.0)
+    - salinity_environment: fresh, slightly_saline, brackish, seawater
+    - salinity_class: explicit salinity class string
+    - compaction_level: loose, normal, compacted
+    - bulk_density_gcm3: bulk density in g/cm³
+    - particle_density_gcm3: particle density in g/cm³
+    - porewater_sigma_Sm: porewater conductivity in S/m
+
+Count the number of layers and set num_layers accordingly.
+Return ONLY parameters that are explicitly mentioned or modified. Leave unmentioned fields as None.""",
     model=openai_model,
-    input=f"{system_prompt} \n\n User query: {initial_input}",
-        )
-    result = response.output.model_dump() if response.output else None
-    logger.info("[TOOL RESULT] extraction_agent - Parameter extraction completed")
-    logger.debug(f"[TOOL RESULT] extraction_agent - Extracted parameters: {json.dumps(result, indent=2, default=str)}")
-    return result
+    output_type=ExtractedLayers,
+)
+
+_antenna_waveform_extraction_agent = Agent(
+    name="Antenna & Waveform Extraction Subagent",
+    system_prompt="""You are an antenna and waveform parameter extraction assistant for gprMax GPR simulations.
+Extract ONLY antenna and waveform information from the user's message. Ignore soil layers, model config, and other parameters.
+
+CONTEXT: You may receive a "CURRENT PARAMETERS" block showing previously collected values.
+- Extract ONLY new or changed values from the user's latest message.
+- If the user is NOT mentioning any antenna/waveform information, leave ALL fields as None.
+- The merge system will preserve existing values for fields you leave as None.
+
+ANTENNA parameters:
+  - antenna_kind: antenna type, currently only 'hertzian_dipole' is supported
+  - antenna_axis: polarization axis — 'x', 'y', or 'z'
+  - antenna_preset: shortcut preset — one of: generic_200MHz, generic_400MHz, generic_800MHz, generic_1GHz
+    (presets auto-resolve frequency and tx_rx_offset if not explicitly given)
+  - tx_rx_offset_m: transmitter-receiver separation in meters
+  - source_start_time: optional source delay in seconds
+  - source_end_time: optional source cutoff time in seconds
+
+WAVEFORM parameters:
+  - waveform_kind: one of: gaussian, gaussiandot, gaussiandotnorm, gaussiandotdot,
+    gaussiandotdotnorm, ricker, gaussianprime, gaussiandoubleprime, sine, contsine
+  - waveform_amplitude: signal amplitude (default 1.0)
+  - waveform_center_freq_hz: center frequency in Hz (e.g. 400e6 for 400 MHz)
+  - waveform_name: identifier for the waveform
+
+If the user mentions a frequency (e.g. "400 MHz antenna"), set waveform_center_freq_hz.
+If the user mentions a preset name, set antenna_preset.
+Return ONLY parameters that are explicitly mentioned or changed. Leave unmentioned fields as None.""",
+    model=openai_model,
+    output_type=ExtractedAntennaWaveform,
+)
+
+_model_extraction_agent = Agent(
+    name="Model & Domain Extraction Subagent",
+    system_prompt="""You are a model/domain configuration extraction assistant for gprMax GPR simulations.
+Extract ONLY simulation model and domain configuration from the user's message. Ignore soil layers, antenna, waveform, and buried objects.
+
+CONTEXT: You may receive a "CURRENT PARAMETERS" block showing previously collected values.
+- Extract ONLY new or changed values from the user's latest message.
+- If the user is NOT mentioning any model/domain information, leave ALL fields as None.
+- The merge system will preserve existing values for fields you leave as None.
+
+Parameters to extract:
+  - model: dielectric mixing model — one of: crim, peplinski, dobson, mironov
+  - title: simulation title string
+  - quality: simulation quality preset — one of: fast, balanced, high_accuracy
+    (auto-resolves cells_per_wavelength and max_cell_m if not explicitly given)
+  - source_height_m: antenna height above ground surface in meters
+  - survey_length_m: total survey length in meters (user-friendly alternative to domain_x)
+  - max_depth_m: maximum investigation depth in meters (user-friendly alternative to domain_y)
+  - domain_x: explicit domain size in x direction in meters
+  - domain_y: explicit domain size in y direction in meters
+  - cells_per_wavelength: grid resolution (typical: 10-20)
+  - max_cell_m: maximum cell size in meters
+  - temperature_c: temperature in Celsius
+  - enforce_validity: whether to check model-specific frequency/moisture validity constraints (boolean)
+
+Return ONLY parameters that are explicitly mentioned or changed. Leave unmentioned fields as None.""",
+    model=openai_model,
+    output_type=ExtractedModelConfig,
+)
+
+_optional_params_extraction_agent = Agent(
+    name="Optional Parameters Extraction Subagent",
+    system_prompt="""You are an optional/advanced parameter extraction assistant for gprMax GPR simulations.
+Extract ONLY optional and advanced parameters from the user's message. Ignore soil layers, antenna, waveform, and core model config.
+
+CONTEXT: You may receive a "CURRENT PARAMETERS" block showing previously collected values.
+- Extract ONLY new or changed values from the user's latest message.
+- If the user is NOT mentioning any optional/advanced parameters, leave ALL fields as None.
+- The merge system will preserve existing values for fields you leave as None.
+
+Parameters to extract:
+
+BURIED OBJECTS:
+  - cylinders: list of {name, x1, y1, z1, x2, y2, z2, radius, material, custom_material, dielectric_smoothing}
+  - boxes: list of {name, x1, y1, z1, x2, y2, z2, material, custom_material, dielectric_smoothing}
+  - spheres: list of {name, cx, cy, cz, radius, material, custom_material, dielectric_smoothing}
+  material defaults to 'pec' (perfect electrical conductor). custom_material is {eps_r, sigma, mu_r, sigma_m}.
+
+SURFACE ROUGHNESS:
+  - surface_roughness: {fractal_dim, weight_x, weight_y, amplitude_m, add_water, water_depth_m, seed}
+
+RECEIVER ARRAY:
+  - rx_array: {x1, y1, z1, x2, y2, z2, dx, dy, dz}
+
+SNAPSHOTS:
+  - snapshots: list of {time_s, filename, dx, dy, dz, x1, y1, z1, x2, y2, z2}
+
+SIMULATION SETTINGS:
+  - pml_cells: PML absorbing boundary thickness (integer >= 2)
+  - num_threads: OpenMP thread count (integer)
+  - output_dir: output directory path (string)
+
+Return ONLY parameters that are explicitly mentioned or changed. Leave everything as None if not mentioned.
+It is perfectly normal for ALL fields to be None if the user didn't mention any advanced features.""",
+    model=openai_model,
+    output_type=ExtractedOptionalParams,
+)
 
 
-async def central_agent(initial_input: str, user_id: Optional[str] = None):
+# ---------------------------------------------------------------------------
+# Extraction coordinator (dispatches to 4 subagents in parallel)
+# ---------------------------------------------------------------------------
+
+def _build_state_context(state: AggregatedExtraction) -> str:
+    """Serialise current parameter state into a context block for subagent prompts."""
+    dump = state.model_dump(exclude_none=True)
+    return json.dumps(dump, indent=2, default=str)
+
+
+async def extraction_agent(
+    user_input: str,
+    current_state: Optional[AggregatedExtraction] = None,
+) -> Tuple[AggregatedExtraction, Optional[GprSchema], List[str]]:
+    """Extract parameters from user input by dispatching to 4 focused subagents.
+
+    If *current_state* is provided the agents receive it as read-only context so
+    they can interpret relative modifications (e.g. "change layer 2 thickness").
+    The new extraction is merged into the existing state via merge_aggregations().
+
+    Returns (updated_state, gpr_schema_or_none, missing_fields).
     """
-    Interactive workflow that loops until all inputs are complete.
-    
-    Args:
-        initial_input: Initial user query
-        user_id: Optional unique user/session ID for file naming. If provided, files will be saved to generated_files/ directory.
-        get_user_input_func: Optional function to get user input. If None, will return on first missing params.
-                            Should be a callable that takes a prompt string and returns user input string.
-    
-    Returns:
-        tuple: (AgentRunResult with thought_process attribute, generated_file_path)
-               generated_file_path will be None if no file was generated, or the path to the generated file
+    logger.info("[EXTRACTION] Dispatching to 4 subagents in parallel")
+    log_input = user_input[:200] + "..." if len(user_input) > 200 else user_input
+    logger.debug(f"[EXTRACTION] Input: {log_input}")
+
+    # Build the prompt: optional state context + user message
+    if current_state is not None:
+        context_block = _build_state_context(current_state)
+        prompt = (
+            f"=== CURRENT PARAMETERS (read-only context) ===\n"
+            f"{context_block}\n"
+            f"=== END CURRENT PARAMETERS ===\n\n"
+            f"User message:\n{user_input}"
+        )
+    else:
+        prompt = user_input
+
+    # Run all 4 subagents concurrently
+    layers_result, antenna_wf_result, model_result, optional_result = await asyncio.gather(
+        _layer_extraction_agent.run(prompt),
+        _antenna_waveform_extraction_agent.run(prompt),
+        _model_extraction_agent.run(prompt),
+        _optional_params_extraction_agent.run(prompt),
+    )
+
+    layers: ExtractedLayers = layers_result.output
+    antenna_wf: ExtractedAntennaWaveform = antenna_wf_result.output
+    model_cfg: ExtractedModelConfig = model_result.output
+    optional_params: ExtractedOptionalParams = optional_result.output
+
+    logger.info("[EXTRACTION] All 4 subagents completed")
+
+    new_extraction = AggregatedExtraction(
+        layers=layers,
+        antenna_waveform=antenna_wf,
+        model_params=model_cfg,
+        optional_params=optional_params,
+    )
+
+    # Merge into existing state
+    merged = merge_aggregations(current_state, new_extraction)
+    logger.info("[EXTRACTION] State merged")
+
+    # Resolve merged state into GprSchema
+    gpr_schema, missing = merge_extractions(
+        merged.layers,
+        merged.antenna_waveform,
+        merged.model_params,
+        merged.optional_params,
+    )
+
+    if missing:
+        logger.info(f"[EXTRACTION] Incomplete — {len(missing)} field(s) missing")
+    else:
+        logger.info("[EXTRACTION] Complete — all parameters resolved")
+
+    return merged, gpr_schema, missing
+
+
+# ---------------------------------------------------------------------------
+# Deterministic workflow functions (replace LLM-orchestrated central_agent)
+# ---------------------------------------------------------------------------
+
+def _setup_output_path(user_id: Optional[str] = None) -> str:
+    """Set up the output file path and configure the global filename."""
+    global _current_output_filename
+
+    workspace_dir = get_workspace_directory()
+    generated_files_dir = workspace_dir / "generated_files"
+    generated_files_dir.mkdir(parents=True, exist_ok=True)
+
+    if user_id:
+        output_file_path = str(generated_files_dir / f"generated_{user_id}.in")
+    else:
+        output_file_path = str(generated_files_dir / "generated.in")
+
+    _current_output_filename = output_file_path
+    logger.info(f"[WORKFLOW] Output file path: {output_file_path}")
+    return output_file_path
+
+
+async def simulate_workflow(
+    user_input: str,
+    user_id: Optional[str] = None,
+    current_state: Optional[AggregatedExtraction] = None,
+) -> dict:
+    """Deterministic simulation pipeline: extract -> merge -> validate -> generate.
+
+    Accepts and returns parameter state so callers can persist it across turns.
+
+    Returns a dict with:
+      - status: "incomplete" | "invalid" | "complete" | "error"
+      - message: human-readable response
+      - params: updated AggregatedExtraction dict (always present)
+      - (optional) missing_params, validation_errors, file_path, file_content, gpr_schema
     """
     global _current_output_filename
-    
-    # Set up output filename if user_id is provided
-    output_file_path = None
-    if user_id:
-        # Get workspace directory (outside Flask working directory)
-        workspace_dir = get_workspace_directory()
-        
-        # Create generated_files directory in workspace if it doesn't exist
-        generated_files_dir = workspace_dir / "generated_files"
-        generated_files_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create unique filename with user_id
-        output_file_path = str(generated_files_dir / f"generated_{user_id}.in")
-        _current_output_filename = output_file_path
-        logger.info(f"[CENTRAL AGENT] Will save generated file to: {output_file_path}")
-    else:
-        # Use default filename in workspace directory
-        workspace_dir = get_workspace_directory()
-        generated_files_dir = workspace_dir / "generated_files"
-        generated_files_dir.mkdir(parents=True, exist_ok=True)
-        output_file_path = str(generated_files_dir / "generated.in")
-        _current_output_filename = output_file_path
-    central_agent = Agent(
-        name="Central Agent",
-        system_prompt="""You are an agent that coordinates the workflows.
 
-        You will be given a user query and you will need to extract the parameters from the user query
-        You will then need to check if the parameters are complete and valid.
-        If the parameters are complete and valid, you will need to generate the gprmax input file using the generate_gprmax_input_file_tool.
-        If the parameters are not complete or valid, you will need to ask the user for the missing or incorrect parameters. 
-        Repeat the process until the parameters are complete and valid. 
-        Once the parameters are complete and valid, then generate the gprmax input file using the generate_gprmax_input_file_tool.
-        The generated should be displayed to the user in the following format:
-        Input parameters file:
-        ```
-        <gprmax input file>
-        ```
-        """,
-        model=openai_model,
-        tools=[generate_gprmax_input_file_tool,check_input_completeness,validate_gpr_parameters,extraction_agent,run_gprmax_simulation_tool],
-    )
-    
     try:
-        # Track thought process steps
-        thought_process = []
-        
-        # Run the agent and capture the result
-        central_agent_result = await central_agent.run(initial_input)
-        
-        # Extract thought process from messages
-        # Try all_messages first, then fallback to new_messages
-        messages_to_process = []
-        if hasattr(central_agent_result, 'all_messages'):
-            all_messages = central_agent_result.all_messages
-            # Check if it's a method (callable) or a property
-            if callable(all_messages):
-                try:
-                    messages_to_process = all_messages()
-                except:
-                    pass
-            elif all_messages:
-                messages_to_process = all_messages
-        
-        if not messages_to_process and hasattr(central_agent_result, 'new_messages'):
-            new_messages = central_agent_result.new_messages
-            # Check if it's a method (callable) or a property
-            if callable(new_messages):
-                try:
-                    messages_to_process = new_messages()
-                except:
-                    pass
-            elif new_messages:
-                messages_to_process = new_messages
-        
-        for msg in messages_to_process:
-            msg_type = type(msg).__name__
-            
-            # Debug: log message structure to understand tool call format
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                logger.debug(f"Found tool_calls in message type {msg_type}: {len(msg.tool_calls)} tool calls")
-                if msg.tool_calls:
-                    logger.debug(f"First tool_call type: {type(msg.tool_calls[0])}, dir: {[x for x in dir(msg.tool_calls[0]) if not x.startswith('_')]}")
-            
-            # Extract message content
-            if hasattr(msg, 'content') and msg.content:
-                content = str(msg.content)
-                role = getattr(msg, 'role', 'unknown')
-                # Only add assistant/user messages, skip system messages
-                if role in ['assistant', 'user']:
-                    step = {
-                        'type': 'message',
-                        'role': role,
-                        'content': content
-                    }
-                    thought_process.append(step)
-            
-            # Extract tool calls
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                for tool_call in msg.tool_calls:
-                    # Try multiple ways to get tool name
-                    tool_name = 'unknown'
-                    try:
-                        # First, try direct attributes
-                        if hasattr(tool_call, 'name'):
-                            tool_name = str(tool_call.name)
-                        elif hasattr(tool_call, 'tool_name'):
-                            tool_name = str(tool_call.tool_name)
-                        elif hasattr(tool_call, 'function'):
-                            # Some formats have function.name
-                            func = tool_call.function
-                            if hasattr(func, 'name'):
-                                tool_name = str(func.name)
-                        elif isinstance(tool_call, dict):
-                            tool_name = str(tool_call.get('name', tool_call.get('tool_name', 'unknown')))
-                        else:
-                            # Try to get all attributes and look for name-like ones
-                            attrs = [attr for attr in dir(tool_call) if not attr.startswith('_')]
-                            logger.debug(f"Tool call attributes: {attrs}")
-                            # Try common attribute names
-                            for attr_name in ['name', 'tool_name', 'function_name', 'tool']:
-                                if hasattr(tool_call, attr_name):
-                                    attr_value = getattr(tool_call, attr_name)
-                                    if attr_value:
-                                        tool_name = str(attr_value)
-                                        break
-                    except Exception as e:
-                        logger.debug(f"Error extracting tool name: {e}, tool_call type: {type(tool_call)}")
-                    
-                    # Try multiple ways to get tool arguments
-                    tool_args = {}
-                    try:
-                        if hasattr(tool_call, 'args'):
-                            tool_args = tool_call.args
-                        elif hasattr(tool_call, 'arguments'):
-                            tool_args = tool_call.arguments
-                        elif hasattr(tool_call, 'function'):
-                            # Some formats have function.arguments
-                            func = tool_call.function
-                            if hasattr(func, 'arguments'):
-                                if isinstance(func.arguments, str):
-                                    try:
-                                        tool_args = json.loads(func.arguments)
-                                    except:
-                                        tool_args = {}
-                                else:
-                                    tool_args = func.arguments
-                        elif isinstance(tool_call, dict):
-                            tool_args = tool_call.get('args', tool_call.get('arguments', {}))
-                    except Exception as e:
-                        logger.debug(f"Error extracting tool args: {e}")
-                    
-                    step = {
-                        'type': 'tool_call',
-                        'tool_name': tool_name,
-                        'args': tool_args
-                    }
-                    thought_process.append(step)
-            
-            # Extract tool results
-            if hasattr(msg, 'tool_result') and msg.tool_result:
-                tool_result = msg.tool_result
-                step = {
-                    'type': 'tool_result',
-                    'result': str(tool_result)
-                }
-                thought_process.append(step)
-        
-        # Attach thought process to result
-        if hasattr(central_agent_result, '__dict__'):
-            central_agent_result.thought_process = thought_process
-        else:
-            # If it's a dataclass, we'll handle it in app.py
-            pass
-        
-        # Check if file was actually generated
-        final_file_path = None
+        # 1. Set up output file path
+        output_file_path = _setup_output_path(user_id)
+
+        # 2. Extract & merge parameters
+        logger.info("[WORKFLOW] Step 1: Extracting parameters")
+        merged_state, gpr_schema, missing = await extraction_agent(
+            user_input, current_state=current_state
+        )
+
+        params_dump = merged_state.model_dump()
+
+        if missing:
+            _current_output_filename = None
+            missing_msg = "\n".join(missing)
+            message = (
+                "The following parameters are missing or incomplete:\n\n"
+                f"{missing_msg}\n\n"
+                "Please provide the missing information to proceed."
+            )
+            return {
+                "status": "incomplete",
+                "message": message,
+                "missing_params": missing_msg,
+                "params": params_dump,
+            }
+
+        # 3. Validate physics constraints
+        logger.info("[WORKFLOW] Step 2: Validating parameters")
+        is_valid, errors = validate_gpr_parameters(gpr_schema)
+
+        if not is_valid:
+            _current_output_filename = None
+            message = (
+                "Parameter validation failed. Please correct the following errors:\n\n"
+                f"{errors}\n\n"
+                "Please provide corrected values."
+            )
+            return {
+                "status": "invalid",
+                "message": message,
+                "validation_errors": errors,
+                "params": params_dump,
+            }
+
+        # 4. Generate the .in file
+        logger.info("[WORKFLOW] Step 3: Generating gprMax input file")
+        file_content = generate_gprmax_input_file_tool(gpr_schema)
+
+        generated_file_text = None
         if output_file_path and os.path.exists(output_file_path):
-            final_file_path = output_file_path
-            logger.info(f"[CENTRAL AGENT] File successfully generated at: {final_file_path}")
-        else:
-            # Check workspace directory for default file
-            workspace_dir = get_workspace_directory()
-            default_file = workspace_dir / "generated_files" / "generated.in"
-            if os.path.exists(str(default_file)):
-                final_file_path = str(default_file)
-                logger.info(f"[CENTRAL AGENT] File found at default location: {final_file_path}")
-        
-        # Reset global filename
+            with open(output_file_path, "r", encoding="utf-8") as f:
+                generated_file_text = f.read()
+
         _current_output_filename = None
-        
-        return central_agent_result, thought_process, final_file_path
+        return {
+            "status": "complete",
+            "message": file_content,
+            "file_path": output_file_path,
+            "file_content": generated_file_text,
+            "gpr_schema": gpr_schema.model_dump(),
+            "params": params_dump,
+        }
+
     except Exception as e:
-        logger.error(f"[CENTRAL AGENT] Error during workflow execution: {str(e)}", exc_info=True)
-        _current_output_filename = None  # Reset on error
-        raise 
+        _current_output_filename = None
+        logger.error(f"[WORKFLOW] Error in simulate_workflow: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"An error occurred during simulation setup: {str(e)}",
+            "params": current_state.model_dump() if current_state else None,
+        }
+
+
+async def qa_workflow(query: str) -> dict:
+    """RAG-based Q&A pipeline: retrieve relevant docs then synthesise an answer.
+
+    Returns a dict with:
+      - status: "complete"
+      - message: the synthesised answer
+      - sources: list of retrieved document excerpts
+    """
+    try:
+        logger.info(f"[QA WORKFLOW] Retrieving docs for: {query[:100]}")
+        docs = call_rag(query)
+
+        if not docs:
+            return {
+                "status": "complete",
+                "message": "No relevant information was found in the knowledge base for your question.",
+                "sources": [],
+            }
+
+        context = "\n\n---\n\n".join(docs)
+        logger.info(f"[QA WORKFLOW] Synthesising answer from {len(docs)} documents")
+
+        response = openai_client.chat.completions.create(
+            model=openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a knowledgeable geophysics and Ground Penetrating Radar (GPR) assistant. "
+                        "Answer the user's question using ONLY the provided context. "
+                        "If the context does not contain enough information, say so honestly. "
+                        "Cite relevant details from the context in your answer."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {query}",
+                },
+            ],
+        )
+        answer = response.choices[0].message.content
+
+        return {
+            "status": "complete",
+            "message": answer,
+            "sources": docs,
+        }
+
+    except Exception as e:
+        logger.error(f"[QA WORKFLOW] Error: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"An error occurred while answering your question: {str(e)}",
+            "sources": [],
+        }
 
 async def runner_agent(input_file: str) -> str:
     """
@@ -954,9 +1107,9 @@ async def runner_agent(input_file: str) -> str:
 
 
 if __name__ == "__main__":
-  async def main():
-    try:
-      inp = """
+    async def main():
+        try:
+            inp = """
 title=my_simulation,
 enforce_validity=True,
 We need to create a simulation. Create a 3 layer simulation with each layer with following config
@@ -966,19 +1119,15 @@ We need to create a simulation. Create a 3 layer simulation with each layer with
 
 Waveform= Ricker with 1.0 amplitude, 1.5e9 center frequency and name of my_ricker,Antenna= hertzian_dipole with axis as z and tx_rx_offset of 0.08
 source_height=0.07,domain_xy= 0.8 and 0.4,cells per wavelength= 15,max cells= 0.003,temperature = 20.0,model= mironov
-      """
-      result, thought_process, file_path = await central_agent(inp, user_id="test_user")
-      if file_path:
-          print(f"File generated at: {file_path}")
-          simulation_result = await runner_agent(file_path)
-          print(f"Simulation result: {simulation_result}")
-      else:
-          print("No file was generated")
-      if hasattr(result, 'output'):
-          print(result.output)
-    except Exception as e:
-      print(f"Error: {e}")
-      import traceback
-      traceback.print_exc()
-  
-  asyncio.run(main())
+            """
+            result = await simulate_workflow(inp, user_id="test_user")
+            print(f"Status: {result['status']}")
+            print(f"Message: {result['message'][:500]}")
+            if result.get("file_path"):
+                print(f"File generated at: {result['file_path']}")
+        except Exception as e:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    asyncio.run(main())
