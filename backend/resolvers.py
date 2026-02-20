@@ -261,6 +261,16 @@ def _merge_flat_model(existing, new):
     return type(existing)(**merged)
 
 
+def _merge_layer(existing_layer: ExtractedLayerParams, new_layer: ExtractedLayerParams) -> ExtractedLayerParams:
+    """Merge two ExtractedLayerParams field-by-field; non-None new values override."""
+    merged = {}
+    for field_name in existing_layer.model_fields:
+        new_val = getattr(new_layer, field_name)
+        old_val = getattr(existing_layer, field_name)
+        merged[field_name] = new_val if new_val is not None else old_val
+    return ExtractedLayerParams(**merged)
+
+
 def merge_aggregations(
     existing: AggregatedExtraction | None,
     new: AggregatedExtraction,
@@ -269,15 +279,31 @@ def merge_aggregations(
 
     - Flat schemas (antenna_waveform, model_params, optional_params): field-by-field,
       non-None new values override existing values.
-    - Layers: if the new extraction has num_layers > 0 and non-empty layers list,
-      replace entirely; otherwise keep existing layers.
+    - Layers:
+      - Same layer count as existing → merge each layer field-by-field (partial updates
+        preserved; only fields the user explicitly mentioned are overwritten).
+      - Different layer count and > 0 → full replace (user described new layers).
+      - 0 layers extracted → keep existing.
     """
     if existing is None:
         return new
 
-    # Layers: replace if new extraction provides them
+    # Layers: merge field-by-field when count matches, replace when count changes
     if new.layers.num_layers > 0 and new.layers.layers:
-        merged_layers = new.layers
+        if len(new.layers.layers) == len(existing.layers.layers):
+            # Same number of layers — merge each layer individually so a partial update
+            # (e.g. user only mentions sand range) keeps all other fields intact.
+            merged_layer_list = [
+                _merge_layer(old_l, new_l)
+                for old_l, new_l in zip(existing.layers.layers, new.layers.layers)
+            ]
+            merged_layers = ExtractedLayers(
+                num_layers=len(merged_layer_list),
+                layers=merged_layer_list,
+            )
+        else:
+            # Layer count changed — full replace (user described a different set of layers)
+            merged_layers = new.layers
     else:
         merged_layers = existing.layers
 
