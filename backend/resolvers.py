@@ -106,28 +106,30 @@ def resolve_layer(layer: ExtractedLayerParams) -> ResolvedLayerRange:
         if tv_max < tv_min:
             errors.append("theta_v_max must be >= theta_v_min")
 
-    # Optional density ranges
+    # Optional density ranges — if only one side is given, treat as a point range (min == max)
     bd_min = layer.bulk_density_gcm3_min
     bd_max = layer.bulk_density_gcm3_max
-    if bd_min is not None or bd_max is not None:
-        if bd_min is None or bd_max is None:
-            errors.append("bulk_density_gcm3_min and _max must both be provided or both omitted")
-        else:
-            if bd_min <= 0:
-                errors.append("bulk_density_gcm3_min must be > 0")
-            if bd_max < bd_min:
-                errors.append("bulk_density_gcm3_max must be >= bulk_density_gcm3_min")
+    if bd_min is not None and bd_max is None:
+        bd_max = bd_min   # single value → point range
+    elif bd_max is not None and bd_min is None:
+        bd_min = bd_max   # single value → point range
+    if bd_min is not None:  # both sides now set (or both None)
+        if bd_min <= 0:
+            errors.append("bulk_density_gcm3_min must be > 0")
+        if bd_max < bd_min:
+            errors.append("bulk_density_gcm3_max must be >= bulk_density_gcm3_min")
 
     pd_min = layer.particle_density_gcm3_min
     pd_max = layer.particle_density_gcm3_max
-    if pd_min is not None or pd_max is not None:
-        if pd_min is None or pd_max is None:
-            errors.append("particle_density_gcm3_min and _max must both be provided or both omitted")
-        else:
-            if pd_min <= 0:
-                errors.append("particle_density_gcm3_min must be > 0")
-            if pd_max < pd_min:
-                errors.append("particle_density_gcm3_max must be >= particle_density_gcm3_min")
+    if pd_min is not None and pd_max is None:
+        pd_max = pd_min   # single value → point range
+    elif pd_max is not None and pd_min is None:
+        pd_min = pd_max   # single value → point range
+    if pd_min is not None:  # both sides now set (or both None)
+        if pd_min <= 0:
+            errors.append("particle_density_gcm3_min must be > 0")
+        if pd_max < pd_min:
+            errors.append("particle_density_gcm3_max must be >= particle_density_gcm3_min")
 
     # Salinity classes
     sal_classes = layer.salinity_classes

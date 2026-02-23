@@ -80,9 +80,9 @@ def estimate_porosity(sand_pct: float, silt_pct: float, clay_pct: float) -> floa
     return float(min(max(n, 0.30), 0.60))
 
 
-def porosity_from_densities(bulk_gcm3: float, particle_gcm3: float = 2.65) -> float:
+def porosity_from_densities(bulk_gcm3: float, particle_gcm3: float = 2.66) -> float:
     """Porosity P = 1 - bulk/particle (dimensionless)."""
-    return float(min(max(1.0 - (bulk_gcm3 / particle_gcm3), 0.0), 0.8))
+    return float(min(max(1.0 - (bulk_gcm3 / particle_gcm3), 0.0), 0.9))
 
 
 def crim_mixture(theta_v: float, porosity: float, eps_solid: float, eps_water: complex) -> complex:
@@ -104,16 +104,16 @@ def mironov_mixture(theta_v: float, porosity: float, eps_solid: float, f_hz: flo
     """
     porosity = float(min(max(porosity, 0.0), 0.9))
     theta_v = float(min(max(theta_v, 0.0), porosity))
-    # bound water fraction proportional to clay; cap by moisture and empirical max
-    max_bound = min(0.45, 0.005 * clay_frac_pct)
+    # bound water fraction proportional to clay; Mironov (2004) max bound-water threshold
+    max_bound = 0.06931 + 0.00299 * clay_frac_pct
     theta_bound = min(theta_v, max_bound)
     theta_free = max(theta_v - theta_bound, 0.0)
     # free water Debye (with ionic σ)
     eps_w_free = water_permittivity_debye(f_hz, temp_c, sigma_ion=sigma_free)
-    # bound water Debye (slower, lower εs)
-    eps_s_bound = 50.0
-    eps_inf_bound = 4.9
-    tau_bound = 30e-12
+    # bound water Debye — Mironov (2004) Table 1 values
+    eps_s_bound = 35.5      # Mironov 2004 (not 50.0)
+    eps_inf_bound = 3.3     # Mironov 2004 (not 4.9)
+    tau_bound = 1.8e-9      # ~1.8 ns — Mironov 2004 (not 30 ps)
     omega = 2 * math.pi * f_hz
     eps_w_bound = eps_inf_bound + (eps_s_bound - eps_inf_bound) / (1.0 + 1j * omega * tau_bound)
     # CRIM-like in n-space with split water
@@ -133,51 +133,96 @@ def mironov_mixture(theta_v: float, porosity: float, eps_solid: float, f_hz: flo
 def peplinski_mixture(theta_v: float, rho_b_gcm3: float, rho_s_gcm3: float,
                       sand_pct: float, clay_pct: float,
                       f_hz: float, temp_c: float,
-                      eps_solid: Optional[float] = None) -> complex:
-    """True Peplinski (1995) implementation over 0.3-1.3 GHz.
+                      sigma_pore: float = 0.0) -> complex:
+    """Peplinski (1995) semiempirical model, 0.3–1.3 GHz.
 
-    Steps:
-    1) Compute Dobson (1985) complex mixture in α-space with α=0.65 and β'=1.2748 − 0.00519·Sand% − 0.00152·Clay%.
-    2) Apply Peplinski linear correction to the REAL part: ε' = 1.156·ε'_L − 0.68.
-    3) Replace effective conductivity with Peplinski σ_eff = 0.0467 + 0.2204·ρ_b − 0.4111·Sand% + 0.6614·Clay%  [S/m].
-       Add this as −j σ_eff/(ω ε0) to the complex permittivity (avoid double counting ionic σ).
+    Implements Eqs. (2)–(10) from Peplinski (1995, IEEE TGRS Vol. 33 No. 3)
+    with separate β' and β'' exponents for real and imaginary parts.
+    σ_eff enters through ε''_fw (Eq. 7) BEFORE mixing, as in the paper.
 
-    Notes:
-    - Sand% and Clay% are in PERCENT by weight (as in the paper and our LayerSpec).
-    - ρ_b, ρ_s are in g/cm^3.
-    - Water permittivity uses Debye without ionic conductivity term here; σ_eff accounts for losses.
-    - eps_solid: if None, use ε_s = (1.01 + 0.44·ρ_s)^2 − 0.062 (Dobson '85).
+    Args:
+        sigma_pore: porewater ionic conductivity [S/m] from salinity (added to σ_eff).
     """
-    # Parameters
     alpha = 0.65
-    # β' depends on texture (percent by weight)
-    beta_p = 1.2748 - 0.00519 * sand_pct - 0.00152 * clay_pct
-    # Solids permittivity
-    if eps_solid is None:
-        eps_solid = (1.01 + 0.44 * rho_s_gcm3) ** 2 - 0.062
-    # Water permittivity (no ionic term here to avoid double counting)
+    S = sand_pct / 100.0  # mass fraction
+    C = clay_pct / 100.0
+    beta_prime  = 1.2748  - 0.519 * S - 0.152 * C   # Eq. (4)
+    beta_dprime = 1.33797 - 0.603 * S - 0.166 * C   # Eq. (5)
+
+    # Solid permittivity — Dobson (1985) Eq. (22), calibrated with the model
+    eps_s = (1.01 + 0.44 * rho_s_gcm3) ** 2 - 0.062
+
+    # Free water Debye — real part only (no ionic term)
     eps_w = water_permittivity_debye(f_hz, temp_c, sigma_ion=0.0)
+    eps_fw_real = eps_w.real   # Eq. (6)
 
-    # Dobson complex mixture in α-space
-    theta_v = float(max(min(theta_v, 1.0), 0.0))
-    X = (1.0
-         + (rho_b_gcm3 / rho_s_gcm3) * (eps_solid ** alpha - 1.0)
-         + (theta_v ** beta_p) * cpow(eps_w, alpha)
-         - theta_v)
-    eps_L = cpow(X, 1.0 / alpha)  # complex ε from Dobson
+    # Peplinski σ_eff — Eq. (10), S and C as fractions
+    sigma_eff = 0.0467 + 0.2204 * rho_b_gcm3 - 0.4111 * S + 0.6614 * C
+    sigma_total = sigma_eff + sigma_pore
 
-    # Peplinski corrections
-    eps_L_real = eps_L.real
-    eps_real_corr = 1.156 * eps_L_real - 0.68  # Eq.(9) correction to real part
-
-    # Effective conductivity σ_eff (Eq.(10)), sand/clay in percent, ρb in g/cm3
-    # Use fractions (0.0 - 1.0) for the sigma formula
-    sigma_eff = 0.0467 + 0.2204 * rho_b_gcm3 - 0.4111 * (sand_pct / 100.0) + 0.6614 * (clay_pct / 100.0)    # The last line simplifies to 0.0467 + 0.2204 ρb − 0.4111 Sand% + 0.6614 Clay%
-
-    # Build final complex ε: use corrected real part and combine imaginary part from Dobson water loss with σ_eff
+    # ε''_fw — Eq. (7): Debye relaxation loss + ionic conductivity with scaling
     omega = 2 * math.pi * f_hz
-    eps_imag_total = eps_L.imag + sigma_eff / (omega * EPS0)
-    return complex(eps_real_corr, eps_imag_total)
+    scaling = (rho_s_gcm3 - rho_b_gcm3) / (rho_s_gcm3 * max(theta_v, 1e-9))
+    eps_fw_imag = abs(eps_w.imag) + sigma_total / (omega * EPS0) * scaling
+
+    # Real part — Eq. (2) with β'
+    theta_v = float(max(min(theta_v, 1.0), 0.0))
+    X_real = (1.0
+              + (rho_b_gcm3 / rho_s_gcm3) * (eps_s ** alpha - 1.0)
+              + (theta_v ** beta_prime) * (eps_fw_real ** alpha)
+              - theta_v)
+    eps_real_m = X_real ** (1.0 / alpha)
+    eps_real = 1.15 * eps_real_m - 0.68   # Eq. (9) correction
+
+    # Imaginary part — Eq. (3) with β''
+    X_imag = (theta_v ** beta_dprime) * (eps_fw_imag ** alpha)
+    eps_imag_m = X_imag ** (1.0 / alpha)
+
+    return complex(max(eps_real, 1.0), eps_imag_m)
+
+
+def dobson_mixture(theta_v: float, rho_b_gcm3: float, rho_s_gcm3: float,
+                   sand_pct: float, clay_pct: float,
+                   f_hz: float, temp_c: float,
+                   sigma_pore: float = 0.0) -> complex:
+    """Dobson (1985) semiempirical model, 1.4–18 GHz.
+
+    Same α-mixing structure as Peplinski but WITHOUT the ε' correction (Eq. 9)
+    and using Dobson's σ_eff formula (Eq. 32).
+
+    Args:
+        sigma_pore: porewater ionic conductivity [S/m] from salinity (added to σ_eff).
+    """
+    alpha = 0.65
+    S = sand_pct / 100.0
+    C = clay_pct / 100.0
+    beta_prime  = 1.2748  - 0.519 * S - 0.152 * C   # Eq. (30)
+    beta_dprime = 1.33797 - 0.603 * S - 0.166 * C   # Eq. (31)
+
+    eps_s = (1.01 + 0.44 * rho_s_gcm3) ** 2 - 0.062  # Eq. (22)
+    eps_w = water_permittivity_debye(f_hz, temp_c, sigma_ion=0.0)
+    eps_fw_real = eps_w.real
+
+    # Dobson σ_eff — Eq. (32), calibrated at 1.4 GHz
+    sigma_eff = -1.645 + 1.939 * rho_b_gcm3 - 0.02013 * sand_pct + 0.01594 * clay_pct
+    sigma_eff = max(sigma_eff, 0.0)  # clamp negative
+    sigma_total = sigma_eff + sigma_pore
+
+    omega = 2 * math.pi * f_hz
+    scaling = (rho_s_gcm3 - rho_b_gcm3) / (rho_s_gcm3 * max(theta_v, 1e-9))
+    eps_fw_imag = abs(eps_w.imag) + sigma_total / (omega * EPS0) * scaling
+
+    theta_v = float(max(min(theta_v, 1.0), 0.0))
+    X_real = (1.0
+              + (rho_b_gcm3 / rho_s_gcm3) * (eps_s ** alpha - 1.0)
+              + (theta_v ** beta_prime) * (eps_fw_real ** alpha)
+              - theta_v)
+    eps_real = X_real ** (1.0 / alpha)  # NO correction for Dobson
+
+    X_imag = (theta_v ** beta_dprime) * (eps_fw_imag ** alpha)
+    eps_imag = X_imag ** (1.0 / alpha)
+
+    return complex(max(eps_real, 1.0), eps_imag)
 
 
 def eps_to_sigma(eps_eff: complex, f_hz: float) -> tuple[float, float]:
@@ -224,7 +269,7 @@ class LayerSpec:
     theta_v: float  # volumetric water content 0..1
     porosity: Optional[float] = None
     bulk_density_gcm3: Optional[float] = None
-    particle_density_gcm3: Optional[float] = None  # default 2.65 if not provided
+    particle_density_gcm3: Optional[float] = None  # default 2.66 if not provided
     organic_fraction: float = 0.0  # 0..1
     salinity_class: Optional[str] = None  # 'fresh'|'brackish'|'saline'
     porewater_sigma_Sm: Optional[float] = None  # overrides salinity_class if set
@@ -472,7 +517,7 @@ class ModelSpec:
     temperature_c: float = 20.0
     model: str = "crim"
     enforce_validity: bool = True
-    salinity_defaults_Sm: Tuple[float, float, float] = (0.0, 0.5, 3.0)
+    salinity_defaults_Sm: Tuple[float, float, float, float] = (0.0, 0.1, 1.0, 3.5)  # fresh, slightly_saline, brackish, saline
     objects: Optional[List[CylinderObject | BoxObject | SphereObject]] = None
     pml_cells: Optional[int] = None
     num_threads: Optional[int] = None
@@ -528,7 +573,7 @@ class ModelSpec:
             if L.porosity is not None:
                 n = L.porosity
             elif L.bulk_density_gcm3 is not None:
-                pd = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.65
+                pd = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.66
                 n = porosity_from_densities(L.bulk_density_gcm3, pd)
             else:
                 n = estimate_porosity(L.sand_pct, L.silt_pct, L.clay_pct)
@@ -540,10 +585,12 @@ class ModelSpec:
                 sc = L.salinity_class.lower()
                 if sc == "fresh":
                     sigma_pore = self.salinity_defaults_Sm[0]
-                elif sc == "brackish":
+                elif sc == "slightly_saline":
                     sigma_pore = self.salinity_defaults_Sm[1]
-                elif sc == "saline":
+                elif sc == "brackish":
                     sigma_pore = self.salinity_defaults_Sm[2]
+                elif sc == "saline":
+                    sigma_pore = self.salinity_defaults_Sm[3]
             if sigma_pore is None:
                 sigma_pore = 0.0
 
@@ -556,7 +603,7 @@ class ModelSpec:
                 eps_eff, sigma_model = mironov_mixture(L.theta_v, n, eps_s, f0, self.temperature_c, L.clay_pct, sigma_free=sigma_pore)
             elif self.model == "peplinski":
                 rho_b = L.bulk_density_gcm3 if L.bulk_density_gcm3 is not None else 1.5
-                rho_s = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.65
+                rho_s = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.66
                 eps_eff = peplinski_mixture(
                     theta_v=L.theta_v,
                     rho_b_gcm3=rho_b,
@@ -565,18 +612,22 @@ class ModelSpec:
                     clay_pct=L.clay_pct,
                     f_hz=f0,
                     temp_c=self.temperature_c,
-                    eps_solid=eps_s,
+                    sigma_pore=sigma_pore,
                 )
                 sigma_model = None
             elif self.model == "dobson":
-                alpha = 0.65
-                beta_p = 1.2748 - 0.00519 * L.sand_pct - 0.00152 * L.clay_pct
-                eps_w = water_permittivity_debye(f0, self.temperature_c, sigma_ion=0.0)
-                X = (1.0
-                     + ((L.bulk_density_gcm3 if L.bulk_density_gcm3 is not None else 1.5) / (L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.65)) * (eps_s ** alpha - 1.0)
-                     + (L.theta_v ** beta_p) * cpow(eps_w, alpha)
-                     - L.theta_v)
-                eps_eff = cpow(X, 1.0 / alpha)
+                rho_b = L.bulk_density_gcm3 if L.bulk_density_gcm3 is not None else 1.5
+                rho_s = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.66
+                eps_eff = dobson_mixture(
+                    theta_v=L.theta_v,
+                    rho_b_gcm3=rho_b,
+                    rho_s_gcm3=rho_s,
+                    sand_pct=L.sand_pct,
+                    clay_pct=L.clay_pct,
+                    f_hz=f0,
+                    temp_c=self.temperature_c,
+                    sigma_pore=sigma_pore,
+                )
                 sigma_model = None
             else:
                 raise ValueError("Unknown model selection")
@@ -586,7 +637,7 @@ class ModelSpec:
 
             if L.organic_fraction > 0.0:
                 wetness = L.theta_v / max(n, 1e-6) if n > 0 else 0.0
-                eps_r *= 1.0 + 0.05 * L.organic_fraction * min(wetness, 1.0)
+                eps_r *= 1.0 - 0.05 * L.organic_fraction * min(wetness, 1.0)  # N3: organic lowers ε (lower polarizability than minerals)
                 sigma_final *= 1.0 + 0.3 * L.organic_fraction
 
             eps_r_list.append(eps_r)
@@ -652,7 +703,7 @@ class ModelSpec:
                 sand_frac = L.sand_pct / 100.0
                 clay_frac = L.clay_pct / 100.0
                 rho_b = L.bulk_density_gcm3 if L.bulk_density_gcm3 is not None else 1.5
-                rho_s = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.65
+                rho_s = L.particle_density_gcm3 if L.particle_density_gcm3 is not None else 2.66
                 theta_min = max(L.theta_v - 0.02, 0.001)
                 theta_max = min(L.theta_v + 0.02, 0.30)
                 lines.append(
@@ -673,12 +724,12 @@ class ModelSpec:
                     delta_eps = L.theta_v * (eps_s_water - eps_inf_water)
 
                     if self.model == "mironov":
-                        max_bound = min(0.45, 0.005 * L.clay_pct)
+                        max_bound = 0.06931 + 0.00299 * L.clay_pct  # Mironov (2004)
                         theta_bound = min(L.theta_v, max_bound)
                         theta_free = max(L.theta_v - theta_bound, 0.0)
 
-                        tau_bound = 30e-12
-                        delta_eps_bound = theta_bound * (50.0 - eps_inf_water)
+                        tau_bound = 1.8e-9       # Mironov (2004) ~1.8 ns
+                        delta_eps_bound = theta_bound * (35.5 - 3.3)  # Mironov (2004): eps_s_bw=35.5, eps_inf_bw=3.3
                         delta_eps_free = theta_free * (eps_s_water - eps_inf_water)
 
                         eps_inf = max(eps_r - delta_eps_bound - delta_eps_free, 2.0)
@@ -842,7 +893,7 @@ def generate_gprmax_input_file(
     temperature_c: float = 20.0,
     model: str = "crim",
     enforce_validity: bool = True,
-    salinity_defaults_Sm: Tuple[float, float, float] = (0.0, 0.5, 3.0),
+    salinity_defaults_Sm: Tuple[float, float, float, float] = (0.0, 0.1, 1.0, 3.5),
     output_filename: str = "generated.in",
     pml_cells: Optional[int] = None,
     num_threads: Optional[int] = None,

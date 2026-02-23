@@ -26,6 +26,15 @@ from resolvers import ResolvedLayerRange
 
 logger = logging.getLogger(__name__)
 
+# Physics model fallback density values (matching physics_modelling.py defaults).
+# Used as display-only defaults in the manifest when the user does not supply ranges,
+# so the manifest reflects what was actually used in the dielectric computation
+# for Peplinski and Dobson models.
+# NOTE: CRIM and Mironov use texture-based porosity estimation when density is None,
+#       so the fallback values here are NOT necessarily what those models use.
+FALLBACK_BULK_DENSITY_GCM3 = 1.5
+FALLBACK_PARTICLE_DENSITY_GCM3 = 2.65
+
 
 def _sample_uniform(lo: float, hi: float, rng: random.Random) -> float:
     """Sample uniformly from [lo, hi]; returns lo if lo == hi."""
@@ -68,22 +77,35 @@ def _sample_layer(
     r: ResolvedLayerRange,
     rng: random.Random,
 ) -> Tuple[SampledLayerValues, LayerSchema]:
-    """Sample one concrete layer from a range spec."""
+    """Sample one concrete layer from a range spec.
+
+    Returns (SampledLayerValues, LayerSchema).  The LayerSchema keeps density as
+    None when not provided by the user so physics_modelling.py chooses the correct
+    computation path (texture-based porosity for CRIM/Mironov vs. the 1.5/2.65
+    fallback for Peplinski/Dobson).  The SampledLayerValues records either the
+    user-sampled value or the physics fallback so the manifest is never blank.
+    """
     thickness = _sample_uniform(r.thickness_m_min, r.thickness_m_max, rng)
     sand, silt, clay = _sample_texture(r, rng)
     theta_v = _sample_uniform(r.theta_v_min, r.theta_v_max, rng)
 
-    bd = (
+    # Actual sampled value (None when not provided — preserves physics model behaviour)
+    bd_sampled = (
         _sample_uniform(r.bulk_density_gcm3_min, r.bulk_density_gcm3_max, rng)
         if r.bulk_density_gcm3_min is not None
         else None
     )
-    pd = (
+    pd_sampled = (
         _sample_uniform(r.particle_density_gcm3_min, r.particle_density_gcm3_max, rng)
         if r.particle_density_gcm3_min is not None
         else None
     )
     sal = rng.choice(r.salinity_classes) if r.salinity_classes else None
+
+    # Manifest values: use sampled value when provided, fallback constant otherwise.
+    # This makes the manifest a complete record of what was used in the computation.
+    bd_manifest = bd_sampled if bd_sampled is not None else FALLBACK_BULK_DENSITY_GCM3
+    pd_manifest = pd_sampled if pd_sampled is not None else FALLBACK_PARTICLE_DENSITY_GCM3
 
     sv = SampledLayerValues(
         name=r.name,
@@ -92,8 +114,8 @@ def _sample_layer(
         silt_pct=silt,
         clay_pct=clay,
         theta_v=theta_v,
-        bulk_density_gcm3=bd,
-        particle_density_gcm3=pd,
+        bulk_density_gcm3=bd_manifest,
+        particle_density_gcm3=pd_manifest,
         organic_fraction=r.organic_fraction,
         salinity_class=sal,
     )
@@ -104,8 +126,10 @@ def _sample_layer(
         silt_pct=silt,
         clay_pct=clay,
         theta_v=theta_v,
-        bulk_density_gcm3=bd,
-        particle_density_gcm3=pd,
+        # Pass the actual sampled value (or None) to physics_modelling so the
+        # model selects the appropriate dielectric computation path.
+        bulk_density_gcm3=bd_sampled,
+        particle_density_gcm3=pd_sampled,
         organic_fraction=r.organic_fraction,
         salinity_class=sal,
         porewater_sigma_Sm=r.porewater_sigma_Sm,

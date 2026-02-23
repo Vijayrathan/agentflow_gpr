@@ -685,7 +685,9 @@ For each layer, extract EXPLICIT MIN and MAX numeric values for:
 
   OPTIONAL:
     - bulk_density_gcm3_min, bulk_density_gcm3_max: bulk density range in g/cm³
+      (if a single value is given, set BOTH min and max to that value)
     - particle_density_gcm3_min, particle_density_gcm3_max: particle density range in g/cm³
+      (if a single value is given, set BOTH min and max to that value)
     - salinity_classes: list of allowed salinity classes
       (valid values: "fresh", "slightly_saline", "brackish", "saline")
     - organic_fraction: single value (0.0 to 1.0), NOT a range
@@ -694,20 +696,20 @@ For each layer, extract EXPLICIT MIN and MAX numeric values for:
 
 EXAMPLES:
   "thickness 0.2 to 0.5m"       → thickness_m_min=0.2, thickness_m_max=0.5
-  "thickness between 0.3 and 0.7m" → thickness_m_min=0.3, thickness_m_max=0.7
+  "thickness 0.4m"               → thickness_m_min=0.4, thickness_m_max=0.4
   "sand between 40 and 70%"      → sand_pct_min=40, sand_pct_max=70
-  "sand 40–70%"                  → sand_pct_min=40, sand_pct_max=70
+  "sand 60%"                     → sand_pct_min=60, sand_pct_max=60
   "water content 0.05–0.3"       → theta_v_min=0.05, theta_v_max=0.3
+  "water content 0.15"           → theta_v_min=0.15, theta_v_max=0.15
+  "bulk density 1.3"             → bulk_density_gcm3_min=1.3, bulk_density_gcm3_max=1.3
+  "bulk density 1.2 to 1.6"      → bulk_density_gcm3_min=1.2, bulk_density_gcm3_max=1.6
+  "particle density 2.65"        → particle_density_gcm3_min=2.65, particle_density_gcm3_max=2.65
   "fresh or brackish"            → salinity_classes=["fresh","brackish"]
   "fresh water"                  → salinity_classes=["fresh"]
-  "thickness 0.4m" (single value, no range) → thickness_m_min=0.4, thickness_m_max=0.4
 
 IMPORTANT:
-- Prefer extracting RANGES (min < max). Single values (min == max) are only acceptable when
-  the user explicitly states a fixed/exact value AND other parameters in the same or other layers
-  do have real ranges.
-- If the user gives a single value with no range context, set min=max=that value. The system
-  will warn if ALL parameters end up as point ranges when multiple samples are requested.
+- For ALL numeric fields (required AND optional), if the user gives a single value set min=max=that value.
+- Prefer extracting RANGES (min < max) when the user explicitly states a range.
 - Do NOT invent values not mentioned by the user. Leave unmentioned fields as None.
 - Do NOT use texture_class, moisture_state, organic_level, compaction_level, or salinity_environment.
   Only extract explicit numeric ranges.
@@ -874,6 +876,15 @@ async def extraction_agent(
     optional_params: ExtractedOptionalParams = optional_result.output
 
     logger.info("[EXTRACTION] All 4 subagents completed")
+    # Log density extraction per layer so failures are visible in server logs
+    for i, lyr in enumerate(layers.layers, 1):
+        bd_min, bd_max = lyr.bulk_density_gcm3_min, lyr.bulk_density_gcm3_max
+        pd_min, pd_max = lyr.particle_density_gcm3_min, lyr.particle_density_gcm3_max
+        bd_str = f"{bd_min}–{bd_max}" if bd_min is not None else "NOT extracted"
+        pd_str = f"{pd_min}–{pd_max}" if pd_min is not None else "NOT extracted"
+        logger.info(
+            f"[EXTRACTION] Layer {i} density — bulk: {bd_str}, particle: {pd_str}"
+        )
 
     new_extraction = AggregatedExtraction(
         layers=layers,
@@ -996,6 +1007,34 @@ async def simulate_workflow(
 
         resolved_ranges = resolve_layers(merged_state.layers)
 
+        # Build a concise density summary so the user can confirm extraction
+        density_lines = []
+        for i, r in enumerate(resolved_ranges, 1):
+            parts = []
+            if r.bulk_density_gcm3_min is not None:
+                if r.bulk_density_gcm3_min == r.bulk_density_gcm3_max:
+                    parts.append(f"bulk density={r.bulk_density_gcm3_min:.3f} g/cm³")
+                else:
+                    parts.append(
+                        f"bulk density={r.bulk_density_gcm3_min:.3f}–"
+                        f"{r.bulk_density_gcm3_max:.3f} g/cm³"
+                    )
+            else:
+                parts.append("bulk density=not provided (fallback: 1.5 g/cm³ for Peplinski/Dobson; texture-based porosity for CRIM/Mironov)")
+            if r.particle_density_gcm3_min is not None:
+                if r.particle_density_gcm3_min == r.particle_density_gcm3_max:
+                    parts.append(f"particle density={r.particle_density_gcm3_min:.3f} g/cm³")
+                else:
+                    parts.append(
+                        f"particle density={r.particle_density_gcm3_min:.3f}–"
+                        f"{r.particle_density_gcm3_max:.3f} g/cm³"
+                    )
+            else:
+                parts.append("particle density=not provided (fallback: 2.65 g/cm³)")
+            density_lines.append(f"  Layer {i}: {', '.join(parts)}")
+        density_summary = "\n".join(density_lines)
+        logger.info(f"[WORKFLOW] Density parameter summary:\n{density_summary}")
+
         dataset_result = generate_dataset(
             resolved_layer_ranges=resolved_ranges,
             gpr_schema_template=gpr_schema,
@@ -1018,6 +1057,7 @@ async def simulate_workflow(
                 f"Generated {dataset_result.num_generated}/{num_samples} files "
                 f"({dataset_result.num_failed} failed) in {dataset_result.output_dir}\n\n"
                 f"Manifest: {dataset_result.manifest_csv_path}\n\n"
+                f"Density parameters used:\n{density_summary}\n\n"
                 + (f"Errors:\n" + "\n".join(dataset_result.errors) if dataset_result.errors else "")
             )
         else:
@@ -1026,13 +1066,15 @@ async def simulate_workflow(
                 f"Generated {dataset_result.num_generated}/{num_samples} files "
                 f"in {dataset_result.output_dir}\n\n"
                 f"Manifest CSV: {dataset_result.manifest_csv_path}\n"
-                f"Manifest JSON: {dataset_result.manifest_json_path}"
+                f"Manifest JSON: {dataset_result.manifest_json_path}\n\n"
+                f"Density parameters used:\n{density_summary}"
             )
 
         return {
             "status": status,
             "message": message,
             "dataset_result": dataset_result.model_dump(),
+            "density_summary": density_summary,
             "params": params_dump,
         }
 

@@ -250,15 +250,20 @@ class AggregatedExtraction(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SampledLayerValues(BaseModel):
-    """Concrete single-valued layer produced by sampling from a ResolvedLayerRange."""
+    """Concrete single-valued layer produced by sampling from a ResolvedLayerRange.
+
+    bulk_density_gcm3 and particle_density_gcm3 are always populated: either with
+    the user-supplied sampled value or with the physics model fallback (1.5 / 2.65)
+    so the manifest is a complete record of what was used in the dielectric computation.
+    """
     name: Optional[str] = None
     thickness_m: float
     sand_pct: float
     silt_pct: float
     clay_pct: float
     theta_v: float
-    bulk_density_gcm3: Optional[float] = None
-    particle_density_gcm3: Optional[float] = None
+    bulk_density_gcm3: float          # user-supplied or fallback (1.5 g/cm³)
+    particle_density_gcm3: float      # user-supplied or fallback (2.65 g/cm³)
     organic_fraction: float
     salinity_class: Optional[str] = None
 

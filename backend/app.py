@@ -131,6 +131,8 @@ def chat():
             response_data["manifest_json_path"] = dr.get("manifest_json_path")
             if dr.get("errors"):
                 response_data["dataset_errors"] = dr.get("errors")
+        if result.get("density_summary"):
+            response_data["density_summary"] = result["density_summary"]
 
         return jsonify(response_data)
 
