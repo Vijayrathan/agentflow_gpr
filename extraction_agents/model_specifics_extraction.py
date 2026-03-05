@@ -6,16 +6,20 @@ from the user, validates against the ExtractedModelConfig schema, and writes
 the result to workspace/model_config.json.
 """
 
-import json
 import os
+import sys
 import uuid
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import dotenv
 from deepagents import create_deep_agent
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from prompt_library import MODEL_RAG_SUBAGENT_PROMPT,MODEL_AGENT_PROMPT
 from langchain_openai import ChatOpenAI
 from rag import rag_search
+from prompt_library import MODEL_RAG_SUBAGENT_PROMPT, MODEL_AGENT_PROMPT
+from parameters_global_state import post_parameters, get_parameters, patch_parameters
 
 dotenv.load_dotenv()
 
@@ -48,6 +52,7 @@ agent = create_deep_agent(
     subagents=[rag_subagent],
     system_prompt=MODEL_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
+    tools=[post_parameters, get_parameters, patch_parameters]
 )
 
 def _print_response(result: dict) -> None:

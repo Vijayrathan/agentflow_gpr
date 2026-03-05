@@ -5,8 +5,26 @@ tool so it can be passed directly to a DeepAgent.
 """
 
 from typing import Annotated, Optional
-
+import os
 from langchain_core.tools import tool
+
+import dotenv
+from deepagents import create_deep_agent
+from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_openai import ChatOpenAI
+from rag import rag_search
+from prompt_library import LAYER_RAG_SUBAGENT_PROMPT,LAYER_AGENT_PROMPT
+from schema import GprSchema
+from parameters_global_state import post_parameters,get_parameters,patch_parameters
+dotenv.load_dotenv()
+
+
+# Initialize the model
+llm = ChatOpenAI(
+    model="gpt-4.1",
+    api_key=os.getenv("OPENAI_API_KEY"),
+)
 
 VALID_WAVEFORMS = {
     "gaussian",
@@ -268,3 +286,11 @@ def validate_snapshot(
     if time_s <= 0:
         return "VALIDATION FAILED: time_s must be > 0"
     return "VALIDATION PASSED"
+
+
+agent = create_deep_agent(
+    model=llm,
+    system_prompt=VALIDATION_AGENT_PROMPT,
+    checkpointer=InMemorySaver(),
+    tools=[ patch_parameters]
+)

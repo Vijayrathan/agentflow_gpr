@@ -14,7 +14,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from rag import rag_search
 from prompt_library import LAYER_RAG_SUBAGENT_PROMPT,LAYER_AGENT_PROMPT
-
+from schema import GprSchema
+from parameters_global_state import post_parameters,get_parameters,patch_parameters
 dotenv.load_dotenv()
 
 
@@ -50,6 +51,7 @@ agent = create_deep_agent(
     subagents=[rag_subagent],
     system_prompt=LAYER_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
+    tools=[post_parameters, get_parameters, patch_parameters]
 )
 
 def _print_response(result: dict) -> None:
