@@ -18,8 +18,13 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from rag import rag_search
-from prompt_library import MODEL_RAG_SUBAGENT_PROMPT, MODEL_AGENT_PROMPT
+from prompt_library import RAG_SUBAGENT_PROMPT, MODEL_AGENT_PROMPT, MODEL_VALIDATION_PROMPT
 from parameters_global_state import post_parameters, get_parameters, patch_parameters
+from validation_tools import (
+    validate_model, validate_temperature, validate_time_window,
+    validate_mesh, validate_domain_geometry, validate_essential_params,
+    validate_cfl, validate_cross_params, validate_ranges,
+)
 
 dotenv.load_dotenv()
 
@@ -38,10 +43,29 @@ rag_subagent = {
         "GPR topics. Searches the knowledge base first; falls back to "
         "domain expertise if needed."
     ),
-    "system_prompt": MODEL_RAG_SUBAGENT_PROMPT,
+    "system_prompt": RAG_SUBAGENT_PROMPT,
     "tools": [rag_search],
 }
 
+# ---------------------------------------------------------------------------
+# Validation Sub-Agent
+# ---------------------------------------------------------------------------
+
+validation_subagent = {
+    "name": "validation-agent",
+    "description": (
+        "Validates model and domain parameters. Checks dielectric model applicability, "
+        "mesh resolution (Nyquist criterion), CFL stability, domain geometry vs layers, "
+        "time window sufficiency, temperature range, and essential parameter presence. "
+        "Call after collecting parameters, before storing."
+    ),
+    "system_prompt": MODEL_VALIDATION_PROMPT,
+    "tools": [
+        validate_model, validate_temperature, validate_time_window,
+        validate_mesh, validate_domain_geometry, validate_essential_params,
+        validate_cfl, validate_cross_params, validate_ranges, get_parameters,
+    ],
+}
 
 # ---------------------------------------------------------------------------
 # Build & Run
@@ -49,7 +73,7 @@ rag_subagent = {
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent],
+    subagents=[rag_subagent, validation_subagent],
     system_prompt=MODEL_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]

@@ -19,8 +19,15 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from rag import rag_search
-from prompt_library import ADVANCED_AGENT_PROMPT, ADVANCED_RAG_SUBAGENT_PROMPT
+from prompt_library import ADVANCED_AGENT_PROMPT, RAG_SUBAGENT_PROMPT, ADVANCED_VALIDATION_PROMPT
 from parameters_global_state import post_parameters, get_parameters, patch_parameters
+from validation_tools import (
+    validate_surface, validate_sphere, validate_snapshot,
+    validate_box, validate_cylinder, validate_rxarray,
+    validate_custom_material, validate_material_references,
+    validate_simulation_metadata, validate_domain_geometry, validate_ranges,
+)
+
 
 dotenv.load_dotenv()
 
@@ -44,8 +51,30 @@ rag_subagent = {
         "custom materials, and related GPR simulation topics. "
         "Searches the knowledge base first; falls back to domain expertise if needed."
     ),
-    "system_prompt": ADVANCED_RAG_SUBAGENT_PROMPT,
+    "system_prompt": RAG_SUBAGENT_PROMPT,
     "tools": [rag_search],
+}
+
+# ---------------------------------------------------------------------------
+# Validation Sub-Agent
+# ---------------------------------------------------------------------------
+
+validation_subagent = {
+    "name": "validation-agent",
+    "description": (
+        "Validates advanced simulation parameters. Checks geometry objects "
+        "(cylinders, boxes, spheres) for valid dimensions and domain bounds, "
+        "surface roughness, receiver arrays, snapshots, custom materials, "
+        "material references, and simulation metadata. Call after collecting "
+        "parameters, before storing."
+    ),
+    "system_prompt": ADVANCED_VALIDATION_PROMPT,
+    "tools": [
+        validate_surface, validate_cylinder, validate_box, validate_sphere,
+        validate_rxarray, validate_snapshot, validate_custom_material,
+        validate_material_references, validate_simulation_metadata,
+        validate_domain_geometry, validate_ranges, get_parameters,
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -54,7 +83,7 @@ rag_subagent = {
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent],
+    subagents=[rag_subagent, validation_subagent],
     system_prompt=ADVANCED_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]

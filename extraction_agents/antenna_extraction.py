@@ -10,8 +10,9 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from rag import rag_search
-from prompt_library import ANTENNA_RAG_SUBAGENT_PROMPT, ANTENNA_AGENT_PROMPT
+from prompt_library import RAG_SUBAGENT_PROMPT, ANTENNA_AGENT_PROMPT, ANTENNA_VALIDATION_PROMPT
 from parameters_global_state import post_parameters, get_parameters, patch_parameters
+from validation_tools import validate_antenna, validate_waveform, validate_antenna_placement, validate_cross_params
 
 dotenv.load_dotenv()
 
@@ -34,10 +35,25 @@ rag_subagent = {
         "characteristics, bulk density, volumetric water content, and related topics. "
         "Searches the knowledge base first; falls back to domain expertise if needed."
     ),
-    "system_prompt": ANTENNA_RAG_SUBAGENT_PROMPT,
+    "system_prompt": RAG_SUBAGENT_PROMPT,
     "tools": [rag_search],
 }
 
+# ---------------------------------------------------------------------------
+# Validation Sub-Agent
+# ---------------------------------------------------------------------------
+
+validation_subagent = {
+    "name": "validation-agent",
+    "description": (
+        "Validates antenna and waveform parameters. Checks antenna type/axis, "
+        "waveform kind/frequency, Tx/Rx placement relative to domain edges, "
+        "and frequency-model compatibility. Call after collecting parameters, "
+        "before storing."
+    ),
+    "system_prompt": ANTENNA_VALIDATION_PROMPT,
+    "tools": [validate_antenna, validate_waveform, validate_antenna_placement, validate_cross_params, get_parameters],
+}
 
 # ---------------------------------------------------------------------------
 # Build & Run
@@ -45,7 +61,7 @@ rag_subagent = {
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent],
+    subagents=[rag_subagent, validation_subagent],
     system_prompt=ANTENNA_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]
