@@ -25,7 +25,7 @@ from validation_tools import (
     validate_surface, validate_sphere, validate_snapshot,
     validate_box, validate_cylinder, validate_rxarray,
     validate_custom_material, validate_material_references,
-    validate_simulation_metadata, validate_domain_geometry, validate_ranges,
+    validate_simulation_metadata,
 )
 
 
@@ -73,7 +73,7 @@ validation_subagent = {
         validate_surface, validate_cylinder, validate_box, validate_sphere,
         validate_rxarray, validate_snapshot, validate_custom_material,
         validate_material_references, validate_simulation_metadata,
-        validate_domain_geometry, validate_ranges, get_parameters,
+        get_parameters,
     ],
 }
 

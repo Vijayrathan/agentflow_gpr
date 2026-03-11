@@ -56,18 +56,15 @@ LAYER_VALIDATION_PROMPT = _make_validation_prompt(
     domain_description="soil layer parameters",
     section="layers",
     tool_guidance="""\
-1. **`validate_layer`** — Call once **per layer**. Pass each layer's \
-thickness_m, sand_pct, silt_pct, clay_pct, theta_v, and any optional \
-fields (bulk_density_gcm3, particle_density_gcm3, porosity, \
-organic_fraction, porewater_sigma_Sm). Use the midpoint of min/max \
-ranges when the schema stores ranges.
-2. **`validate_ranges`** — Call once with ALL min/max range pairs from all \
-layers (thickness, sand, silt, clay, theta_v, bulk_density, \
-particle_density, porosity). Ensures every min <= max.
-3. **`validate_cross_params`** — Call once with representative values across \
-layers: texture percentages, theta_v, densities, porosity. Checks \
-inter-parameter consistency (e.g. porosity derivation, theta_v <= porosity, \
-texture sum = 100).""",
+1. **`validate_layer`** — Call once **per layer**. Pass only the non-range \
+optional fields: organic_fraction, porewater_sigma_Sm. These are single \
+values (not ranges) and are checked for basic bounds (>= 0).
+
+**Note on range-based parameters**: Thickness, sand/silt/clay percentages, \
+theta_v, bulk_density, particle_density, and porosity are extracted as \
+min/max ranges. Cross-checks on these (texture sum = 100, density ordering, \
+theta_v <= porosity, model-specific bounds) are enforced automatically at \
+dataset sampling time — do NOT attempt to validate them here.""",
 )
 
 
@@ -84,10 +81,7 @@ Also pass the dielectric model from `get_parameters("model_config")` if \
 available, to check frequency-model compatibility.
 3. **`validate_antenna_placement`** — Call once with tx_x_m, rx_x_m, \
 domain_x_m, max_cell_m. Use `get_parameters("model_config")` to get \
-domain_x and max_cell_m. Skip if model_config is not yet populated.
-4. **`validate_cross_params`** — Call if layer and model data are available \
-via `get_parameters`. Pass texture, theta_v, density, frequency, mesh, \
-and domain values to check cross-parameter consistency.""",
+domain_x and max_cell_m. Skip if model_config is not yet populated.""",
 )
 
 
@@ -95,29 +89,26 @@ MODEL_VALIDATION_PROMPT = _make_validation_prompt(
     domain_description="simulation model and domain parameters",
     section="model_config",
     tool_guidance="""\
-1. **`validate_model`** — Call once with: model name, center_freq_hz (from \
-`get_parameters("antenna_waveform")`), theta_v, sand_pct, silt_pct, \
-clay_pct (from `get_parameters("layers")`). Checks model applicability \
-and frequency band.
+1. **`validate_model`** — Call once with: model name, f0 (center_freq_hz \
+from `get_parameters("antenna_waveform")`). Checks model name validity \
+and that frequency falls within the model's validity band. \
+Note: texture and moisture checks are enforced at sampling time, not here.
 2. **`validate_temperature`** — Call once with temperature_c.
 3. **`validate_mesh`** — Call once with: max_cell_m, center_freq_hz, \
 domain_x_m, domain_y_m, eps_r_max (estimate from soil properties). \
 Checks Nyquist spatial sampling and domain divisibility.
-4. **`validate_domain_geometry`** — Call once with: domain_x_m, domain_y_m, \
-layer_thicknesses_m (from `get_parameters("layers")`), num_layers, \
-cell_size_m. Checks domain can fit all layers and layers are resolvable.
-5. **`validate_time_window`** — Call once with: source_end_time_s (from \
+4. **`validate_time_window`** — Call once with: source_end_time_s (from \
 antenna config), domain_depth_m (domain_y), eps_r_max. Checks two-way \
 EM propagation time is sufficient.
-6. **`validate_essential_params`** — Call once with booleans: has_domain, \
+5. **`validate_essential_params`** — Call once with booleans: has_domain, \
 has_dx_dy_dz, has_time_window. Verifies essential gprMax params are present.
-7. **`validate_cfl`** — Call once with: dx, dy, dz (cell sizes), dt (time \
+6. **`validate_cfl`** — Call once with: dx, dy, dz (cell sizes), dt (time \
 step). Checks FDTD CFL stability condition. Skip if dt is not available.
-8. **`validate_cross_params`** — Call once with all available cross-section \
-data: texture, theta_v, density from layers; frequency, mesh, domain \
-from this section.
-9. **`validate_ranges`** — Call with any min/max range pairs in model config \
-(e.g. salinity defaults).""",
+
+**Note on range-based parameters**: Texture percentages, theta_v, densities, \
+and model-specific bounds (e.g. Peplinski sand/silt/clay ranges, moisture \
+limits) are enforced automatically at dataset sampling time — do NOT attempt \
+to validate them here.""",
 )
 
 
@@ -144,12 +135,7 @@ Pass: eps_r, sigma, mu_r, sigma_m.
 material names used across geometry objects and whether each has a \
 custom_material definition.
 9. **`validate_simulation_metadata`** — Call once with: title, num_threads, \
-output_dir.
-10. **`validate_domain_geometry`** — Call once with domain dimensions from \
-`get_parameters("model_config")` and layer data from \
-`get_parameters("layers")` to verify geometry objects fit within domain.
-11. **`validate_ranges`** — Call with any min/max range pairs in advanced \
-params.""",
+output_dir.""",
 )
 
 

@@ -22,9 +22,20 @@ from physics_modelling import (
     RxArrayConfig,
     SnapshotConfig,
 )
-from resolvers import ResolvedLayerRange
+
 
 logger = logging.getLogger(__name__)
+
+
+class _SampleValidationError(Exception):
+    """Retryable validation error for a sampled layer.
+
+    Raised when a concrete sampled value violates a physics constraint
+    (e.g. theta_v > porosity) but a different random draw might succeed.
+    Distinguished from ValueError which signals an infeasible range
+    (non-retryable).
+    """
+    pass
 
 # Physics model fallback density values (matching physics_modelling.py defaults).
 # Used as display-only defaults in the manifest when the user does not supply ranges,
@@ -35,26 +46,137 @@ logger = logging.getLogger(__name__)
 FALLBACK_BULK_DENSITY_GCM3 = 1.5
 FALLBACK_PARTICLE_DENSITY_GCM3 = 2.65
 
+# Model-specific validity constraints for range-based parameters.
+# These checks were removed from validation_tools.py (which only sees ranges,
+# not concrete values) and are enforced here at sampling time instead.
+_MODEL_CONSTRAINTS = {
+    "peplinski": {
+        "theta_v_max": 0.30,
+        "sand_pct": (15, 50),
+        "silt_pct": (35, 65),
+        "clay_pct": (5, 20),
+    },
+    "dobson": {"theta_v_max": 0.50},
+    "mironov": {"theta_v_max": 0.45},
+    # crim has no restrictions
+}
+
 
 def _sample_uniform(lo: float, hi: float, rng: random.Random) -> float:
     """Sample uniformly from [lo, hi]; returns lo if lo == hi."""
     return rng.uniform(lo, hi) if lo < hi else lo
 
 
+def _validate_sampled_layer(
+    sand: float,
+    silt: float,
+    clay: float,
+    theta_v: float,
+    bd: Optional[float],
+    pd: Optional[float],
+    model: str,
+) -> Optional[str]:
+    """Return an error string if the sampled concrete values are invalid,
+    or None if everything is OK.
+
+    This enforces the range-parameter cross-checks that were removed from
+    validation_tools.py (texture sum, density ordering, porosity vs theta_v,
+    model-specific bounds).
+    """
+    # 1. Texture sum (should be guaranteed by _sample_texture, but double-check)
+    p_sum = sand + silt + clay
+    if abs(p_sum - 100.0) > 0.01:
+        return f"sand+silt+clay={p_sum:.2f}, must equal 100"
+
+    # 2. Density cross-checks
+    if bd is not None and pd is not None:
+        if bd >= pd:
+            return (
+                f"bulk_density ({bd:.3f}) must be < particle_density ({pd:.3f})"
+            )
+        porosity = 1.0 - (bd / pd)
+        if not (0.0 < porosity < 1.0):
+            return f"derived porosity ({porosity:.3f}) must be in (0, 1)"
+        if theta_v > porosity:
+            return (
+                f"theta_v ({theta_v:.3f}) exceeds porosity ({porosity:.3f}); "
+                "soil cannot hold more water than its pore space"
+            )
+
+    # 3. Model-specific constraints
+    constraints = _MODEL_CONSTRAINTS.get(model.lower(), {})
+
+    tv_max = constraints.get("theta_v_max")
+    if tv_max is not None and theta_v > tv_max:
+        return f"{model}: theta_v ({theta_v:.3f}) exceeds max ({tv_max})"
+
+    sand_range = constraints.get("sand_pct")
+    if sand_range and not (sand_range[0] <= sand <= sand_range[1]):
+        return f"{model}: sand_pct ({sand:.1f}) outside {sand_range[0]}-{sand_range[1]}%"
+
+    silt_range = constraints.get("silt_pct")
+    if silt_range and not (silt_range[0] <= silt <= silt_range[1]):
+        return f"{model}: silt_pct ({silt:.1f}) outside {silt_range[0]}-{silt_range[1]}%"
+
+    clay_range = constraints.get("clay_pct")
+    if clay_range and not (clay_range[0] <= clay <= clay_range[1]):
+        return f"{model}: clay_pct ({clay:.1f}) outside {clay_range[0]}-{clay_range[1]}%"
+
+    return None
+
+
 def _sample_texture(
     r: ResolvedLayerRange,
     rng: random.Random,
+    model: str = "crim",
     max_retries: int = 200,
 ) -> Tuple[float, float, float]:
     """Accept-reject sampling for sand/silt/clay that sums to 100.
 
     Draw raw values independently, normalise to 100, accept if all three
-    normalised values fall within the user-stated ranges.
+    normalised values fall within the user-stated ranges (clamped to model
+    validity bounds when applicable).
     """
+    # Clamp user ranges to model-specific validity windows
+    sand_lo, sand_hi = r.sand_pct_min, r.sand_pct_max
+    silt_lo, silt_hi = r.silt_pct_min, r.silt_pct_max
+    clay_lo, clay_hi = r.clay_pct_min, r.clay_pct_max
+
+    constraints = _MODEL_CONSTRAINTS.get(model.lower(), {})
+    if "sand_pct" in constraints:
+        m_lo, m_hi = constraints["sand_pct"]
+        sand_lo, sand_hi = max(sand_lo, m_lo), min(sand_hi, m_hi)
+    if "silt_pct" in constraints:
+        m_lo, m_hi = constraints["silt_pct"]
+        silt_lo, silt_hi = max(silt_lo, m_lo), min(silt_hi, m_hi)
+    if "clay_pct" in constraints:
+        m_lo, m_hi = constraints["clay_pct"]
+        clay_lo, clay_hi = max(clay_lo, m_lo), min(clay_hi, m_hi)
+
+    # Early feasibility check
+    if sand_lo > sand_hi or silt_lo > silt_hi or clay_lo > clay_hi:
+        raise ValueError(
+            f"Texture ranges are infeasible for model '{model}': "
+            f"sand [{sand_lo}-{sand_hi}], silt [{silt_lo}-{silt_hi}], "
+            f"clay [{clay_lo}-{clay_hi}]"
+        )
+    lower_sum = sand_lo + silt_lo + clay_lo
+    upper_sum = sand_hi + silt_hi + clay_hi
+    if lower_sum > 100 + 1e-6:
+        raise ValueError(
+            f"Texture lower bounds sum to {lower_sum:.1f} > 100; "
+            "impossible to satisfy sand+silt+clay=100"
+        )
+    if upper_sum < 100 - 1e-6:
+        raise ValueError(
+            f"Texture upper bounds sum to {upper_sum:.1f} < 100; "
+            "impossible to reach sand+silt+clay=100"
+        )
+
     for _ in range(max_retries):
-        sr = rng.uniform(r.sand_pct_min, r.sand_pct_max)
-        si = rng.uniform(r.silt_pct_min, r.silt_pct_max)
-        cr = rng.uniform(r.clay_pct_min, r.clay_pct_max)
+        sr = rng.uniform(sand_lo, sand_hi)
+        si = rng.uniform(silt_lo, silt_hi)
+        cr = rng.uniform(clay_lo, clay_hi)
         total = sr + si + cr
         if total <= 0:
             continue
@@ -62,9 +184,9 @@ def _sample_texture(
         si2 = 100 * si / total
         c = 100 * cr / total
         if (
-            r.sand_pct_min <= s <= r.sand_pct_max
-            and r.silt_pct_min <= si2 <= r.silt_pct_max
-            and r.clay_pct_min <= c <= r.clay_pct_max
+            sand_lo <= s <= sand_hi
+            and silt_lo <= si2 <= silt_hi
+            and clay_lo <= c <= clay_hi
         ):
             return round(s, 6), round(si2, 6), round(c, 6)
     raise ValueError(
@@ -76,18 +198,34 @@ def _sample_texture(
 def _sample_layer(
     r: ResolvedLayerRange,
     rng: random.Random,
+    model: str = "crim",
 ) -> Tuple[SampledLayerValues, LayerSchema]:
-    """Sample one concrete layer from a range spec.
+    """Sample one concrete layer from a range spec and validate it.
 
     Returns (SampledLayerValues, LayerSchema).  The LayerSchema keeps density as
     None when not provided by the user so physics_modelling.py chooses the correct
     computation path (texture-based porosity for CRIM/Mironov vs. the 1.5/2.65
     fallback for Peplinski/Dobson).  The SampledLayerValues records either the
     user-sampled value or the physics fallback so the manifest is never blank.
+
+    Raises ValueError if the sampled values violate physics constraints
+    (density ordering, porosity vs theta_v, model-specific bounds).
     """
     thickness = _sample_uniform(r.thickness_m_min, r.thickness_m_max, rng)
-    sand, silt, clay = _sample_texture(r, rng)
-    theta_v = _sample_uniform(r.theta_v_min, r.theta_v_max, rng)
+    sand, silt, clay = _sample_texture(r, rng, model=model)
+
+    # Clamp theta_v sampling range to model-specific max
+    tv_lo, tv_hi = r.theta_v_min, r.theta_v_max
+    constraints = _MODEL_CONSTRAINTS.get(model.lower(), {})
+    tv_max = constraints.get("theta_v_max")
+    if tv_max is not None:
+        tv_hi = min(tv_hi, tv_max)
+        if tv_lo > tv_hi:
+            raise ValueError(
+                f"theta_v range [{r.theta_v_min}, {r.theta_v_max}] has no overlap "
+                f"with {model} max ({tv_max})"
+            )
+    theta_v = _sample_uniform(tv_lo, tv_hi, rng)
 
     # Actual sampled value (None when not provided — preserves physics model behaviour)
     bd_sampled = (
@@ -100,6 +238,12 @@ def _sample_layer(
         if r.particle_density_gcm3_min is not None
         else None
     )
+
+    # Validate sampled values against physics constraints
+    err = _validate_sampled_layer(sand, silt, clay, theta_v, bd_sampled, pd_sampled, model)
+    if err is not None:
+        raise _SampleValidationError(err)
+
     sal = rng.choice(r.salinity_classes) if r.salinity_classes else None
 
     # Manifest values: use sampled value when provided, fallback constant otherwise.
@@ -378,7 +522,7 @@ def generate_dataset(
                 sampled_layer_values: List[SampledLayerValues] = []
                 sampled_layer_schemas: List[LayerSchema] = []
                 for r in resolved_layer_ranges:
-                    sv, ls = _sample_layer(r, rng)
+                    sv, ls = _sample_layer(r, rng, model=gpr_schema_template.model)
                     sampled_layer_values.append(sv)
                     sampled_layer_schemas.append(ls)
 
@@ -411,8 +555,17 @@ def generate_dataset(
                 logger.debug(f"[DATASET] Sample {i} generated: {output_filepath}")
                 break
 
+            except _SampleValidationError as e:
+                # Retryable: sampled values violated a constraint but a
+                # different random draw might succeed.
+                logger.debug(
+                    f"[DATASET] Sample {i} attempt {attempt + 1} "
+                    f"validation error: {e}"
+                )
+                continue
+
             except ValueError as e:
-                # Texture sampling or validation error — non-retryable
+                # Texture sampling or range feasibility error — non-retryable
                 err = f"Sample {i}: {e}"
                 errors.append(err)
                 logger.warning(f"[DATASET] {err}")

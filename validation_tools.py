@@ -50,103 +50,23 @@ def _result(errors: list, warnings: list) -> str:
 
 @tool
 def validate_layer(
-    thickness_m: Annotated[float, "Layer thickness in metres"],
-    sand_pct: Annotated[float, "Sand percentage (0-100) or fraction (0-1) if texture_as_fraction=True"],
-    silt_pct: Annotated[float, "Silt percentage (0-100) or fraction (0-1) if texture_as_fraction=True"],
-    clay_pct: Annotated[float, "Clay percentage (0-100) or fraction (0-1) if texture_as_fraction=True"],
-    theta_v: Annotated[float, "Volumetric water content (0.0-1.0)"],
-    bulk_density_gcm3: Annotated[Optional[float], "Bulk density in g/cm³"] = None,
-    particle_density_gcm3: Annotated[Optional[float], "Particle density in g/cm³"] = None,
-    porosity: Annotated[Optional[float], "Explicit porosity (0-1); cross-checked against derived if densities also provided"] = None,
     organic_fraction: Annotated[Optional[float], "Organic fraction (0-1)"] = None,
     porewater_sigma_Sm: Annotated[Optional[float], "Porewater conductivity in S/m"] = None,
-    texture_as_fraction: Annotated[bool, "If True, texture values are 0-1 fractions, auto-normalised to 0-100"] = False,
 ) -> str:
-    """Validate a soil layer's physical parameters."""
+    """Validate non-range soil layer parameters.
+
+    Range-based parameters (thickness, texture percentages, theta_v, densities,
+    porosity) are validated at sampling time in the dataset generator, not here.
+    """
     errors: list[str] = []
-    warnings: list[str] = []
 
-    # --- Fraction normalisation ---
-    if texture_as_fraction:
-        if all(v <= 1.0 for v in (sand_pct, silt_pct, clay_pct)):
-            sand_pct *= 100.0
-            silt_pct *= 100.0
-            clay_pct *= 100.0
-        else:
-            errors.append(
-                "texture_as_fraction=True but at least one texture value > 1.0; "
-                "provide values in 0-1 range or set texture_as_fraction=False"
-            )
-
-    # --- Basic bounds ---
-    if thickness_m <= 0:
-        errors.append("Layer thickness must be > 0")
-    if sand_pct < 0:
-        errors.append("sand_pct must be >= 0")
-    if silt_pct < 0:
-        errors.append("silt_pct must be >= 0")
-    if clay_pct < 0:
-        errors.append("clay_pct must be >= 0")
-
-    # --- Texture sum ---
-    p_sum = sand_pct + silt_pct + clay_pct
-    if abs(p_sum - 100.0) > 1e-6:
-        errors.append(f"Sand + silt + clay must sum to 100 (got {p_sum:.2f})")
-
-    # --- Theta_v ---
-    if not (0.0 <= theta_v <= 1.0):
-        errors.append("theta_v must be between 0.0 and 1.0")
-
-    # --- Density checks ---
-    if bulk_density_gcm3 is not None and bulk_density_gcm3 <= 0:
-        errors.append("bulk_density_gcm3 must be > 0 if provided")
-    if particle_density_gcm3 is not None and particle_density_gcm3 <= 0:
-        errors.append("particle_density_gcm3 must be > 0 if provided")
-
-    # --- Cross-density checks ---
-    derived_porosity = None
-    if (bulk_density_gcm3 is not None and bulk_density_gcm3 > 0
-            and particle_density_gcm3 is not None and particle_density_gcm3 > 0):
-        if bulk_density_gcm3 >= particle_density_gcm3:
-            errors.append(
-                f"bulk_density ({bulk_density_gcm3}) must be < particle_density "
-                f"({particle_density_gcm3})"
-            )
-        else:
-            derived_porosity = 1.0 - (bulk_density_gcm3 / particle_density_gcm3)
-            if not (0.0 < derived_porosity < 1.0):
-                errors.append(f"Derived porosity ({derived_porosity:.3f}) must be in (0, 1)")
-            elif theta_v > derived_porosity:
-                errors.append(
-                    f"theta_v ({theta_v:.3f}) must be <= porosity ({derived_porosity:.3f}); "
-                    "soil cannot hold more water than its pore space"
-                )
-
-    # --- Explicit porosity ---
-    if porosity is not None:
-        if not (0.0 < porosity < 1.0):
-            errors.append(f"Explicit porosity ({porosity:.3f}) must be in (0, 1)")
-        else:
-            if theta_v > porosity:
-                errors.append(
-                    f"theta_v ({theta_v:.3f}) must be <= explicit porosity ({porosity:.3f}); "
-                    "soil cannot hold more water than its pore space"
-                )
-            if derived_porosity is not None and abs(porosity - derived_porosity) > 0.05:
-                warnings.append(
-                    f"Explicit porosity ({porosity:.3f}) differs from density-derived "
-                    f"porosity ({derived_porosity:.3f}) by more than 0.05"
-                )
-
-    # --- Organic fraction ---
     if organic_fraction is not None and organic_fraction < 0:
         errors.append("organic_fraction must be >= 0")
 
-    # --- Porewater conductivity ---
     if porewater_sigma_Sm is not None and porewater_sigma_Sm < 0:
         errors.append("porewater_sigma_Sm must be >= 0")
 
-    return _result(errors, warnings)
+    return _result(errors, [])
 
 
 # ---------------------------------------------------------------------------
@@ -199,34 +119,24 @@ def validate_waveform(
 def validate_model(
     model: Annotated[str, "Dielectric model name (peplinski, dobson, mironov, crim)"],
     f0: Annotated[float, "Centre frequency in Hz"],
-    theta_v: Annotated[float, "Volumetric water content (0.0-1.0)"],
-    sand_pct: Annotated[float, "Sand percentage (0-100)"],
-    silt_pct: Annotated[float, "Silt percentage (0-100)"],
-    clay_pct: Annotated[float, "Clay percentage (0-100)"],
 ) -> str:
-    """Validate that layer properties fall within the valid range for the
-    chosen dielectric model."""
+    """Validate the dielectric model name and that the centre frequency falls
+    within the model's validity band.
+
+    Range-based parameters (theta_v, texture percentages) are validated at
+    sampling time in the dataset generator, not here.
+    """
     errors: list[str] = []
-    if model == "peplinski":
-        if not (0.3e9 <= f0 <= 1.3e9):
-            errors.append("Peplinski valid for ~0.3-1.3 GHz")
-        if not (0.0 <= theta_v <= 0.30):
-            errors.append("Peplinski moisture valid ~0-0.30")
-        if not (15 <= sand_pct <= 50 and 5 <= clay_pct <= 20 and 35 <= silt_pct <= 65):
-            errors.append("Peplinski texture ranges: sand 15-50%, clay 5-20%, silt 35-65%")
-    elif model == "dobson":
-        if not (1.4e9 <= f0 <= 18e9):
-            errors.append("Dobson valid for ~1.4-18 GHz")
-        if not (0.0 <= theta_v <= 0.50):
-            errors.append("Dobson moisture valid ~0-0.50")
-    elif model == "mironov":
-        if not (0.6e9 <= f0 <= 18e9):
-            errors.append("Mironov valid for ~0.6-18 GHz")
-        if not (0.0 <= theta_v <= 0.45):
-            errors.append("Mironov moisture valid ~0-0.45")
-    elif model == "crim":
-        pass
-    else:
+    model_lower = model.lower()
+    band = _MODEL_FREQ_BANDS.get(model_lower)
+    if band is not None:
+        f_lo, f_hi = band
+        if not (f_lo <= f0 <= f_hi):
+            errors.append(
+                f"{model} valid for {f_lo:.1e}–{f_hi:.1e} Hz "
+                f"(got {f0:.3e} Hz)"
+            )
+    elif model_lower != "crim":
         errors.append(f"Unknown model '{model}'")
     return _result(errors, [])
 
@@ -677,41 +587,28 @@ def validate_temperature(
 def validate_domain_geometry(
     domain_x_m: Annotated[float, "Domain width in metres"],
     domain_y_m: Annotated[float, "Domain depth/height in metres"],
-    layer_thicknesses_m: Annotated[List[float], "List of layer thicknesses in metres"],
     num_layers: Annotated[int, "Declared number of layers"],
-    cell_size_m: Annotated[Optional[float], "Cell size in metres (for layer resolvability check)"] = None,
+    actual_layer_count: Annotated[int, "Actual number of layers provided"],
 ) -> str:
-    """Validate domain dimensions, layer count, layer fit, and layer resolvability."""
+    """Validate domain dimensions and layer count consistency.
+
+    Range-based layer checks (thickness vs domain, thickness vs cell size)
+    are validated at sampling time in the dataset generator, not here.
+    """
     errors: list[str] = []
-    warnings: list[str] = []
 
     if domain_x_m <= 0:
         errors.append("domain_x_m must be > 0")
     if domain_y_m <= 0:
         errors.append("domain_y_m must be > 0")
 
-    if num_layers != len(layer_thicknesses_m):
+    if num_layers != actual_layer_count:
         errors.append(
             f"num_layers ({num_layers}) does not match actual layer count "
-            f"({len(layer_thicknesses_m)})"
+            f"({actual_layer_count})"
         )
 
-    total_thickness = sum(layer_thicknesses_m)
-    if domain_y_m > 0 and total_thickness > domain_y_m + 1e-9:
-        errors.append(
-            f"Total layer thickness ({total_thickness:.6g} m) exceeds "
-            f"domain_y_m ({domain_y_m:.6g} m)"
-        )
-
-    if cell_size_m is not None and cell_size_m > 0:
-        for i, t in enumerate(layer_thicknesses_m):
-            if t < cell_size_m:
-                errors.append(
-                    f"Layer {i}: thickness ({t:.6g} m) is less than cell size "
-                    f"({cell_size_m:.6g} m); layer is unresolvable"
-                )
-
-    return _result(errors, warnings)
+    return _result(errors, [])
 
 
 # ---------------------------------------------------------------------------
@@ -771,165 +668,5 @@ def validate_simulation_metadata(
     return _result(errors, [])
 
 
-# ---------------------------------------------------------------------------
-# Range consistency validation
-# ---------------------------------------------------------------------------
-
-@tool
-def validate_ranges(
-    range_pairs: Annotated[List[List[float]], "List of [min, max] pairs to validate"],
-    range_names: Annotated[List[str], "Name for each range pair (for error messages)"],
-    texture_bounds: Annotated[Optional[List[List[float]]], "[[sand_min,sand_max],[silt_min,silt_max],[clay_min,clay_max]] for texture sum checks"] = None,
-) -> str:
-    """Validate that min <= max for all range pairs and that texture bounds
-    allow a valid sum-to-100 combination."""
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    if len(range_pairs) != len(range_names):
-        errors.append(
-            f"range_pairs length ({len(range_pairs)}) != range_names length ({len(range_names)})"
-        )
-        return _result(errors, warnings)
-
-    for pair, name in zip(range_pairs, range_names):
-        if len(pair) != 2:
-            errors.append(f"'{name}': expected [min, max] pair, got {len(pair)} values")
-            continue
-        lo, hi = pair
-        if lo > hi:
-            errors.append(f"'{name}': min ({lo}) > max ({hi})")
-
-    if texture_bounds is not None:
-        if len(texture_bounds) != 3:
-            errors.append("texture_bounds must have exactly 3 entries [sand, silt, clay]")
-        else:
-            sand_range, silt_range, clay_range = texture_bounds
-            if all(len(r) == 2 for r in (sand_range, silt_range, clay_range)):
-                lower_sum = sand_range[0] + silt_range[0] + clay_range[0]
-                upper_sum = sand_range[1] + silt_range[1] + clay_range[1]
-                if lower_sum > 100 + 1e-6:
-                    errors.append(
-                        f"Texture lower bounds sum to {lower_sum:.2f} > 100; "
-                        "impossible to satisfy sand+silt+clay=100"
-                    )
-                if upper_sum < 100 - 1e-6:
-                    errors.append(
-                        f"Texture upper bounds sum to {upper_sum:.2f} < 100; "
-                        "impossible to reach sand+silt+clay=100"
-                    )
-
-    return _result(errors, warnings)
 
 
-# ---------------------------------------------------------------------------
-# Comprehensive cross-parameter validation
-# ---------------------------------------------------------------------------
-
-@tool
-def validate_cross_params(
-    sand_pct: Annotated[Optional[float], "Sand percentage (0-100)"] = None,
-    silt_pct: Annotated[Optional[float], "Silt percentage (0-100)"] = None,
-    clay_pct: Annotated[Optional[float], "Clay percentage (0-100)"] = None,
-    theta_v: Annotated[Optional[float], "Volumetric water content (0-1)"] = None,
-    bulk_density_gcm3: Annotated[Optional[float], "Bulk density in g/cm³"] = None,
-    particle_density_gcm3: Annotated[Optional[float], "Particle density in g/cm³"] = None,
-    porosity: Annotated[Optional[float], "Explicit porosity (0-1)"] = None,
-    max_cell_m: Annotated[Optional[float], "Cell size in metres"] = None,
-    center_freq_hz: Annotated[Optional[float], "Centre frequency in Hz"] = None,
-    eps_r_max: Annotated[Optional[float], "Max relative permittivity"] = None,
-    domain_x_m: Annotated[Optional[float], "Domain X dimension in metres"] = None,
-    domain_y_m: Annotated[Optional[float], "Domain Y dimension in metres"] = None,
-    num_layers: Annotated[Optional[int], "Declared layer count"] = None,
-    actual_layer_count: Annotated[Optional[int], "Actual number of layers provided"] = None,
-    model: Annotated[Optional[str], "Dielectric model name"] = None,
-) -> str:
-    """Comprehensive cross-parameter consistency check. Only validates
-    relationships between parameters that are both provided (non-None)."""
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    # 1. Porosity derivation cross-check
-    derived_porosity = None
-    if bulk_density_gcm3 is not None and particle_density_gcm3 is not None:
-        if bulk_density_gcm3 > 0 and particle_density_gcm3 > 0:
-            if bulk_density_gcm3 >= particle_density_gcm3:
-                errors.append(
-                    f"bulk_density ({bulk_density_gcm3}) must be < particle_density "
-                    f"({particle_density_gcm3})"
-                )
-            else:
-                derived_porosity = 1.0 - (bulk_density_gcm3 / particle_density_gcm3)
-                if porosity is not None and abs(porosity - derived_porosity) > 0.05:
-                    errors.append(
-                        f"Explicit porosity ({porosity:.3f}) differs from density-derived "
-                        f"porosity ({derived_porosity:.3f}) by more than 0.05"
-                    )
-
-    # 2. theta_v vs porosity
-    effective_porosity = porosity if porosity is not None else derived_porosity
-    if theta_v is not None and effective_porosity is not None:
-        if theta_v > effective_porosity:
-            errors.append(
-                f"theta_v ({theta_v:.3f}) exceeds porosity ({effective_porosity:.3f}); "
-                "soil cannot hold more water than its pore space"
-            )
-
-    # 3. Texture sum
-    if sand_pct is not None and silt_pct is not None and clay_pct is not None:
-        p_sum = sand_pct + silt_pct + clay_pct
-        if abs(p_sum - 100.0) > 1e-6:
-            errors.append(f"Sand + silt + clay must sum to 100 (got {p_sum:.2f})")
-
-    # 4. Nyquist cell size
-    if max_cell_m is not None and center_freq_hz is not None and eps_r_max is not None:
-        if center_freq_hz > 0 and eps_r_max >= 1.0:
-            lambda_min = C0 / (center_freq_hz * math.sqrt(eps_r_max))
-            max_allowed = lambda_min / 10.0
-            if max_cell_m > max_allowed:
-                errors.append(
-                    f"max_cell_m ({max_cell_m:.6f}) exceeds lambda_min/10 "
-                    f"({max_allowed:.6f} m) at eps_r_max={eps_r_max}"
-                )
-
-    # 5. Domain divisibility
-    if max_cell_m is not None and max_cell_m > 0:
-        tol = 1e-9
-        if domain_x_m is not None:
-            nx = domain_x_m / max_cell_m
-            if abs(nx - round(nx)) > tol:
-                errors.append(
-                    f"domain_x_m ({domain_x_m}) is not an integer multiple of "
-                    f"max_cell_m ({max_cell_m}); ratio = {nx:.6f}"
-                )
-        if domain_y_m is not None:
-            ny = domain_y_m / max_cell_m
-            if abs(ny - round(ny)) > tol:
-                errors.append(
-                    f"domain_y_m ({domain_y_m}) is not an integer multiple of "
-                    f"max_cell_m ({max_cell_m}); ratio = {ny:.6f}"
-                )
-
-    # 6. Layer count match
-    if num_layers is not None and actual_layer_count is not None:
-        if num_layers != actual_layer_count:
-            errors.append(
-                f"num_layers ({num_layers}) != actual layer count ({actual_layer_count})"
-            )
-
-    # 7. Peplinski-specific bounds
-    if model is not None and model.lower() == "peplinski":
-        if sand_pct is not None and not (15 <= sand_pct <= 50):
-            errors.append(f"Peplinski: sand_pct ({sand_pct}) outside valid range 15-50%")
-        if clay_pct is not None and not (5 <= clay_pct <= 20):
-            errors.append(f"Peplinski: clay_pct ({clay_pct}) outside valid range 5-20%")
-        if silt_pct is not None and not (35 <= silt_pct <= 65):
-            errors.append(f"Peplinski: silt_pct ({silt_pct}) outside valid range 35-65%")
-        if theta_v is not None and not (0.0 <= theta_v <= 0.30):
-            errors.append(f"Peplinski: theta_v ({theta_v}) outside valid range 0-0.30")
-        if center_freq_hz is not None and not (0.3e9 <= center_freq_hz <= 1.3e9):
-            errors.append(
-                f"Peplinski: center_freq_hz ({center_freq_hz:.3e}) outside valid range 0.3-1.3 GHz"
-            )
-
-    return _result(errors, warnings)

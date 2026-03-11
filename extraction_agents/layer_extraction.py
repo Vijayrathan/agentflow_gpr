@@ -14,7 +14,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from rag import rag_search
 from prompt_library import RAG_SUBAGENT_PROMPT, LAYER_AGENT_PROMPT, LAYER_VALIDATION_PROMPT
-from validation_tools import validate_layer, validate_ranges, validate_cross_params
+from validation_tools import validate_layer
 from parameters_global_state import post_parameters, get_parameters, patch_parameters
 dotenv.load_dotenv()
 
@@ -48,12 +48,13 @@ rag_subagent = {
 validation_subagent = {
     "name": "validation-agent",
     "description": (
-        "Validates soil layer parameters. Checks physical bounds, texture sums, "
-        "density/porosity consistency, range ordering (min<=max), and cross-parameter "
-        "relationships. Call after collecting layer parameters, before storing."
+        "Validates non-range soil layer parameters (organic_fraction, "
+        "porewater_sigma_Sm). Range-based parameters like texture, theta_v, "
+        "and densities are validated at dataset sampling time. "
+        "Call after collecting layer parameters, before storing."
     ),
     "system_prompt": LAYER_VALIDATION_PROMPT,
-    "tools": [validate_layer, validate_ranges, validate_cross_params, get_parameters],
+    "tools": [validate_layer, get_parameters],
 }
 
 # ---------------------------------------------------------------------------

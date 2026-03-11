@@ -22,8 +22,7 @@ from prompt_library import RAG_SUBAGENT_PROMPT, MODEL_AGENT_PROMPT, MODEL_VALIDA
 from parameters_global_state import post_parameters, get_parameters, patch_parameters
 from validation_tools import (
     validate_model, validate_temperature, validate_time_window,
-    validate_mesh, validate_domain_geometry, validate_essential_params,
-    validate_cfl, validate_cross_params, validate_ranges,
+    validate_mesh, validate_essential_params, validate_cfl,
 )
 
 dotenv.load_dotenv()
@@ -54,16 +53,16 @@ rag_subagent = {
 validation_subagent = {
     "name": "validation-agent",
     "description": (
-        "Validates model and domain parameters. Checks dielectric model applicability, "
-        "mesh resolution (Nyquist criterion), CFL stability, domain geometry vs layers, "
+        "Validates model and domain parameters. Checks dielectric model name and "
+        "frequency band, mesh resolution (Nyquist criterion), CFL stability, "
         "time window sufficiency, temperature range, and essential parameter presence. "
+        "Range-based checks (texture, moisture) are validated at sampling time. "
         "Call after collecting parameters, before storing."
     ),
     "system_prompt": MODEL_VALIDATION_PROMPT,
     "tools": [
         validate_model, validate_temperature, validate_time_window,
-        validate_mesh, validate_domain_geometry, validate_essential_params,
-        validate_cfl, validate_cross_params, validate_ranges, get_parameters,
+        validate_mesh, validate_essential_params, validate_cfl, get_parameters,
     ],
 }
 

@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from rag import rag_search
 from prompt_library import RAG_SUBAGENT_PROMPT, ANTENNA_AGENT_PROMPT, ANTENNA_VALIDATION_PROMPT
 from parameters_global_state import post_parameters, get_parameters, patch_parameters
-from validation_tools import validate_antenna, validate_waveform, validate_antenna_placement, validate_cross_params
+from validation_tools import validate_antenna, validate_waveform, validate_antenna_placement
 
 dotenv.load_dotenv()
 
@@ -52,7 +52,7 @@ validation_subagent = {
         "before storing."
     ),
     "system_prompt": ANTENNA_VALIDATION_PROMPT,
-    "tools": [validate_antenna, validate_waveform, validate_antenna_placement, validate_cross_params, get_parameters],
+    "tools": [validate_antenna, validate_waveform, validate_antenna_placement, get_parameters],
 }
 
 # ---------------------------------------------------------------------------
