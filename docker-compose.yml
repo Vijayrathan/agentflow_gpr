@@ -1,0 +1,11 @@
+services:
+  db:
+    image: postgres:15
+    container_name: fastapi-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: my_app
+    ports:
+      - "5432:5432"

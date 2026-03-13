@@ -1,0 +1,19 @@
+#output_dir: datasets/check001/files
+#title: gpr_dataset_0112
+#domain: 20 10 2.01034
+#dx_dy_dz: 0.00572799 0.00572799 0.00572799
+#time_window: 6.23945e-08
+
+#material: 2 0.0251402 1 0 Topsoil
+#add_dispersion_debye: 1 20.8361 9.230000e-12 Topsoil
+#material: 2 0.0133963 1 0 Subsoil
+#add_dispersion_debye: 1 13.9528 9.230000e-12 Subsoil
+
+#waveform: ricker 1 9e+08 default_waveform
+#hertzian_dipole: x 10 5 0.95 default_waveform 0
+#rx: 10 5 0.95
+
+#box: 0 0 1 20 10 1.20109 Topsoil
+#box: 0 0 1.20109 20 10 2.01034 Subsoil
+
+#geometry_view: 0 0 0 20 10 2.01034 0.00572799 0.00572799 0.00572799 model_view n

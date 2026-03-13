@@ -18,7 +18,7 @@ dotenv.load_dotenv()
 
 # Initialize the model
 llm = ChatOpenAI(
-    model="gpt-4.1",
+    model="gpt-4.1-mini",
     api_key=os.getenv("OPENAI_API_KEY"),
 )
 
