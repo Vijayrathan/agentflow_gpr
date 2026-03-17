@@ -24,6 +24,7 @@ class AntennaSchema(BaseModel):
     kind: str
     axis: str
     tx_rx_offset_m: float
+    resistance: Optional[float] = None  # required when kind="voltage_source"
     source_start_time: Optional[float] = None
     source_end_time: Optional[float] = None
 

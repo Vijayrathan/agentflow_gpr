@@ -1,0 +1,20 @@
+#output_dir: datasets/la_mujer/files
+#title: gpr_dataset_0242
+#domain: 0.3 0.8 0.620559
+#dx_dy_dz: 0.00555625 0.00555625 0.00555625
+#time_window: 1.48916e-08
+
+#material: 2 0.0193462 1 0 Layer 1
+#add_dispersion_debye: 1 12.0102 9.230000e-12 Layer 1
+#material: 2 0.0178014 1 0 Layer 2
+#add_dispersion_debye: 1 11.0536 9.230000e-12 Layer 2
+
+#waveform: gaussian 5 1.2e+09 my_gauss_pulse
+#voltage_source: z 0.15 0.4 0.15 75 my_gauss_pulse 0 1e-09
+#rx_array: 0 0 0 1 0 0 0.05 0.05 0.05
+
+#fractal_box: 0 0 0.18 0.3 0.8 0.372901 1.5 1 1 1 1 Layer 1 Layer 1_fractal
+#add_surface_roughness: 0 0 0.18 0.3 0.8 0.18 1.5 1 1 0.17 0.19 Layer 1_fractal
+#box: 0 0 0.372901 0.3 0.8 0.620559 Layer 2
+
+#geometry_view: 0 0 0 0.3 0.8 0.620559 0.00555625 0.00555625 0.00555625 model_view n

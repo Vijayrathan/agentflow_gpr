@@ -14,9 +14,11 @@ Sections:
   advanced_params -> ExtractedAdvancedParams
 """
 
+import logging
 import threading
 import time
 import json
+import uuid as _uuid
 from typing import Annotated, Optional
 
 import httpx
@@ -31,6 +33,9 @@ from schema import (
     ExtractedModelConfig,
     ExtractedAdvancedParams,
 )
+from db import upsert_extraction_section
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -59,6 +64,10 @@ app = FastAPI(title="GPR Parameter State API")
 # In-memory store: section name -> dict (serialised Pydantic model)
 _store: dict[str, dict | None] = {s: None for s in VALID_SECTIONS}
 
+# Active session tracking for DB persistence
+_active_session_id: Optional[_uuid.UUID] = None
+_active_user_id: Optional[str] = None
+
 
 def _validate_section(section: str) -> None:
     if section not in VALID_SECTIONS:
@@ -66,6 +75,32 @@ def _validate_section(section: str) -> None:
             status_code=400,
             detail=f"Invalid section '{section}'. Must be one of {VALID_SECTIONS}",
         )
+
+
+# ---- Session management ---------------------------------------------------
+
+class SessionStart(BaseModel):
+    user_id: str
+    session_id: Optional[str] = None  # auto-generated if not provided
+
+
+@app.post("/session")
+def start_session(body: SessionStart):
+    """Set the active session for DB persistence.
+
+    Call this before agents start extracting. Creates a new session_id
+    (or accepts one) and associates all subsequent POST/PATCH calls with it.
+    """
+    global _active_session_id, _active_user_id
+    _active_user_id = body.user_id
+    _active_session_id = (
+        _uuid.UUID(body.session_id) if body.session_id else _uuid.uuid4()
+    )
+    return {
+        "status": "ok",
+        "session_id": str(_active_session_id),
+        "user_id": _active_user_id,
+    }
 
 
 # ---- GET endpoints --------------------------------------------------------
@@ -89,11 +124,27 @@ def get_section(section: str):
 
 @app.post("/{section}")
 def post_section(section: str, payload: dict):
-    """Create or fully replace a section's data. Validates against the schema."""
+    """Create or fully replace a section's data. Validates against the schema.
+
+    Also persists to the extraction_sessions DB table if an active session exists.
+    """
     _validate_section(section)
     schema_cls = SECTION_SCHEMAS[section]
     validated = schema_cls.model_validate(payload)
     _store[section] = validated.model_dump()
+
+    # Persist to DB incrementally
+    if _active_session_id and _active_user_id:
+        try:
+            upsert_extraction_section(
+                session_id=_active_session_id,
+                user_id=_active_user_id,
+                section=section,
+                data=_store[section],
+            )
+        except Exception:
+            logger.exception("Failed to persist section '%s' to DB", section)
+
     return {"status": "ok", "section": section, "data": _store[section]}
 
 
@@ -113,6 +164,19 @@ def patch_section(section: str, updates: dict):
     schema_cls = SECTION_SCHEMAS[section]
     validated = schema_cls.model_validate(merged)
     _store[section] = validated.model_dump()
+
+    # Persist updated section to DB
+    if _active_session_id and _active_user_id:
+        try:
+            upsert_extraction_section(
+                session_id=_active_session_id,
+                user_id=_active_user_id,
+                section=section,
+                data=_store[section],
+            )
+        except Exception:
+            logger.exception("Failed to persist section '%s' to DB", section)
+
     return {"status": "ok", "section": section, "data": _store[section]}
 
 

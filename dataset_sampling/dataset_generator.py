@@ -311,6 +311,7 @@ def _call_generate(gpr: GprSchema, output_filepath: str) -> None:
         antenna_kind=gpr.antenna.kind,
         antenna_axis=gpr.antenna.axis,
         antenna_tx_rx_offset_m=gpr.antenna.tx_rx_offset_m,
+        antenna_resistance=gpr.antenna.resistance,
         antenna_source_start_time=gpr.antenna.source_start_time,
         antenna_source_end_time=gpr.antenna.source_end_time,
         model_title=gpr.title,

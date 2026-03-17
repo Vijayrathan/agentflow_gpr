@@ -11,6 +11,7 @@ from extraction_agents.layer_extraction import agent as layer_agent
 from extraction_agents.antenna_extraction import agent as antenna_agent
 from extraction_agents.model_specifics_extraction import agent as model_agent
 from extraction_agents.advanced_params_extraction import agent as advanced_agent
+from dataset_generation_agent import agent as dataset_agent
 
 # Add dataset_sampling to sys.path so its bare imports work
 sys.path.insert(0, str(Path(__file__).parent / "dataset_sampling"))
@@ -188,13 +189,13 @@ def run_pipeline():
             print(f"\n>> {display_name} complete — {section} saved.\n")
             time.sleep(30)
             continue
-
+    
         while True:
             user_input = input("You: ").strip()
             if not user_input or user_input.lower() in ("quit", "exit"):
                 print("Exiting pipeline.")
                 return
-
+    
             result = agent.invoke(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=config,
@@ -210,7 +211,30 @@ def run_pipeline():
     print("  All extraction agents complete!")
     print(f"{'='*60}\n")
 
-    _run_dataset_generation()
+    # ── Dataset Generation Agent ──
+    print(f"\n{'='*60}")
+    print("  Starting: Dataset Generation")
+    print(f"{'='*60}\n")
+
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    result = dataset_agent.invoke(
+        {"messages": [HumanMessage(
+            content="All parameter extractions are complete. Begin dataset generation."
+        )]},
+        config=config,
+    )
+    seen = _print_response(result)
+
+    while True:
+        user_input = input("You: ").strip()
+        if not user_input or user_input.lower() in ("quit", "exit"):
+            print("Exiting.")
+            break
+        result = dataset_agent.invoke(
+            {"messages": [HumanMessage(content=user_input)]},
+            config=config,
+        )
+        seen = _print_response(result, seen)
 
 if __name__ == "__main__":
     run_pipeline()

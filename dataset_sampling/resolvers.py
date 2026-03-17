@@ -126,6 +126,7 @@ def resolve_antenna_waveform(
         kind=extracted.antenna_kind or "hertzian_dipole",
         axis=extracted.antenna_axis or "x",
         tx_rx_offset_m=tx_rx_offset,
+        resistance=extracted.resistance,
         source_start_time=extracted.source_start_time,
         source_end_time=extracted.source_end_time,
     ) if tx_rx_offset is not None else None
