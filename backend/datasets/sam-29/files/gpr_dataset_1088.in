@@ -1,0 +1,15 @@
+#output_dir: datasets/sam-29/files
+#title: gpr_dataset_1088
+#domain: 10 5 1.3214
+#dx_dy_dz: 0.001 0.001 0.001
+#time_window: 1.99889e-08
+
+#material: 2 0.0139213 1 0 Layer 1
+
+#waveform: ricker 5 9e+08 Ricker
+#voltage_source: x 5 2.5 0.5 50 Ricker 0 5e-09
+#rx: 5.05 2.5 0.5
+
+#box: 0 0 1 10 5 1.3214 Layer 1
+
+#geometry_view: 0 0 0 10 5 1.3214 0.001 0.001 0.001 model_view n

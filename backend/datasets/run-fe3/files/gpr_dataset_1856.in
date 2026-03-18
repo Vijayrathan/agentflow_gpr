@@ -1,0 +1,16 @@
+#output_dir: datasets/run-fe3/files
+#title: gpr_dataset_1856
+#domain: 10 5 0.791162
+#dx_dy_dz: 0.00678856 0.00678856 0.00678856
+#time_window: 2.33087e-08
+
+#material: 2 0.0170784 1 0 Topsoil
+#add_dispersion_debye: 1 18.6275 9.230000e-12 Topsoil
+
+#waveform: ricker 1 8e+08 default_waveform
+#voltage_source: x 5 2.5 0.4 1 default_waveform
+#rx: 5.25 2.5 0.4
+
+#box: 0 0 0.5 10 5 0.791162 Topsoil
+
+#geometry_view: 0 0 0 10 5 0.791162 0.00678856 0.00678856 0.00678856 model_view n

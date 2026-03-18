@@ -1,0 +1,45 @@
+{
+  "layers": {
+    "num_layers": 1,
+    "layers": [
+      {
+        "name": "sandy_soil",
+        "thickness_m_min": 0.5,
+        "thickness_m_max": 0.5,
+        "sand_pct_min": 70,
+        "sand_pct_max": 90,
+        "silt_pct_min": 5,
+        "silt_pct_max": 20,
+        "clay_pct_min": 5,
+        "clay_pct_max": 15,
+        "theta_v_min": 0.05,
+        "theta_v_max": 0.15,
+        "salinity_classes": ["fresh"],
+        "organic_fraction": 0.005
+      }
+    ]
+  },
+  "antenna_waveform": {
+    "antenna_kind": "hertzian_dipole",
+    "antenna_axis": "x",
+    "tx_rx_offset_m": 0.1,
+    "waveform_kind": "ricker",
+    "waveform_amplitude": 1.0,
+    "waveform_center_freq_hz": 500000000.0,
+    "waveform_name": "ricker_500mhz"
+  },
+  "model_config": {
+    "model": "crim",
+    "title": "Sandy soil CRIM survey",
+    "source_height_m": 0.03,
+    "domain_x": 0.6,
+    "domain_y": 0.5,
+    "cells_per_wavelength": 10,
+    "max_cell_m": 0.01,
+    "rx_same_height": true,
+    "temperature_c": 20.0,
+    "enforce_validity": true,
+    "num_samples": 3
+  },
+  "advanced_params": {}
+}

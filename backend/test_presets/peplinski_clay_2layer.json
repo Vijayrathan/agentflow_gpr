@@ -1,0 +1,71 @@
+{
+  "layers": {
+    "num_layers": 2,
+    "layers": [
+      {
+        "name": "topsoil",
+        "thickness_m_min": 0.1,
+        "thickness_m_max": 0.3,
+        "sand_pct_min": 30,
+        "sand_pct_max": 50,
+        "silt_pct_min": 20,
+        "silt_pct_max": 40,
+        "clay_pct_min": 20,
+        "clay_pct_max": 40,
+        "theta_v_min": 0.1,
+        "theta_v_max": 0.25,
+        "bulk_density_gcm3_min": 1.3,
+        "bulk_density_gcm3_max": 1.6,
+        "particle_density_gcm3_min": 2.6,
+        "particle_density_gcm3_max": 2.7,
+        "salinity_classes": ["fresh"],
+        "organic_fraction": 0.02
+      },
+      {
+        "name": "clay_subsoil",
+        "thickness_m_min": 0.3,
+        "thickness_m_max": 0.6,
+        "sand_pct_min": 10,
+        "sand_pct_max": 30,
+        "silt_pct_min": 20,
+        "silt_pct_max": 40,
+        "clay_pct_min": 40,
+        "clay_pct_max": 60,
+        "theta_v_min": 0.2,
+        "theta_v_max": 0.35,
+        "bulk_density_gcm3_min": 1.4,
+        "bulk_density_gcm3_max": 1.7,
+        "particle_density_gcm3_min": 2.6,
+        "particle_density_gcm3_max": 2.7,
+        "salinity_classes": ["fresh", "slightly_saline"],
+        "organic_fraction": 0.01
+      }
+    ]
+  },
+  "antenna_waveform": {
+    "antenna_kind": "hertzian_dipole",
+    "antenna_axis": "x",
+    "tx_rx_offset_m": 0.1,
+    "waveform_kind": "ricker",
+    "waveform_amplitude": 1.0,
+    "waveform_center_freq_hz": 900000000.0,
+    "waveform_name": "ricker_900mhz"
+  },
+  "model_config": {
+    "model": "peplinski",
+    "title": "Clay subsoil GPR survey",
+    "source_height_m": 0.03,
+    "domain_x": 0.6,
+    "domain_y": 0.4,
+    "top_air_extra_m": 0.1,
+    "cells_per_wavelength": 15,
+    "max_cell_m": 0.005,
+    "rx_same_height": true,
+    "temperature_c": 20.0,
+    "enforce_validity": true,
+    "num_samples": 5
+  },
+  "advanced_params": {
+    "pml_cells": 10
+  }
+}

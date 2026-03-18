@@ -1,0 +1,24 @@
+{
+  "samples": [
+    {
+      "sample_index": 1,
+      "filename": "gpr_dataset_0001.in",
+      "filepath": "datasets/default_dataset/files/gpr_dataset_0001.in",
+      "layers": [
+        {
+          "name": "Layer 1",
+          "thickness_m": 0.4095285144270281,
+          "sand_pct": 39.511401,
+          "silt_pct": 30.73161,
+          "clay_pct": 29.756989,
+          "theta_v": 0.14559598447980074,
+          "bulk_density_gcm3": 1.3824338761175181,
+          "particle_density_gcm3": 2.6953194539956535,
+          "organic_fraction": 0.02,
+          "salinity_class": "fresh"
+        }
+      ]
+    }
+  ],
+  "generation_errors": []
+}
