@@ -257,20 +257,12 @@ class GeophysicsRAG:
         
         print(f"Searching for: '{query}' (Collection has {collection_info.points_count} documents)")
         
-        # 1. Encode Query
-        q_output = self.encoder.encode(query, return_dense=True, return_sparse=True)
-        
-        # Handle both single query and batch encoding
-        if isinstance(q_output['dense_vecs'], list):
-            q_dense = q_output['dense_vecs'][0] if len(q_output['dense_vecs']) > 0 else q_output['dense_vecs']
-        else:
-            q_dense = q_output['dense_vecs']
-        
-        # Convert query sparse weights to Qdrant format
-        q_sparse_weights = q_output['lexical_weights']
-        if isinstance(q_sparse_weights, list):
-            q_sparse_weights = q_sparse_weights[0] if len(q_sparse_weights) > 0 else {}
-        
+        # 1. Encode Query — wrap in list so BGE-M3 always returns batch format
+        q_output = self.encoder.encode([query], return_dense=True, return_sparse=True)
+
+        q_dense = q_output['dense_vecs'][0]
+        q_sparse_weights = q_output['lexical_weights'][0]
+
         q_sparse_indices = [int(k) for k in q_sparse_weights.keys()]
         q_sparse_values = list(q_sparse_weights.values())
 
