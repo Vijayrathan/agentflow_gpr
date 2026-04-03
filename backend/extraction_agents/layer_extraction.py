@@ -14,7 +14,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from backend.rag import rag_search
 from backend.prompt_library import RAG_SUBAGENT_PROMPT, LAYER_AGENT_PROMPT, LAYER_VALIDATION_PROMPT
-from backend.validation_tools import validate_layer
+from backend.validation_tools import validate_layer, validate_material_names
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
 dotenv.load_dotenv()
 
@@ -54,7 +54,7 @@ validation_subagent = {
         "Call after collecting layer parameters, before storing."
     ),
     "system_prompt": LAYER_VALIDATION_PROMPT,
-    "tools": [validate_layer, get_parameters],
+    "tools": [validate_layer, validate_material_names, get_parameters],
 }
 
 # ---------------------------------------------------------------------------

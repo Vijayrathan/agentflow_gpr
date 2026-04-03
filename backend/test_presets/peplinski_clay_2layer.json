@@ -6,39 +6,45 @@
         "name": "topsoil",
         "thickness_m_min": 0.1,
         "thickness_m_max": 0.3,
-        "sand_pct_min": 30,
-        "sand_pct_max": 50,
-        "silt_pct_min": 20,
-        "silt_pct_max": 40,
-        "clay_pct_min": 20,
-        "clay_pct_max": 40,
-        "theta_v_min": 0.1,
+        "sand_pct_min": 20,
+        "sand_pct_max": 45,
+        "silt_pct_min": 40,
+        "silt_pct_max": 60,
+        "clay_pct_min": 5,
+        "clay_pct_max": 20,
+        "theta_v_min": 0.10,
         "theta_v_max": 0.25,
         "bulk_density_gcm3_min": 1.3,
         "bulk_density_gcm3_max": 1.6,
-        "particle_density_gcm3_min": 2.6,
-        "particle_density_gcm3_max": 2.7,
+        "particle_density_gcm3_min": 2.60,
+        "particle_density_gcm3_max": 2.70,
         "salinity_classes": ["fresh"],
-        "organic_fraction": 0.02
+        "porosity_min": 0.38,
+        "porosity_max": 0.52,
+        "organic_fraction": 0.02,
+        "porewater_sigma_Sm": 0.005
       },
       {
         "name": "clay_subsoil",
         "thickness_m_min": 0.3,
         "thickness_m_max": 0.6,
-        "sand_pct_min": 10,
-        "sand_pct_max": 30,
-        "silt_pct_min": 20,
-        "silt_pct_max": 40,
-        "clay_pct_min": 40,
-        "clay_pct_max": 60,
-        "theta_v_min": 0.2,
-        "theta_v_max": 0.35,
+        "sand_pct_min": 15,
+        "sand_pct_max": 35,
+        "silt_pct_min": 45,
+        "silt_pct_max": 65,
+        "clay_pct_min": 10,
+        "clay_pct_max": 20,
+        "theta_v_min": 0.15,
+        "theta_v_max": 0.30,
         "bulk_density_gcm3_min": 1.4,
         "bulk_density_gcm3_max": 1.7,
-        "particle_density_gcm3_min": 2.6,
-        "particle_density_gcm3_max": 2.7,
+        "particle_density_gcm3_min": 2.60,
+        "particle_density_gcm3_max": 2.70,
         "salinity_classes": ["fresh", "slightly_saline"],
-        "organic_fraction": 0.01
+        "porosity_min": 0.35,
+        "porosity_max": 0.47,
+        "organic_fraction": 0.01,
+        "porewater_sigma_Sm": 0.05
       }
     ]
   },
@@ -46,6 +52,9 @@
     "antenna_kind": "hertzian_dipole",
     "antenna_axis": "x",
     "tx_rx_offset_m": 0.1,
+    "resistance": null,
+    "source_start_time": 0.0,
+    "source_end_time": 50e-9,
     "waveform_kind": "ricker",
     "waveform_amplitude": 1.0,
     "waveform_center_freq_hz": 900000000.0,
@@ -56,16 +65,105 @@
     "title": "Clay subsoil GPR survey",
     "source_height_m": 0.03,
     "domain_x": 0.6,
-    "domain_y": 0.4,
+    "domain_y": 1.2,
     "top_air_extra_m": 0.1,
     "cells_per_wavelength": 15,
-    "max_cell_m": 0.005,
+    "max_cell_m": 0.004,
     "rx_same_height": true,
     "temperature_c": 20.0,
     "enforce_validity": true,
-    "num_samples": 5
+    "num_samples": 3
   },
   "advanced_params": {
-    "pml_cells": 10
+    "pml_cells": 10,
+    "num_threads": 4,
+    "output_dir": null,
+    "fractal_nbins": 3,
+    "surface_roughness": {
+      "fractal_dim": 1.5,
+      "weight_x": 1.0,
+      "weight_y": 1.0,
+      "amplitude_m": 0.008,
+      "add_water": false,
+      "water_depth_m": 0.0,
+      "seed": 42
+    },
+    "rx_array": {
+      "x1": 0.1,
+      "y1": 0.13,
+      "z1": 0.0,
+      "x2": 0.5,
+      "y2": 0.13,
+      "z2": 0.0,
+      "dx": 0.004,
+      "dy": 0.004,
+      "dz": 0.004
+    },
+    "snapshots": [
+      {
+        "time_s": 3e-9,
+        "filename": "snap_3ns",
+        "dx": 0.004,
+        "dy": 0.004,
+        "dz": 0.004,
+        "x1": 0.0,
+        "y1": 0.0,
+        "z1": 0.0,
+        "x2": 0.6,
+        "y2": 1.2,
+        "z2": 0.002
+      }
+    ],
+    "cylinders": [
+      {
+        "name": "buried_pipe",
+        "x1": 0.28,
+        "y1": 0.45,
+        "z1": 0.0,
+        "x2": 0.28,
+        "y2": 0.45,
+        "z2": 0.002,
+        "radius": 0.02,
+        "material": "pec",
+        "custom_material": null,
+        "dielectric_smoothing": true
+      }
+    ],
+    "boxes": [
+      {
+        "name": "concrete_slab",
+        "x1": 0.38,
+        "y1": 0.35,
+        "z1": 0.0,
+        "x2": 0.48,
+        "y2": 0.42,
+        "z2": 0.002,
+        "material": "custom",
+        "custom_material": {
+          "eps_r": 6.0,
+          "sigma": 0.02,
+          "mu_r": 1.0,
+          "sigma_m": 0.0
+        },
+        "dielectric_smoothing": true
+      }
+    ],
+    "spheres": [
+      {
+        "name": "cobble_stone",
+        "cx": 0.15,
+        "cy": 0.55,
+        "cz": 0.001,
+        "radius": 0.015,
+        "material": "custom",
+        "custom_material": {
+          "eps_r": 4.5,
+          "sigma": 0.001,
+          "mu_r": 1.0,
+          "sigma_m": 0.0
+        },
+        "dielectric_smoothing": false
+      }
+    ]
   }
 }

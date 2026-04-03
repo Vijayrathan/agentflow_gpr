@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
-import type { ChatMessage, DatasetInfo, WSIncoming } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+import type { ChatMessage, DatasetInfo, SimulationResult, WSIncoming } from '../types';
 
 interface ChatState {
   messages: ChatMessage[];
@@ -8,6 +9,7 @@ interface ChatState {
   isTyping: boolean;
   isConnected: boolean;
   datasetInfo: DatasetInfo | null;
+  simulationResult: SimulationResult | null;
   error: string | null;
 }
 
@@ -19,6 +21,7 @@ type ChatAction =
   | { type: 'stage_change'; stageIndex: number; stageName: string }
   | { type: 'dataset_ready'; info: DatasetInfo }
   | { type: 'dataset_dismiss' }
+  | { type: 'simulation_complete'; result: SimulationResult }
   | { type: 'error'; message: string }
   | { type: 'set_typing'; value: boolean };
 
@@ -35,7 +38,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         messages: [
           ...state.messages,
           {
-            id: crypto.randomUUID(),
+            id: uuidv4(),
             role: 'user',
             content: action.content,
             stageIndex: action.stageIndex,
@@ -50,7 +53,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
         messages: [
           ...state.messages,
           {
-            id: crypto.randomUUID(),
+            id: uuidv4(),
             role: 'agent',
             content: action.content,
             stageIndex: action.stageIndex,
@@ -68,6 +71,8 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, datasetInfo: action.info };
     case 'dataset_dismiss':
       return { ...state, datasetInfo: null };
+    case 'simulation_complete':
+      return { ...state, simulationResult: action.result, isTyping: false };
     case 'error':
       return { ...state, error: action.message, isTyping: false };
     case 'set_typing':
@@ -84,6 +89,7 @@ const initialState: ChatState = {
   isTyping: true,
   isConnected: false,
   datasetInfo: null,
+  simulationResult: null,
   error: null,
 };
 
@@ -118,6 +124,10 @@ export function useChat(sessionId: string) {
             stageIndex: data.stage_index ?? 0,
             stageName: data.stage_name ?? '',
           });
+          // Show typing indicator when entering the simulation stage
+          if (data.stage_name === 'Simulation') {
+            dispatch({ type: 'set_typing', value: true });
+          }
           break;
         case 'dataset_ready':
           dispatch({
@@ -130,6 +140,12 @@ export function useChat(sessionId: string) {
           break;
         case 'dataset_dismiss':
           dispatch({ type: 'dataset_dismiss' });
+          break;
+        case 'simulation_complete':
+          dispatch({
+            type: 'simulation_complete',
+            result: data.result!,
+          });
           break;
         case 'error':
           dispatch({ type: 'error', message: data.message ?? 'Unknown error' });
@@ -161,6 +177,7 @@ export function useChat(sessionId: string) {
     isTyping: state.isTyping,
     isConnected: state.isConnected,
     datasetInfo: state.datasetInfo,
+    simulationResult: state.simulationResult,
     error: state.error,
     sendMessage,
   };

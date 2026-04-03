@@ -11,13 +11,22 @@ export interface DatasetInfo {
   numGenerated: number;
 }
 
+export interface SimulationResult {
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  output_dir: string;
+}
+
 export interface WSIncoming {
-  type: 'agent_message' | 'stage_change' | 'dataset_ready' | 'dataset_dismiss' | 'error';
+  type: 'agent_message' | 'stage_change' | 'dataset_ready' | 'dataset_dismiss' | 'simulation_complete' | 'error';
   content?: string;
   stage_index?: number;
   stage_name?: string;
   dataset_name?: string;
   num_generated?: number;
+  result?: SimulationResult;
   message?: string;
 }
 
@@ -27,4 +36,5 @@ export const STAGE_NAMES = [
   'Model & Domain',
   'Advanced Parameters',
   'Dataset Generation',
+  'Simulation',
 ];

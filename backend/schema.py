@@ -143,6 +143,7 @@ class GprSchema(BaseModel):
     pml_cells: Optional[int] = None
     num_threads: Optional[int] = None
     output_dir: Optional[str] = None
+    fractal_nbins: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -200,31 +201,31 @@ class ExtractedAntennaWaveform(BaseModel):
     """Output of the antenna + waveform extraction subagent."""
     antenna_kind: Optional[str] = "hertzian_dipole"
     antenna_axis: Optional[str] = "x"
-    tx_rx_offset_m: Optional[float] = None
+    tx_rx_offset_m: float  # required: Tx-Rx offset in metres
     resistance: Optional[float] = None  # required when antenna_kind="voltage_source"
     source_start_time: Optional[float] = None
     source_end_time: Optional[float] = None
 
     waveform_kind: Optional[str] = "ricker"
-    waveform_amplitude: Optional[float] = None
-    waveform_center_freq_hz: Optional[float] = None
-    waveform_name: Optional[str] = None
+    waveform_amplitude: float  # required: signal amplitude (e.g. 1.0)
+    waveform_center_freq_hz: float  # required: centre frequency in Hz
+    waveform_name: str  # required: descriptive name for the waveform
 
 
 class ExtractedModelConfig(BaseModel):
     """Output of the model / domain extraction subagent."""
-    model: Optional[str] = None
-    title: Optional[str] = None
-    source_height_m: Optional[float] = None
-    domain_x: Optional[float] = None
-    domain_y: Optional[float] = None
+    model: str  # required: dielectric model (peplinski, dobson, mironov, crim)
+    title: str  # required: simulation title
+    source_height_m: float  # required: antenna height above ground (m)
+    domain_x: float  # required: domain width (m)
+    domain_y: float  # required: domain depth (m)
     top_air_extra_m: Optional[float] = None  # extra air space above source
-    cells_per_wavelength: Optional[float] = None
-    max_cell_m: Optional[float] = None
+    cells_per_wavelength: float  # required: cells per minimum wavelength
+    max_cell_m: float  # required: maximum cell size (m)
     rx_same_height: Optional[bool] = True  # Rx at same height as Tx
-    temperature_c: Optional[float] = None
+    temperature_c: float  # required: ambient temperature (°C)
     enforce_validity: Optional[bool] = None
-    num_samples: Optional[int] = None
+    num_samples: int  # required: number of samples to generate
 
 
 class ExtractedAdvancedParams(BaseModel):
@@ -238,6 +239,7 @@ class ExtractedAdvancedParams(BaseModel):
     pml_cells: Optional[int] = None
     num_threads: Optional[int] = None
     output_dir: Optional[str] = None
+    fractal_nbins: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------

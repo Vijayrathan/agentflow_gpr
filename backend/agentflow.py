@@ -1,3 +1,4 @@
+import json
 import sys
 import time
 import uuid
@@ -27,6 +28,7 @@ from schema import (
 )
 from resolvers import merge_extractions
 from dataset_generator import generate_dataset
+from simulate import run_batch_simulation
 
 # Ordered pipeline: (agent, section_name, display_name, init_message)
 PIPELINE = [
@@ -74,11 +76,25 @@ def _print_response(result: dict, seen: int = 0) -> int:
 
 
 def _posted(result: dict) -> bool:
-    """Return True if any message in the result is a post_parameters tool call."""
+    """Return True if any message is a post_parameters or post_dataset_to_db tool call."""
     return any(
-        type(msg).__name__ == "ToolMessage" and msg.name == "post_parameters"
+        type(msg).__name__ == "ToolMessage"
+        and msg.name in ("post_parameters", "post_dataset_to_db")
         for msg in result.get("messages", [])
     )
+
+
+def _extract_files_dir(result: dict) -> str | None:
+    """Extract files_dir from post_dataset_to_db tool result."""
+    for msg in result.get("messages", []):
+        if type(msg).__name__ == "ToolMessage" and msg.name == "post_dataset_to_db":
+            try:
+                data = json.loads(msg.content)
+                if data.get("status") == "ok":
+                    return data.get("files_dir")
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return None
 
 
 
@@ -171,6 +187,37 @@ def _run_dataset_generation():
 
 
 
+def _run_simulation_stage(files_dir: str):
+    """Run gprMax batch simulation on generated .in files."""
+    print(f"\n{'='*60}")
+    print("  Starting: Simulation")
+    print(f"{'='*60}\n")
+
+    print(f"  Input directory:  {files_dir}")
+    output_dir = str(Path(files_dir).parent / "out_files")
+    print(f"  Output directory: {output_dir}\n")
+
+    try:
+        sim_result = run_batch_simulation(
+            input_dir=files_dir,
+            skip_existing=True,
+            verbose=True,
+        )
+    except Exception as e:
+        print(f"\n[ERROR] Simulation failed: {e}")
+        return
+
+    print(f"\n{'='*60}")
+    print("  Simulation Complete")
+    print(f"{'='*60}")
+    print(f"  Succeeded: {sim_result['succeeded']}")
+    print(f"  Failed:    {sim_result['failed']}")
+    print(f"  Skipped:   {sim_result['skipped']}")
+    print(f"  Total:     {sim_result['total']}")
+    print(f"  Output:    {sim_result['output_dir']}")
+    print()
+
+
 def run_pipeline():
     start_parameter_server()
     print("Parameter state server started.\n")
@@ -228,7 +275,7 @@ def run_pipeline():
     )
     seen = _print_response(result)
 
-    while True:
+    while not _posted(result):
         user_input = input("You: ").strip()
         if not user_input or user_input.lower() in ("quit", "exit"):
             print("Exiting.")
@@ -238,6 +285,13 @@ def run_pipeline():
             config=config,
         )
         seen = _print_response(result, seen)
+
+    # ── Simulation Stage ──
+    files_dir = _extract_files_dir(result)
+    if files_dir:
+        _run_simulation_stage(files_dir)
+    else:
+        print("\n[WARNING] Dataset not posted or no files_dir — skipping simulation.")
 
 if __name__ == "__main__":
     run_pipeline()

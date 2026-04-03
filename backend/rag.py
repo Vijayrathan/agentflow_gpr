@@ -23,7 +23,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 class GeophysicsRAG:
-    def __init__(self, mode: Literal["training", "inference"] = "inference", qdrant_path: str = "./qdrant_storage"):
+    def __init__(self, mode: Literal["training", "inference"] = "inference", qdrant_path: str | None = None):
         """
         Initialize RAG system with mode-specific model loading.
         
@@ -32,12 +32,14 @@ class GeophysicsRAG:
             qdrant_path: Path to store Qdrant database on disk
         """
         self.mode = mode
+        if qdrant_path is None:
+            qdrant_path = str(Path(__file__).parent.parent / "db" / "qdrant_storage")
         self.qdrant_path = qdrant_path
         self.collection_name = "gpr_research"
-        
+
         # Create Qdrant storage directory if it doesn't exist
         os.makedirs(qdrant_path, exist_ok=True)
-        
+
         # Initialize Vector DB (Qdrant) - Persistent storage on disk
         self.qdrant = QdrantClient(path=qdrant_path)
         
@@ -118,23 +120,26 @@ class GeophysicsRAG:
         docs = self.text_splitter.create_documents([full_text_markdown])
         return [d.page_content for d in docs]
     
-    def index_all_documents(self, retrieval_docs_path: str = "../retrieval_docs"):
+    def index_all_documents(self, retrieval_docs_path: str | None = None):
         """
         Index all PDF documents from the retrieval_docs directory.
         Only available in training mode.
         """
         if self.mode != "training":
             raise ValueError("index_all_documents is only available in training mode.")
-        
-        retrieval_path = Path(retrieval_docs_path)
+
+        if retrieval_docs_path is None:
+            retrieval_path = Path(__file__).parent.parent / "retrieval_docs"
+        else:
+            retrieval_path = Path(retrieval_docs_path)
         if not retrieval_path.exists():
-            raise ValueError(f"Directory {retrieval_docs_path} does not exist.")
+            raise ValueError(f"Directory {retrieval_path} does not exist.")
         
         # Find all PDF files
         pdf_files = list(retrieval_path.glob("*.pdf"))
         
         if not pdf_files:
-            print(f"No PDF files found in {retrieval_docs_path}")
+            print(f"No PDF files found in {retrieval_path}")
             return
         
         print(f"Found {len(pdf_files)} PDF files to index...")
@@ -495,7 +500,7 @@ if __name__ == "__main__":
         rag = None
         try:
             rag = GeophysicsRAG(mode="training")
-            rag.index_all_documents("../retrieval_docs")
+            rag.index_all_documents()
             print("\n✓ Training complete! Documents indexed and stored.")
             print("  You can now use inference mode to search.")
         finally:

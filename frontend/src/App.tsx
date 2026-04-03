@@ -1,18 +1,21 @@
 import { useMemo } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { useChat } from './hooks/useChat';
 import PipelineProgress from './components/PipelineProgress';
 import ChatWindow from './components/ChatWindow';
 import ChatInput from './components/ChatInput';
 import FileDownloadCard from './components/FileDownloadCard';
+import SimulationResultCard from './components/SimulationResultCard';
 
 function App() {
-  const sessionId = useMemo(() => crypto.randomUUID(), []);
+  const sessionId = useMemo(() => uuidv4(), []);
   const {
     messages,
     currentStage,
     isTyping,
     isConnected,
     datasetInfo,
+    simulationResult,
     error,
     sendMessage,
   } = useChat(sessionId);
@@ -49,6 +52,9 @@ function App() {
 
       {/* Dataset download card */}
       {datasetInfo && <FileDownloadCard datasetInfo={datasetInfo} />}
+
+      {/* Simulation result card */}
+      {simulationResult && <SimulationResultCard result={simulationResult} />}
 
       {/* Input */}
       <ChatInput onSend={sendMessage} disabled={isTyping || !isConnected} />

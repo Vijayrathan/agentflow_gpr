@@ -32,7 +32,12 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 
 DATABASE_URL = "postgresql+psycopg2://myuser:mypassword@localhost:5432/my_app"
 
-engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    connect_args={"connect_timeout": 5},  # fail fast if PG is unreachable
+)
 
 
 def get_session() -> Session:
@@ -343,6 +348,8 @@ def bulk_update_signals(
                 sim.signal_hy = u.get("signal_hy")
                 sim.signal_hz = u.get("signal_hz")
                 sim.signal_length = u.get("signal_length")
+                if "output_file_path" in u:
+                    sim.output_file_path = u["output_file_path"]
                 sim.simulation_completed_at = datetime.now(timezone.utc)
             db.commit()
             total += len(chunk)

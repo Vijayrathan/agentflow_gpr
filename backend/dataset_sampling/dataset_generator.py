@@ -24,6 +24,7 @@ from backend.physics_modelling import (
     CylinderObject,
     BoxObject,
     SphereObject,
+    CustomMaterial,
 )
 from resolvers import ResolvedLayerRange
 from validation import (
@@ -201,6 +202,7 @@ def _gpr_schema_for_sample(
         pml_cells=template.pml_cells,
         num_threads=template.num_threads,
         output_dir=None,  # output_dir is managed by dataset_generator
+        fractal_nbins=template.fractal_nbins,
     )
 
 
@@ -262,11 +264,16 @@ def _call_generate(gpr: GprSchema, output_filepath: str) -> None:
     if gpr.objects:
         objects = []
         for obj in gpr.objects:
+            custom_mat = (
+                CustomMaterial(**obj.custom_material.model_dump())
+                if obj.custom_material else None
+            )
             if hasattr(obj, 'radius') and hasattr(obj, 'cx'):
                 # SphereSchema
                 objects.append(SphereObject(
                     name=obj.name, cx=obj.cx, cy=obj.cy, cz=obj.cz,
                     radius=obj.radius, material=obj.material,
+                    custom_material=custom_mat,
                     dielectric_smoothing=obj.dielectric_smoothing,
                 ))
             elif hasattr(obj, 'radius'):
@@ -276,6 +283,7 @@ def _call_generate(gpr: GprSchema, output_filepath: str) -> None:
                     x1=obj.x1, y1=obj.y1, z1=obj.z1,
                     x2=obj.x2, y2=obj.y2, z2=obj.z2,
                     radius=obj.radius, material=obj.material,
+                    custom_material=custom_mat,
                     dielectric_smoothing=obj.dielectric_smoothing,
                 ))
             else:
@@ -285,6 +293,7 @@ def _call_generate(gpr: GprSchema, output_filepath: str) -> None:
                     x1=obj.x1, y1=obj.y1, z1=obj.z1,
                     x2=obj.x2, y2=obj.y2, z2=obj.z2,
                     material=obj.material,
+                    custom_material=custom_mat,
                     dielectric_smoothing=obj.dielectric_smoothing,
                 ))
 
@@ -331,6 +340,7 @@ def _call_generate(gpr: GprSchema, output_filepath: str) -> None:
         surface_roughness=surface_roughness,
         snapshots=snapshots,
         rx_array=rx_array,
+        fractal_nbins=gpr.fractal_nbins,
     )
 
 
@@ -422,9 +432,10 @@ def generate_dataset(
 
     rng = random.Random(seed)
 
-    # Set up output directories
-    workspace_dir = Path(".")
-    dataset_dir = workspace_dir / "datasets" / dataset_name
+    # Set up output directories — always relative to the project root,
+    # regardless of the current working directory.
+    project_root = Path(__file__).parent.parent.parent
+    dataset_dir = project_root / "datasets" / dataset_name
     files_dir = dataset_dir / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
 

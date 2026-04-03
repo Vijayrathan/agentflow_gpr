@@ -349,6 +349,8 @@ class AntennaSpec:
             raise ValueError("Axis must be 'x','y','z'")
         if self.kind.lower() == "voltage_source" and self.resistance is None:
             raise ValueError("voltage_source requires resistance parameter")
+        if self.source_start_time is not None and self.source_end_time is None:
+            raise ValueError("source_start_time requires source_end_time (gprMax expects both start and stop)")
         if self.source_start_time is not None and self.source_end_time is not None:
             if self.source_start_time >= self.source_end_time:
                 raise ValueError("source_start_time must be < source_end_time")
@@ -524,6 +526,7 @@ class ModelSpec:
     surface_roughness: Optional[SurfaceRoughnessConfig] = None
     snapshots: Optional[List[SnapshotConfig]] = None
     rx_array: Optional[RxArrayConfig] = None
+    fractal_nbins: int = 3
 
     def build(self) -> str:
         if not self.layers:
@@ -762,10 +765,8 @@ class ModelSpec:
         axis = self.antenna.axis.lower()
         source_type = self.antenna.kind.lower()
         timing_suffix = ""
-        if self.antenna.source_start_time is not None:
-            timing_suffix += f" {self.antenna.source_start_time:.6g}"
-            if self.antenna.source_end_time is not None:
-                timing_suffix += f" {self.antenna.source_end_time:.6g}"
+        if self.antenna.source_start_time is not None and self.antenna.source_end_time is not None:
+            timing_suffix += f" {self.antenna.source_start_time:.6g} {self.antenna.source_end_time:.6g}"
         elif self.antenna.source_end_time is not None:
             timing_suffix += f" 0 {self.antenna.source_end_time:.6g}"
 
@@ -805,7 +806,7 @@ class ModelSpec:
                 box_id = f"{name}_fractal" if (is_first_layer and roughness) else f"{name}_fb"
                 lines.append(
                     f"#fractal_box: 0 0 {z1:.6g} {x_extent:.6g} {y_extent:.6g} {z2:.6g} "
-                    f"{frac_dim:.6g} 1 1 1 1 {name} {box_id}{seed_part}"
+                    f"{frac_dim:.6g} 1 1 1 {self.fractal_nbins} {name} {box_id}{seed_part}"
                 )
                 if is_first_layer and roughness:
                     z_min = air_top - roughness.amplitude_m
@@ -899,6 +900,7 @@ def generate_gprmax_input_file(
     surface_roughness: Optional[SurfaceRoughnessConfig] = None,
     snapshots: Optional[List[SnapshotConfig]] = None,
     rx_array: Optional[RxArrayConfig] = None,
+    fractal_nbins: int = 3,
 ):
     num_layers = len(layer_thicknesses_m)
     if not all(len(lst) == num_layers for lst in [
@@ -969,6 +971,7 @@ def generate_gprmax_input_file(
         surface_roughness=surface_roughness,
         snapshots=snapshots,
         rx_array=rx_array,
+        fractal_nbins=fractal_nbins,
     )
 
     text = spec.build()

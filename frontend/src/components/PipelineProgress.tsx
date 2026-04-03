@@ -7,7 +7,7 @@ interface Props {
 export default function PipelineProgress({ currentStage }: Props) {
   return (
     <div className="border-b border-gray-700 bg-gray-800/50 px-4 py-3">
-      <div className="mx-auto max-w-4xl flex items-center justify-between">
+      <div className="mx-auto max-w-5xl flex items-center justify-between">
         {STAGE_NAMES.map((name, i) => {
           const isComplete = i < currentStage;
           const isActive = i === currentStage;

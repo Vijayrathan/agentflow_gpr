@@ -38,7 +38,7 @@ from schema import (
     ExtractedModelConfig,
     ExtractedAdvancedParams,
 )
-from db.db import upsert_extraction_section
+from db.db import upsert_extraction_section, batch_insert_simulations
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,32 @@ def start_session(body: SessionStart):
         "session_id": str(_active_session_id),
         "user_id": _active_user_id,
     }
+
+
+@app.get("/session")
+def get_session_info():
+    """Return the active session_id and user_id."""
+    if _active_session_id is None:
+        return {
+            "session_id": None,
+            "user_id": _active_user_id or "cli-user",
+        }
+    return {
+        "session_id": str(_active_session_id),
+        "user_id": _active_user_id or "cli-user",
+    }
+
+
+@app.post("/simulations")
+def post_simulations(rows: list[dict]):
+    """Bulk-insert simulation rows into the database.
+
+    Each dict should match the Simulation table columns.
+    """
+    if not rows:
+        return {"status": "ok", "rows_inserted": 0}
+    inserted = batch_insert_simulations(rows)
+    return {"status": "ok", "rows_inserted": inserted}
 
 
 # ---- GET endpoints --------------------------------------------------------
@@ -266,7 +292,7 @@ def post_parameters(
     The payload is validated against the section's schema before storing.
     """
     data = json.loads(payload)
-    resp = httpx.post(f"{BASE_URL}/{section}", json=data, timeout=10)
+    resp = httpx.post(f"{BASE_URL}/{section}", json=data, timeout=30)
     return resp.text
 
 

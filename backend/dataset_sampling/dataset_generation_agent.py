@@ -14,7 +14,18 @@ from langchain_openai import ChatOpenAI
 
 from deepagents import create_deep_agent
 from backend.parameters_global_state import get_parameters, patch_parameters, BASE_URL
-from backend.prompt_library import DATASET_GENERATION_PROMPT
+from backend.prompt_library import DATASET_GENERATION_PROMPT, DATASET_VALIDATION_PROMPT
+from backend.validation_tools import (
+    validate_memory_estimate,
+    validate_pml_vs_domain,
+    validate_domain_z_alignment,
+    validate_dispersive_tau_vs_dt,
+    validate_snapshot_time_range,
+    validate_waveform_bandwidth,
+    validate_object_resolution,
+    validate_rxarray_step_vs_cell,
+    validate_object_pml_distance,
+)
 
 # Add this directory (dataset_sampling) to sys.path so bare imports like
 # `from resolvers import ...` and `from dataset_generator import ...` work
@@ -26,6 +37,7 @@ from backend.schema import (
     ExtractedAntennaWaveform,
     ExtractedModelConfig,
     ExtractedAdvancedParams,
+    DatasetGenerationResult,
     SurfaceRoughnessConfigSchema,
     RxArrayConfigSchema,
 )
@@ -33,6 +45,9 @@ from resolvers import merge_extractions
 from dataset_generator import generate_dataset
 
 dotenv.load_dotenv()
+
+# Module-level state: last successful generation result (read by post_dataset_to_db)
+_last_generation_result: Optional[DatasetGenerationResult] = None
 
 
 # ── Helper: fetch & parse all sections from parameter server ──────────
@@ -68,83 +83,34 @@ def _fetch_and_parse():
             errors.append(f"Section '{section}' failed validation: {e}")
     
     return parsed, errors
-    return _dummy_sections(), []
 
+# ── Validation Sub-Agent ───────────────────────────────────────────────
 
-# def _dummy_sections():
-#     """Hardcoded extraction results for testing dataset generation directly."""
-#     _layer = ExtractedLayerParams(
-#         name="Layer 1",
-#         thickness_m_min=0.1, thickness_m_max=0.3,
-#         sand_pct_min=5, sand_pct_max=65,
-#         silt_pct_min=20, silt_pct_max=65,
-#         clay_pct_min=10, clay_pct_max=50,
-#         theta_v_min=0.14, theta_v_max=0.18,
-#         bulk_density_gcm3_min=1.3, bulk_density_gcm3_max=1.7,
-#         particle_density_gcm3_min=2.6, particle_density_gcm3_max=2.7,
-#         organic_fraction=0.03,
-#         salinity_classes=["fresh"],
-#         porewater_sigma_Sm=0.01,
-#     )
-#     _layer2 = ExtractedLayerParams(
-#         name="Layer 2",
-#         thickness_m_min=0.1, thickness_m_max=0.3,
-#         sand_pct_min=5, sand_pct_max=65,
-#         silt_pct_min=20, silt_pct_max=65,
-#         clay_pct_min=10, clay_pct_max=50,
-#         theta_v_min=0.14, theta_v_max=0.18,
-#         bulk_density_gcm3_min=1.3, bulk_density_gcm3_max=1.7,
-#         particle_density_gcm3_min=2.6, particle_density_gcm3_max=2.7,
-#         organic_fraction=0.03,
-#         salinity_classes=["fresh"],
-#         porewater_sigma_Sm=0.01,
-#     )
+validation_subagent = {
+    "name": "validation-agent",
+    "description": (
+        "Cross-parameter physics validation specialist. Runs 9 checks that "
+        "span multiple extraction sections: memory estimate, PML vs domain, "
+        "domain Z alignment, dispersive tau vs dt, snapshot time range, "
+        "waveform bandwidth, object resolution, rx_array step vs cell, and "
+        "object PML distance. Call after resolve_and_validate passes, before "
+        "dataset generation."
+    ),
+    "system_prompt": DATASET_VALIDATION_PROMPT,
+    "tools": [
+        validate_memory_estimate,
+        validate_pml_vs_domain,
+        validate_domain_z_alignment,
+        validate_dispersive_tau_vs_dt,
+        validate_snapshot_time_range,
+        validate_waveform_bandwidth,
+        validate_object_resolution,
+        validate_rxarray_step_vs_cell,
+        validate_object_pml_distance,
+        get_parameters,
+    ],
+}
 
-#     return {
-#         "layers": ExtractedLayers(num_layers=2, layers=[_layer, _layer2]),
-#         "antenna_waveform": ExtractedAntennaWaveform(
-#             antenna_kind="voltage_source",
-#             antenna_axis="z",
-#             tx_rx_offset_m=0.05,
-#             resistance=75.0,
-#             source_start_time=0.0,
-#             source_end_time=1e-9,
-#             waveform_kind="gaussian",
-#             waveform_amplitude=5.0,
-#             waveform_center_freq_hz=1.2e9,
-#             waveform_name="my_gauss_pulse",
-#         ),
-#         "model_config": ExtractedModelConfig(
-#             model="crim",
-#             title="test2",
-#             domain_x=0.3,
-#             domain_y=0.8,
-#             top_air_extra_m=0.1,
-#             cells_per_wavelength=15,
-#             max_cell_m=0.01,
-#             source_height_m=0.03,
-#             rx_same_height=True,
-#             temperature_c=20.0,
-#             enforce_validity=True,
-#             salinity_defaults_Sm=[0.01, 0.1, 1.0, 3.5],
-#             num_samples=512,
-#         ),
-#         "advanced_params": ExtractedAdvancedParams(
-#             surface_roughness=SurfaceRoughnessConfigSchema(
-#                 fractal_dim=1.5,
-#                 weight_x=1.0,
-#                 weight_y=1.0,
-#                 amplitude_m=0.01,
-#                 add_water=False,
-#                 water_depth_m=0.005,
-#             ),
-#             rx_array=RxArrayConfigSchema(
-#                 x1=0.0, y1=0.0, z1=0.0,
-#                 x2=1.0, y2=0.0, z2=0.0,
-#                 dx=0.05, dy=0.05, dz=0.05,
-#             ),
-#         ),
-#     }
 
 # ── Tools ─────────────────────────────────────────────────────────────
 
@@ -273,7 +239,7 @@ def run_dataset_generation(
 
     num_samples = parsed["model_config"].num_samples
 
-    # Generate
+    # Generate .in files
     result = generate_dataset(
         resolved_layer_ranges=resolved_ranges,
         gpr_schema_template=gpr_template,
@@ -281,6 +247,10 @@ def run_dataset_generation(
         dataset_name=dataset_name,
         seed=seed,
     )
+
+    # Store for post_dataset_to_db
+    global _last_generation_result
+    _last_generation_result = result
 
     # Determine effective status (partial with >=90% is acceptable)
     effective_status = result.status
@@ -299,6 +269,199 @@ def run_dataset_generation(
     return json.dumps(output, indent=2)
 
 
+@tool
+def post_dataset_to_db() -> str:
+    """Persist the generated dataset to the simulations database.
+
+    Reads the last generation result and extracted parameters, builds
+    Simulation rows, and POSTs them to the database. Call only after the
+    user confirms they are satisfied with the dataset.
+    """
+    global _last_generation_result
+
+    if _last_generation_result is None:
+        return json.dumps({"status": "error", "message": "No dataset has been generated yet. Run dataset generation first."})
+
+    result = _last_generation_result
+
+    # Get session info
+    try:
+        sess_resp = httpx.get(f"{BASE_URL}/session", timeout=10)
+        sess_resp.raise_for_status()
+        sess_info = sess_resp.json()
+        session_id = sess_info.get("session_id")
+        user_id = sess_info.get("user_id") or "cli-user"
+    except Exception:
+        session_id = str(uuid.uuid4())
+        user_id = "cli-user"
+
+    # Fetch all extracted sections for scalar columns
+    try:
+        state_resp = httpx.get(f"{BASE_URL}/state", timeout=10)
+        state_resp.raise_for_status()
+        state = state_resp.json()
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"Failed to fetch parameter state: {e}"})
+
+    aw = state.get("antenna_waveform") or {}
+    mc = state.get("model_config") or {}
+    ap = state.get("advanced_params") or {}
+
+    # Validate that all required (NOT NULL) fields were extracted
+    required_aw = {
+        "tx_rx_offset_m": aw.get("tx_rx_offset_m"),
+        "waveform_amplitude": aw.get("waveform_amplitude"),
+        "waveform_center_freq_hz": aw.get("waveform_center_freq_hz"),
+        "waveform_name": aw.get("waveform_name"),
+    }
+    required_mc = {
+        "model": mc.get("model"),
+        "title": mc.get("title"),
+        "source_height_m": mc.get("source_height_m"),
+        "domain_x": mc.get("domain_x"),
+        "domain_y": mc.get("domain_y"),
+        "cells_per_wavelength": mc.get("cells_per_wavelength"),
+        "max_cell_m": mc.get("max_cell_m"),
+        "temperature_c": mc.get("temperature_c"),
+        "num_samples": mc.get("num_samples"),
+    }
+    missing = [k for k, v in {**required_aw, **required_mc}.items() if v is None]
+    if missing:
+        return json.dumps({
+            "status": "error",
+            "message": f"Required fields are missing (NULL) in extracted parameters: {missing}. "
+                       "These must be collected by the extraction agents before posting to DB.",
+        })
+
+    # Build simulation rows
+    rows = []
+    for sample in result.samples:
+        row = {
+            # Primary key
+            "id": str(uuid.uuid4()),
+            # Identity
+            "session_id": session_id,
+            "user_id": user_id,
+            "sample_index": sample.sample_index,
+            # Antenna / Waveform
+            "antenna_kind": aw.get("antenna_kind") or "hertzian_dipole",
+            "antenna_axis": aw.get("antenna_axis") or "x",
+            "tx_rx_offset_m": aw["tx_rx_offset_m"],
+            "resistance": aw.get("resistance"),
+            "source_start_time": aw.get("source_start_time"),
+            "source_end_time": aw.get("source_end_time"),
+            "waveform_kind": aw.get("waveform_kind") or "ricker",
+            "waveform_amplitude": aw["waveform_amplitude"],
+            "waveform_center_freq_hz": aw["waveform_center_freq_hz"],
+            "waveform_name": aw["waveform_name"],
+            # Model config
+            "model": mc["model"],
+            "title": mc["title"],
+            "source_height_m": mc["source_height_m"],
+            "domain_x": mc["domain_x"],
+            "domain_y": mc["domain_y"],
+            "top_air_extra_m": mc.get("top_air_extra_m"),
+            "cells_per_wavelength": mc["cells_per_wavelength"],
+            "max_cell_m": mc["max_cell_m"],
+            "rx_same_height": mc.get("rx_same_height", True),
+            "temperature_c": mc["temperature_c"],
+            "enforce_validity": mc.get("enforce_validity", True),
+            # Advanced
+            "pml_cells": ap.get("pml_cells"),
+            "num_threads": ap.get("num_threads"),
+            "output_dir": ap.get("output_dir"),
+            # Layers (JSONB)
+            "layers": [lv.model_dump() for lv in sample.layers],
+            "num_layers": len(sample.layers),
+            # Geometry objects (JSONB, nullable)
+            "cylinders": ap.get("cylinders"),
+            "boxes": ap.get("boxes"),
+            "spheres": ap.get("spheres"),
+            # Optional config (JSONB, nullable)
+            "surface_roughness": ap.get("surface_roughness"),
+            "rx_array": ap.get("rx_array"),
+            "snapshots": ap.get("snapshots"),
+            # File reference
+            "input_file_path": sample.filepath,
+        }
+        rows.append(row)
+
+    # POST to simulations endpoint
+    try:
+        resp = httpx.post(f"{BASE_URL}/simulations", json=rows, timeout=60)
+        resp.raise_for_status()
+        resp_data = resp.json()
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"Failed to POST simulations: {e}"})
+
+    return json.dumps({
+        "status": "ok",
+        "rows_inserted": resp_data.get("rows_inserted", 0),
+        "dataset_name": result.dataset_name,
+        "num_generated": result.num_generated,
+    }, indent=2)
+
+
+@tool
+def verify_simulations_db() -> str:
+    """Verify that simulation rows were inserted into the database.
+
+    Returns the total count and a sample of rows for the current session.
+    """
+    # Get session_id
+    try:
+        sess_resp = httpx.get(f"{BASE_URL}/session", timeout=10)
+        sess_resp.raise_for_status()
+        sess_info = sess_resp.json()
+        session_id = sess_info.get("session_id")
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"Failed to get session info: {e}"})
+
+    if not session_id:
+        return json.dumps({"status": "error", "message": "No active session found."})
+
+    # Query DB directly
+    try:
+        from db.db import get_session as get_db_session, Simulation
+        from sqlmodel import select, func
+
+        with get_db_session() as db:
+            # Total count
+            count_stmt = select(func.count()).where(Simulation.session_id == session_id)
+            total = db.exec(count_stmt).one()
+
+            # Sample rows
+            sample_stmt = (
+                select(
+                    Simulation.sample_index,
+                    Simulation.antenna_kind,
+                    Simulation.waveform_kind,
+                    Simulation.num_layers,
+                )
+                .where(Simulation.session_id == session_id)
+                .order_by(Simulation.sample_index)
+                .limit(5)
+            )
+            sample_rows = db.exec(sample_stmt).all()
+
+        return json.dumps({
+            "status": "ok",
+            "total_rows": total,
+            "sample_rows": [
+                {
+                    "sample_index": r[0],
+                    "antenna_kind": r[1],
+                    "waveform_kind": r[2],
+                    "num_layers": r[3],
+                }
+                for r in sample_rows
+            ],
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"DB query failed: {e}"})
+
+
 # ── Agent ─────────────────────────────────────────────────────────────
 
 llm = ChatOpenAI(
@@ -308,13 +471,15 @@ llm = ChatOpenAI(
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[],
+    subagents=[validation_subagent],
     system_prompt=DATASET_GENERATION_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[
         fetch_all_extractions,
         resolve_and_validate,
         run_dataset_generation,
+        post_dataset_to_db,
+        verify_simulations_db,
         get_parameters,
         patch_parameters,
     ],

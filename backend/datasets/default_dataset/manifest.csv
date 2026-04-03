@@ -1,2 +1,0 @@
-sample_index,filename,filepath,layer_1_thickness_m,layer_1_sand_pct,layer_1_silt_pct,layer_1_clay_pct,layer_1_theta_v,layer_1_bulk_density_gcm3,layer_1_particle_density_gcm3,layer_1_organic_fraction,layer_1_salinity_class
-1,gpr_dataset_0001.in,datasets/default_dataset/files/gpr_dataset_0001.in,0.4095285144270281,39.511401,30.73161,29.756989,0.14559598447980074,1.3824338761175181,2.6953194539956535,0.02,fresh

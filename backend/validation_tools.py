@@ -187,6 +187,10 @@ def validate_antenna(
         errors.append("Only 'hertzian_dipole' and 'voltage_source' are supported")
     if axis.lower() not in {"x", "y", "z"}:
         errors.append("Axis must be 'x', 'y', or 'z'")
+    if source_start_time is not None and source_end_time is None:
+        errors.append("source_start_time requires source_end_time (gprMax expects both start and stop)")
+    elif source_end_time is not None and source_start_time is None:
+        pass  # physics_modelling.py handles this by defaulting start to 0
     if source_start_time is not None and source_end_time is not None:
         if source_start_time >= source_end_time:
             errors.append("source_start_time must be < source_end_time")
@@ -636,24 +640,47 @@ def validate_cfl(
     dx: Annotated[float, "Cell size in x (metres)"],
     dy: Annotated[float, "Cell size in y (metres)"],
     dz: Annotated[float, "Cell size in z (metres)"],
-    dt: Annotated[float, "Time step in seconds"],
+    time_window_s: Annotated[float, "Simulation time window in seconds"],
 ) -> str:
-    """Validate FDTD CFL stability condition: dt <= 1/(c * sqrt(1/dx^2 + 1/dy^2 + 1/dz^2))."""
-    errors: list[str] = []
+    """Compute the CFL-limited time step from cell sizes and report whether
+    the simulation is practical.
 
-    for label, val in [("dx", dx), ("dy", dy), ("dz", dz), ("dt", dt)]:
+    gprMax automatically computes dt from the CFL condition, so this check
+    verifies that the chosen cell sizes produce a reasonable time step and
+    that the total number of iterations is feasible."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for label, val in [("dx", dx), ("dy", dy), ("dz", dz)]:
         if val <= 0:
             errors.append(f"{label} must be > 0")
 
-    if not errors:
-        dt_max = 1.0 / (C0 * math.sqrt(1.0 / dx**2 + 1.0 / dy**2 + 1.0 / dz**2))
-        if dt > dt_max:
-            errors.append(
-                f"CFL violation: dt ({dt:.6e} s) exceeds dt_max ({dt_max:.6e} s); "
-                "simulation will be numerically unstable"
-            )
+    if time_window_s <= 0:
+        errors.append("time_window_s must be > 0")
 
-    return _result(errors, [])
+    if not errors:
+        dt = 1.0 / (C0 * math.sqrt(1.0 / dx**2 + 1.0 / dy**2 + 1.0 / dz**2))
+        n_iterations = int(math.ceil(time_window_s / dt))
+
+        info = (
+            f"CFL time step dt = {dt:.6e} s | "
+            f"iterations = {n_iterations:,} for time window {time_window_s:.6e} s"
+        )
+
+        if n_iterations > 50_000:
+            warnings.append(
+                f"{info}. Very high iteration count — simulation will be slow. "
+                "Consider coarsening the grid (increase max_cell_m) or "
+                "reducing the time window."
+            )
+        elif n_iterations > 20_000:
+            warnings.append(
+                f"{info}. High iteration count — simulation may be slow."
+            )
+        else:
+            warnings.append(f"{info}. Iteration count is reasonable.")
+
+    return _result(errors, warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +709,404 @@ def validate_simulation_metadata(
         errors.append("output_dir must be a non-empty string")
 
     return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Memory pre-flight check
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_memory_estimate(
+    domain_x_m: Annotated[float, "Domain X extent in metres"],
+    domain_y_m: Annotated[float, "Domain Y extent in metres"],
+    domain_z_m: Annotated[float, "Domain Z extent in metres"],
+    dx: Annotated[float, "Cell size X in metres"],
+    dy: Annotated[float, "Cell size Y in metres"],
+    dz: Annotated[float, "Cell size Z in metres"],
+    available_ram_bytes: Annotated[Optional[int], "Available RAM in bytes (default 32 GiB)"] = None,
+    max_cells: Annotated[Optional[int], "Upper bound on total cells (default 500M)"] = None,
+) -> str:
+    """Estimate FDTD grid memory and check it fits in available RAM.
+
+    gprMax allocates ~146 bytes per cell (field arrays + ID + solid/rigid)
+    plus ~50 MB baseline overhead. This pre-flight check prevents the
+    'Memory required exceeds detected' fatal error."""
+    errors: list[str] = []
+
+    if dx <= 0 or dy <= 0 or dz <= 0:
+        errors.append("dx, dy, dz must all be > 0")
+        return _result(errors, [])
+
+    nx = round(domain_x_m / dx)
+    ny = round(domain_y_m / dy)
+    nz = round(domain_z_m / dz)
+    total_cells = nx * ny * nz
+
+    cell_limit = max_cells if max_cells is not None else 500_000_000
+    if total_cells > cell_limit:
+        errors.append(
+            f"Total cells ({nx}×{ny}×{nz} = {total_cells:,.0f}) exceeds "
+            f"limit of {cell_limit:,.0f}. Reduce domain size or increase cell size."
+        )
+
+    bytes_per_cell = 146  # 96 field + 24 ID + 22 solid/rigid + ~4 PML overhead
+    baseline_bytes = 50_000_000
+    estimated_bytes = total_cells * bytes_per_cell + baseline_bytes
+
+    ram = available_ram_bytes if available_ram_bytes is not None else 32 * (1024 ** 3)
+    if estimated_bytes > ram:
+        est_human = f"{estimated_bytes / (1024**3):.1f} GiB"
+        ram_human = f"{ram / (1024**3):.1f} GiB"
+        errors.append(
+            f"Estimated memory ~{est_human} exceeds available RAM {ram_human}. "
+            f"Grid: {nx}×{ny}×{nz} = {total_cells:,.0f} cells."
+        )
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# PML thickness vs domain size
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_pml_vs_domain(
+    domain_x_m: Annotated[float, "Domain X extent in metres"],
+    domain_y_m: Annotated[float, "Domain Y extent in metres"],
+    domain_z_m: Annotated[float, "Domain Z extent in metres"],
+    dx: Annotated[float, "Cell size X in metres"],
+    dy: Annotated[float, "Cell size Y in metres"],
+    dz: Annotated[float, "Cell size Z in metres"],
+    pml_cells: Annotated[int, "Number of PML cells (same for all boundaries)"] = 10,
+) -> str:
+    """Validate that PML thickness does not consume half or more of the domain.
+
+    gprMax requires 2 × pml_cells < domain_cells per axis, otherwise it
+    raises 'has too many cells for the domain size'."""
+    errors: list[str] = []
+
+    if dx <= 0 or dy <= 0 or dz <= 0:
+        errors.append("dx, dy, dz must all be > 0")
+        return _result(errors, [])
+
+    # Detect 2D mode: Z dimension is a single cell (no PML applied in Z)
+    is_2d = domain_z_m <= dz * 1.5
+
+    axes = [("X", domain_x_m, dx), ("Y", domain_y_m, dy)]
+    if not is_2d:
+        axes.append(("Z", domain_z_m, dz))
+
+    for label, dim_m, cell_m in axes:
+        n_cells = round(dim_m / cell_m)
+        if 2 * pml_cells >= n_cells:
+            errors.append(
+                f"{label}-axis: 2×pml_cells (2×{pml_cells}={2*pml_cells}) >= "
+                f"domain cells ({n_cells}). Increase domain or reduce pml_cells."
+            )
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Material name validation (no spaces, unique)
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_material_names(
+    names: Annotated[List[str], "List of all material/layer names used in the simulation"],
+) -> str:
+    """Validate material names contain no whitespace and are unique.
+
+    gprMax splits input lines by whitespace, so material names with spaces
+    cause a parameter-count error. Duplicate names cause 'already exists'."""
+    errors: list[str] = []
+
+    for i, name in enumerate(names):
+        if not name or not name.strip():
+            errors.append(f"Material name at index {i} is empty")
+        elif " " in name or "\t" in name:
+            errors.append(
+                f"Material name '{name}' contains whitespace; "
+                "gprMax splits on spaces so this will cause a parse error"
+            )
+
+    seen: dict[str, int] = {}
+    for i, name in enumerate(names):
+        lower = name.lower()
+        if lower in seen:
+            errors.append(
+                f"Duplicate material name '{name}' at indices {seen[lower]} and {i}"
+            )
+        else:
+            seen[lower] = i
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Domain Z integer-cell alignment
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_domain_z_alignment(
+    domain_z_m: Annotated[float, "Domain Z extent in metres (computed from layers + air)"],
+    dz: Annotated[float, "Cell size Z in metres"],
+) -> str:
+    """Validate that domain_z is an integer multiple of dz.
+
+    gprMax rounds domain_z / dz to the nearest integer. If the ratio is not
+    close to an integer the actual simulated domain will differ from intended."""
+    errors: list[str] = []
+
+    if dz <= 0:
+        errors.append("dz must be > 0")
+        return _result(errors, [])
+
+    ratio = domain_z_m / dz
+    if abs(ratio - round(ratio)) > 1e-9:
+        errors.append(
+            f"domain_z_m ({domain_z_m}) is not an integer multiple of "
+            f"dz ({dz}); ratio = {ratio:.6f}"
+        )
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Dispersive material relaxation time vs time step
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_dispersive_tau_vs_dt(
+    tau_values_s: Annotated[List[float], "Debye/Lorentz/Drude relaxation times in seconds"],
+    dx: Annotated[float, "Cell size X in metres"],
+    dy: Annotated[float, "Cell size Y in metres"],
+    dz: Annotated[float, "Cell size Z in metres"],
+) -> str:
+    """Validate that all dispersive-material relaxation times exceed the CFL
+    time step.
+
+    gprMax requires tau > dt for Debye poles and tau,alpha > dt for
+    Lorentz/Drude. Violation causes 'requires tau values > dt' fatal error."""
+    errors: list[str] = []
+
+    if dx <= 0 or dy <= 0 or dz <= 0:
+        errors.append("dx, dy, dz must all be > 0")
+        return _result(errors, [])
+
+    dt = 1.0 / (C0 * math.sqrt(1.0 / dx**2 + 1.0 / dy**2 + 1.0 / dz**2))
+
+    for i, tau in enumerate(tau_values_s):
+        if tau <= dt:
+            errors.append(
+                f"Relaxation time tau[{i}] = {tau:.6e} s is not > CFL dt = {dt:.6e} s. "
+                "Coarsen the grid or use a different dispersive model."
+            )
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Snapshot time within simulation window
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_snapshot_time_range(
+    snapshot_time_s: Annotated[float, "Snapshot time in seconds (pass 0 or negative if no snapshots are configured)"],
+    time_window_s: Annotated[float, "Simulation time window in seconds"],
+) -> str:
+    """Validate that the snapshot time does not exceed the simulation time window.
+
+    If no snapshots are configured, pass snapshot_time_s=0 — the check will
+    be skipped and a PASS is returned."""
+    errors: list[str] = []
+
+    # No snapshots configured — nothing to validate
+    if snapshot_time_s <= 0:
+        return _result([], ["No snapshots configured — skipping snapshot time check."])
+
+    if time_window_s <= 0:
+        errors.append("time_window_s must be > 0")
+    if time_window_s > 0 and snapshot_time_s > time_window_s:
+        errors.append(
+            f"snapshot_time_s ({snapshot_time_s:.6e}) exceeds "
+            f"time_window_s ({time_window_s:.6e})"
+        )
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Waveform bandwidth check (Ricker highest frequency)
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_waveform_bandwidth(
+    kind: Annotated[str, "Waveform type (e.g. 'ricker', 'gaussian')"],
+    center_freq_hz: Annotated[float, "Centre frequency in Hz"],
+    max_cell_m: Annotated[float, "Maximum cell size in metres (dx, dy, or dz)"],
+    eps_r_max: Annotated[float, "Estimated max relative permittivity"] = 10.0,
+) -> str:
+    """Check grid resolution against the waveform's actual highest frequency.
+
+    A Ricker wavelet has significant energy at ~2.5× its centre frequency.
+    The standard lambda/10 check at centre frequency may be too lenient;
+    this uses the effective highest frequency for the bandwidth check."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if center_freq_hz <= 0 or max_cell_m <= 0 or eps_r_max <= 0:
+        errors.append("center_freq_hz, max_cell_m, and eps_r_max must all be > 0")
+        return _result(errors, [])
+
+    # Bandwidth multiplier by waveform type
+    bw_mult = {
+        "ricker": 2.5,
+        "gaussiandot": 2.5,
+        "gaussiandotnorm": 2.5,
+        "gaussiandotdot": 3.0,
+        "gaussiandotdotnorm": 3.0,
+        "gaussianprime": 2.5,
+        "gaussiandoubleprime": 3.0,
+    }
+    mult = bw_mult.get(kind.lower(), 1.5)
+    f_max = center_freq_hz * mult
+
+    lambda_min = C0 / (f_max * math.sqrt(eps_r_max))
+    max_allowed = lambda_min / 10.0
+
+    if max_cell_m > max_allowed:
+        warnings.append(
+            f"{kind} waveform has significant energy up to ~{f_max:.3e} Hz "
+            f"({mult}× centre). Cell size {max_cell_m:.6f} m exceeds "
+            f"lambda_min/10 = {max_allowed:.6f} m at eps_r_max={eps_r_max:.1f}. "
+            "Risk of numerical dispersion."
+        )
+
+    return _result(errors, warnings)
+
+
+# ---------------------------------------------------------------------------
+# Object minimum resolution (≥ 10 cells across)
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_object_resolution(
+    object_name: Annotated[str, "Object name"],
+    min_dimension_m: Annotated[float, "Smallest physical dimension of the object in metres"],
+    max_cell_m: Annotated[float, "Maximum cell size in metres"],
+    min_cells: Annotated[int, "Minimum cells across (default 10)"] = 10,
+) -> str:
+    """Validate that a geometry object is resolved by enough cells.
+
+    gprMax docs recommend targets have at least 10 cells across their
+    smallest dimension for physically meaningful scattering."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if max_cell_m <= 0:
+        errors.append("max_cell_m must be > 0")
+        return _result(errors, [])
+
+    cells_across = min_dimension_m / max_cell_m
+    if cells_across < min_cells:
+        warnings.append(
+            f"Object '{object_name}': smallest dimension {min_dimension_m:.6g} m "
+            f"is only {cells_across:.1f} cells across (need >= {min_cells}). "
+            "Scattering will not be physically realistic."
+        )
+
+    return _result(errors, warnings)
+
+
+# ---------------------------------------------------------------------------
+# rx_array step size ≥ cell size
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_rxarray_step_vs_cell(
+    rx_dx: Annotated[float, "Receiver array X step"],
+    rx_dy: Annotated[float, "Receiver array Y step"],
+    rx_dz: Annotated[float, "Receiver array Z step"],
+    cell_dx: Annotated[float, "Cell size X"],
+    cell_dy: Annotated[float, "Cell size Y"],
+    cell_dz: Annotated[float, "Cell size Z"],
+) -> str:
+    """Validate that rx_array step sizes are at least one cell.
+
+    gprMax requires step size >= spatial discretisation (or 0, which
+    internally becomes 1 cell). Fractional-cell steps cause a fatal error."""
+    errors: list[str] = []
+
+    for label, step, cell in [("dx", rx_dx, cell_dx), ("dy", rx_dy, cell_dy), ("dz", rx_dz, cell_dz)]:
+        if step > 0 and step < cell:
+            errors.append(
+                f"rx_array {label} ({step:.6g}) is less than cell size ({cell:.6g}); "
+                "must be >= cell size or 0"
+            )
+
+    return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Object distance from PML boundary
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_object_pml_distance(
+    object_name: Annotated[str, "Object name"],
+    obj_x_min: Annotated[float, "Object minimum X coordinate in metres"],
+    obj_x_max: Annotated[float, "Object maximum X coordinate in metres"],
+    obj_y_min: Annotated[float, "Object minimum Y coordinate in metres"],
+    obj_y_max: Annotated[float, "Object maximum Y coordinate in metres"],
+    obj_z_min: Annotated[float, "Object minimum Z coordinate in metres"],
+    obj_z_max: Annotated[float, "Object maximum Z coordinate in metres"],
+    domain_x_m: Annotated[float, "Domain X extent in metres"],
+    domain_y_m: Annotated[float, "Domain Y extent in metres"],
+    domain_z_m: Annotated[float, "Domain Z extent in metres"],
+    max_cell_m: Annotated[float, "Maximum cell size in metres"],
+    pml_cells: Annotated[int, "Number of PML cells"] = 10,
+    min_gap_cells: Annotated[int, "Minimum cells between object and PML"] = 15,
+) -> str:
+    """Validate that a geometry object is far enough from PML boundaries.
+
+    gprMax docs recommend sources and targets be at least 15 cells from
+    PML boundaries to avoid reflection artifacts."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if max_cell_m <= 0:
+        errors.append("max_cell_m must be > 0")
+        return _result(errors, [])
+
+    margin_m = (pml_cells + min_gap_cells) * max_cell_m
+
+    # In 2D mode (domain_z ≈ 1 cell), all objects span the full Z extent
+    # by definition, so Z-boundary checks are meaningless — skip them.
+    is_2d = domain_z_m <= max_cell_m * 1.5
+
+    checks = [
+        ("X-low", obj_x_min),
+        ("X-high", domain_x_m - obj_x_max),
+        ("Y-low", obj_y_min),
+        ("Y-high", domain_y_m - obj_y_max),
+    ]
+    if not is_2d:
+        checks.extend([
+            ("Z-low", obj_z_min),
+            ("Z-high", domain_z_m - obj_z_max),
+        ])
+
+    for label, distance in checks:
+        if distance < margin_m:
+            cells_away = distance / max_cell_m
+            warnings.append(
+                f"Object '{object_name}' {label} edge is {cells_away:.1f} cells "
+                f"from domain boundary (need >= {pml_cells + min_gap_cells} = "
+                f"pml_cells({pml_cells}) + gap({min_gap_cells}))"
+            )
+
+    return _result(errors, warnings)
 
 
 

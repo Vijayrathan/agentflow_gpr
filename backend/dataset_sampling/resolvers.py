@@ -298,6 +298,7 @@ def merge_extractions(
         pml_cells=advanced_result.pml_cells,
         num_threads=advanced_result.num_threads,
         output_dir=advanced_result.output_dir,
+        fractal_nbins=advanced_result.fractal_nbins or 3,
     )
 
     return gpr, resolved_ranges, []

@@ -12,3 +12,16 @@ wheels/
 .env
 qdrant_storage/
 .claude/
+
+# Simulation outputs and data
+simulation_outputs/
+*.out
+*.vti
+.DS_Store
+
+# DVC and data files
+datasets/
+*.in
+*.out
+*.vti
+dvc.lock
