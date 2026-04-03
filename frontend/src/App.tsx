@@ -25,7 +25,7 @@ function App() {
       {/* Header */}
       <header className="border-b border-gray-700 bg-gray-800 px-4 py-3">
         <div className="mx-auto max-w-4xl flex items-center justify-between">
-          <h1 className="text-lg font-semibold text-white">GPR Simulation Assistant</h1>
+          <h1 className="text-lg font-semibold text-white">NL2GPR - GPR Simulation Agent</h1>
           <div className="flex items-center gap-2">
             <span
               className={`h-2 w-2 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-red-400'}`}
