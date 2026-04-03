@@ -461,18 +461,24 @@ def rag_search(
     """Search the geophysics knowledge base (research papers, GPR docs, soil
     property references). Returns relevant passages above the relevance
     threshold, or 'NO_RESULTS' if nothing relevant is found."""
-    rag_system = _get_rag()
-    results = rag_system.search(query, top_k=3)
-    if not results:
-        return "NO_RESULTS"
-    # Filter by relevance threshold
-    relevant = [(doc, score) for doc, score in results if score >= RELEVANCE_THRESHOLD]
-    if not relevant:
-        return "NO_RESULTS"
-    parts = []
-    for i, (doc, score) in enumerate(relevant, 1):
-        parts.append(f"[Passage {i}, relevance={score:.3f}]\n{doc}")
-    return "\n\n---\n\n".join(parts)
+    import traceback
+    try:
+        rag_system = _get_rag()
+        results = rag_system.search(query, top_k=3)
+        if not results:
+            return "NO_RESULTS"
+        # Filter by relevance threshold
+        relevant = [(doc, score) for doc, score in results if score >= RELEVANCE_THRESHOLD]
+        if not relevant:
+            return "NO_RESULTS"
+        parts = []
+        for i, (doc, score) in enumerate(relevant, 1):
+            parts.append(f"[Passage {i}, relevance={score:.3f}]\n{doc}")
+        return "\n\n---\n\n".join(parts)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"RAG_SEARCH ERROR:\n{tb}")
+        return f"RAG_SEARCH_ERROR: {e}\n{tb}"
 
 
 
