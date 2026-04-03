@@ -7,6 +7,8 @@ simulations table in PostgreSQL.
 """
 
 import logging
+import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,17 @@ logger = logging.getLogger(__name__)
 COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 SIGNAL_KEYS = ("signal_ex", "signal_ey", "signal_ez",
                "signal_hx", "signal_hy", "signal_hz")
+
+# Matches the trailing _NNNN in filenames like gpr_dataset_0001.out
+_SAMPLE_INDEX_RE = re.compile(r"_(\d+)$")
+
+
+def _parse_sample_index(stem: str) -> int | None:
+    """Extract sample_index from a filename stem like 'gpr_dataset_0001'."""
+    m = _SAMPLE_INDEX_RE.search(stem)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def extract_signals_from_hdf5(filepath: str | Path) -> dict[str, Any]:
@@ -69,6 +82,10 @@ def extract_and_prepare_batch(
 ) -> dict[str, Any]:
     """Extract signals from all .out files and prepare DB update payloads.
 
+    Maps .out files to simulation DB rows by sample_index (parsed from
+    the filename suffix, e.g. gpr_dataset_0001.out -> sample_index=1),
+    scoped to the given session_id.
+
     Args:
         output_dir: Directory containing .out HDF5 files.
         session_id: Session UUID to look up simulation rows.
@@ -80,7 +97,6 @@ def extract_and_prepare_batch(
             failed    – int
             errors    – list[dict] with filename and error
     """
-    import sys
     _root = str(Path(__file__).resolve().parent.parent)
     if _root not in sys.path:
         sys.path.insert(0, _root)
@@ -89,18 +105,16 @@ def extract_and_prepare_batch(
 
     output_dir = Path(output_dir)
 
-    # Build stem -> row_id lookup from existing simulation rows
+    # Build sample_index -> row_id lookup (scoped to session)
     with get_session() as db:
         stmt = select(Simulation).where(
             Simulation.session_id == session_id  # type: ignore[arg-type]
         )
         rows = list(db.exec(stmt).all())
 
-    stem_to_id: dict[str, str] = {}
+    idx_to_id: dict[int, str] = {}
     for row in rows:
-        if row.input_file_path:
-            stem = Path(row.input_file_path).stem
-            stem_to_id[stem] = str(row.id)
+        idx_to_id[row.sample_index] = str(row.id)
 
     updates: list[dict] = []
     succeeded = 0
@@ -113,10 +127,14 @@ def extract_and_prepare_batch(
         return {"updates": [], "succeeded": 0, "failed": 0, "errors": []}
 
     for out_file in out_files:
-        stem = out_file.stem
-        row_id = stem_to_id.get(stem)
+        sample_idx = _parse_sample_index(out_file.stem)
+        if sample_idx is None:
+            logger.warning("[SIGNAL] Cannot parse sample_index from %s — skipping", out_file.name)
+            continue
+
+        row_id = idx_to_id.get(sample_idx)
         if row_id is None:
-            logger.warning("[SIGNAL] No DB row for %s — skipping", out_file.name)
+            logger.warning("[SIGNAL] No DB row for sample_index=%d (%s) — skipping", sample_idx, out_file.name)
             continue
 
         try:

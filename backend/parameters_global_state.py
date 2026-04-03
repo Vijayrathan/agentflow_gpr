@@ -38,7 +38,7 @@ from schema import (
     ExtractedModelConfig,
     ExtractedAdvancedParams,
 )
-from db.db import upsert_extraction_section, batch_insert_simulations
+from db.db import upsert_extraction_section, batch_insert_simulations, bulk_update_signals
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,34 @@ def post_simulations(rows: list[dict]):
         return {"status": "ok", "rows_inserted": 0}
     inserted = batch_insert_simulations(rows)
     return {"status": "ok", "rows_inserted": inserted}
+
+
+@app.post("/simulations/signals")
+def post_simulation_signals(payload: dict):
+    """Extract EM signals from .out files and update simulation rows.
+
+    Expects: {"session_id": str, "output_dir": str}
+    Reads HDF5 output files, maps to DB rows by sample_index (scoped to
+    session_id), and bulk-updates signal columns.
+    """
+    session_id = payload.get("session_id")
+    output_dir = payload.get("output_dir")
+    if not session_id or not output_dir:
+        raise HTTPException(status_code=400, detail="session_id and output_dir are required")
+
+    from signal_extraction import extract_and_prepare_batch
+
+    result = extract_and_prepare_batch(output_dir=output_dir, session_id=session_id)
+
+    if result["updates"]:
+        bulk_update_signals(result["updates"])
+
+    return {
+        "status": "ok",
+        "succeeded": result["succeeded"],
+        "failed": result["failed"],
+        "errors": result["errors"],
+    }
 
 
 # ---- GET endpoints --------------------------------------------------------

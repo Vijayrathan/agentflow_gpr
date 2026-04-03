@@ -251,27 +251,24 @@ async def _run_simulation_stage(ws: WebSocket, state: SessionState):
             "content": "Extracting electromagnetic field signals from simulation outputs...",
         })
         try:
-            from signal_extraction import extract_and_prepare_batch
-            from db.db import bulk_update_signals
-
-            extraction_result = await asyncio.to_thread(
-                extract_and_prepare_batch,
-                output_dir=sim_result["output_dir"],
-                session_id=state.session_id,
+            resp = await asyncio.to_thread(
+                httpx.post,
+                f"{BASE_URL}/simulations/signals",
+                json={
+                    "session_id": state.session_id,
+                    "output_dir": sim_result["output_dir"],
+                },
+                timeout=120,
             )
-
-            if extraction_result["updates"]:
-                await asyncio.to_thread(
-                    bulk_update_signals,
-                    extraction_result["updates"],
-                )
+            resp.raise_for_status()
+            extraction_result = resp.json()
 
             ext_summary = (
                 f"Signal extraction complete.\n\n"
                 f"- **Extracted:** {extraction_result['succeeded']}\n"
                 f"- **Failed:** {extraction_result['failed']}"
             )
-            if extraction_result["errors"]:
+            if extraction_result.get("errors"):
                 ext_summary += "\n\n**Errors:**\n"
                 for err in extraction_result["errors"]:
                     ext_summary += f"- `{err['filename']}`: {err['error']}\n"
