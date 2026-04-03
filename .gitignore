@@ -25,3 +25,7 @@ datasets/
 *.out
 *.vti
 dvc.lock
+
+.plans/
+
+db/retrieval_docs/
