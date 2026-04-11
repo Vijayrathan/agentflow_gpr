@@ -101,17 +101,21 @@ and that frequency falls within the model's validity band. \
 Note: texture and moisture checks are enforced at sampling time, not here.
 2. **`validate_temperature`** — Call once with temperature_c.
 3. **`validate_mesh`** — Call once with: max_cell_m, center_freq_hz, \
-domain_x_m, domain_y_m, eps_r_max (estimate from soil properties). \
+domain_x_m, domain_y_m, eps_r_max (estimate from soil properties), \
+waveform_kind (from `get_parameters("antenna_waveform").waveform_kind`). \
+The waveform_kind enables bandwidth-aware checking (e.g. Ricker has \
+significant energy at 2.5× centre frequency). \
 Checks Nyquist spatial sampling and domain divisibility.
-4. **`validate_time_window`** — Call once with: source_end_time_s (from \
-antenna config), domain_depth_m (domain_y), eps_r_max. Checks two-way \
-EM propagation time is sufficient.
+4. **`validate_time_window`** — Call once with: source_end_time_s (use an \
+estimate based on (2 * total_layer_thickness * sqrt(eps_r_max) / 3e8) * 1.2 \
+if source_end_time is not set), domain_depth_m (sum of all layer thicknesses \
+from `get_parameters("layers")`), eps_r_max.
 5. **`validate_essential_params`** — Call once with booleans: has_domain, \
 has_dx_dy_dz, has_time_window. Verifies essential gprMax params are present.
 6. **`validate_cfl`** — Call once with: dx=dy=dz=max_cell_m, \
-time_window_s (estimated from `(2 * domain_y) / (3e8 / sqrt(10))` or \
-source_end_time, whichever is larger). Computes the CFL time step and \
-reports whether the iteration count is practical.
+time_window_s (estimated from `(2 * total_layer_thickness) / (3e8 / sqrt(10))` \
+or source_end_time, whichever is larger). Note: domain_z (vertical) is \
+auto-computed from layers + air, domain_y is the crossline extent.
 
 **Note on range-based parameters**: Texture percentages, theta_v, densities, \
 and model-specific bounds (e.g. Peplinski sand/silt/clay ranges, moisture \
@@ -314,7 +318,13 @@ one layer at a time""",
    - Batch 4: optional params — density ranges (bulk_density_gcm3, \
 particle_density_gcm3), porosity range, salinity_classes (list of \
 allowed classes from: "fresh", "slightly_saline", "brackish", "saline"), \
-organic_fraction, porewater_sigma_Sm (conductivity in S/m)\
+organic_fraction, porewater_sigma_Sm (conductivity in S/m)
+
+   **Physics constraints** (enforce during collection):
+   - Texture fractions (sand + silt + clay) must sum to 100%
+   - theta_v must not exceed porosity (porosity ≈ 1 - bulk_density/particle_density)
+   - bulk_density must be < particle_density (typical: bulk 1.1–1.8, particle ~2.66 g/cm³)
+   - For Peplinski model: sand 15–50%, clay 5–20%, silt 35–65%, theta_v ≤ 0.30\
 """,
     skip_policy="""\
 user should explicitly tell to skip. You should not skip on your own\
@@ -352,11 +362,23 @@ antenna_kind="voltage_source", otherwise skip)
    - source_end_time: optional source end time in seconds
 
    **Batch 2 — Waveform configuration:**
-   - waveform_kind: type of waveform (default: "ricker"; options include \
-gaussian, gaussiandot, sine, contsine, etc.)
+   - waveform_kind: type of waveform (default: "ricker"). Valid types: \
+"ricker", "gaussian", "gaussiandot", "gaussiandotnorm", "gaussiandotdot", \
+"gaussiandotdotnorm", "gaussianprime", "gaussiandoubleprime", "sine", \
+"contsine". Note: "ricker" and "gaussiandotdot" are spectrally equivalent \
+in gprMax.
    - waveform_amplitude: signal amplitude
    - waveform_center_freq_hz: centre frequency in Hz (e.g. 900e6 for 900 MHz)
    - waveform_name: optional descriptive name for the waveform
+
+   **Frequency guidance by model:**
+   - Peplinski: 0.3–1.3 GHz
+   - Dobson: 1.4–18 GHz
+   - Mironov: 0.6–18 GHz
+   - CRIM: any frequency
+
+   **Note**: transmission_line source type is not yet supported in this pipeline. \
+Only hertzian_dipole and voltage_source are available.
 """,
     skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
@@ -390,8 +412,8 @@ choose max_cell_m?"\
    - title: descriptive title for this simulation
 
    **Batch 2 — Domain geometry:**
-   - domain_x: domain width in metres (horizontal extent of the model)
-   - domain_y: domain depth in metres (vertical extent of the model)
+   - domain_x: domain inline extent in metres (horizontal scan direction)
+   - domain_y: domain crossline extent in metres (horizontal, perpendicular to scan direction; set to one cell for 2D simulations)
    - top_air_extra_m: extra air space above the source in metres (optional)
 
    **Batch 3 — Mesh resolution:**
@@ -408,6 +430,24 @@ transmitter (true/false, default: true)
 checks (true/false)
    - num_samples: number of simulation samples to generate (for \
 dataset/batch runs)
+
+   **Batch 5 — Coordinate convention (informational, no parameters to collect):**
+   Note to agent: gprMax uses a right-handed Cartesian coordinate system.
+   In this pipeline, Z is the vertical axis (layers stacked in Z, source
+   height measured in Z). X is the inline direction. Y is the crossline
+   direction. domain_z is computed automatically from layer thicknesses
+   plus air buffer — do NOT ask the user for it.
+
+   **Model validity ranges** (inform user if relevant):
+   - Peplinski: 0.3–1.3 GHz, sand 15–50%, clay 5–20%, silt 35–65%, theta_v 0–0.30
+   - Dobson: 1.4–18 GHz, theta_v 0–0.50
+   - Mironov: 0.6–18 GHz, theta_v 0–0.45
+   - CRIM: no frequency restriction, requires porosity estimate
+
+   **Bandwidth effect on cells_per_wavelength**: A Ricker wavelet has
+   significant energy up to ~2.5x its centre frequency. The pipeline
+   automatically accounts for this when computing cell size from
+   cells_per_wavelength, so the user does not need to manually adjust.
 """,
     skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
@@ -449,7 +489,8 @@ material identifier, optional custom_material, dielectric_smoothing
 material identifier, optional custom_material, dielectric_smoothing
 
    **Batch 2 — Surface roughness:**
-   - fractal_dim: fractal dimension (default: 1.5)
+   - fractal_dim: fractal dimension (1.0–3.0; default: 1.5). Values below \
+1.0 are not physically meaningful for surface roughness.
    - weight_x: weight in X direction (default: 1.0)
    - weight_y: weight in Y direction (default: 1.0)
    - amplitude_m: roughness amplitude in metres (default: 0.01)
@@ -474,9 +515,9 @@ amplitude_m when add_water=true)
    - num_threads: number of OpenMP threads for parallel execution (optional)
    - output_dir: directory path for simulation output files (optional)
    - fractal_nbins: number of bins for fractal box mixing (integer ≥ 2, \
-default: 3). Controls how many discrete material bins gprMax uses inside \
-each fractal_box command when using Peplinski/Dobson/Mironov mixing models. \
-Must be > 1 for mixing models.
+default: 3). Only applies to Peplinski model (gprMax's built-in \
+#soil_peplinski). For CRIM, Dobson, and Mironov, the pipeline automatically \
+uses 1 bin (single material per fractal_box). Must be > 1 for Peplinski.
 """,
     skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
@@ -511,11 +552,11 @@ each tool requires.
 **Key derived values** you will need:
 - **max_cell_m** = `model_config.max_cell_m` (used as dx, dy, dz)
 - **domain_x_m** = `model_config.domain_x` (horizontal scan width)
-- **domain_y_m** = `model_config.domain_y` (vertical depth of the \
-simulation domain — this is the actual configured value; do NOT \
-recompute from layer thicknesses)
-- **domain_z_m** = `max_cell_m` (these are 2D simulations — gprMax uses \
-exactly one cell in the Z dimension)
+- **domain_y_m** = `model_config.domain_y` (crossline horizontal extent; \
+for 2D simulations this equals max_cell_m)
+- **domain_z_m** = computed automatically: sum of layer thicknesses + \
+air buffer (vertical extent). Use an estimate: sum layer thickness ranges \
+midpoints + 0.1 for air, or retrieve from model output if available.
 - **pml_cells** = `advanced_params.pml_cells` if set, otherwise default to 10
 
 1. **`validate_memory_estimate`** — Estimate total cells and memory. Pass: \
@@ -525,18 +566,14 @@ domain_x_m, domain_y_m, domain_z_m, dx=dy=dz=max_cell_m.
 domain. Pass: domain_x_m, domain_y_m, domain_z_m, dx=dy=dz=max_cell_m, \
 pml_cells. Ensures `2 * pml_cells < domain_cells` per axis.
 
-3. **`validate_domain_z_alignment`** — Check domain_y (the vertical \
-depth) is an integer multiple of the cell size so gprMax does not \
-silently round. Pass: domain_z_m=`model_config.domain_y`, \
-dz=max_cell_m.
 
-4. **`validate_dispersive_tau_vs_dt`** — Check Debye relaxation times > \
+3. **`validate_dispersive_tau_vs_dt`** — Check Debye relaxation times > \
 CFL time step. Pass: tau_values_s=[9.23e-12, 1.58e-10] (typical water \
 Debye poles), dx=dy=dz=max_cell_m. Only relevant when model is \
 "peplinski", "dobson", or "mironov" (dispersive dielectric models). \
 **Skip entirely if model is "crim"** (no dispersive materials).
 
-5. **`validate_snapshot_time_range`** — Check snapshot time ≤ time_window. \
+4. **`validate_snapshot_time_range`** — Check snapshot time ≤ time_window. \
 Pass: snapshot_time_s, time_window_s. Get snapshot times from \
 advanced_params.snapshots. Estimate time_window_s as \
 `(2 * domain_y) / (3e8 / sqrt(eps_r_max))` with eps_r_max ≈ 10 for soil, \
@@ -544,28 +581,47 @@ or use source_end_time from antenna_waveform if larger. **IMPORTANT: Skip \
 this check entirely if advanced_params.snapshots is empty or not set — do \
 NOT call this tool with 0 or placeholder values.**
 
-6. **`validate_waveform_bandwidth`** — Check actual waveform bandwidth vs \
+5. **`validate_waveform_bandwidth`** — Check actual waveform bandwidth vs \
 grid resolution. Pass: kind (from antenna_waveform.waveform_kind), \
 center_freq_hz (from antenna_waveform.waveform_center_freq_hz), \
 max_cell_m (from model_config), eps_r_max=10.0. Uses bandwidth multiplier \
 (2.5× for Ricker) for the λ/10 check.
 
-7. **`validate_object_resolution`** — Check geometry objects span ≥ 10 \
+6. **`validate_object_resolution`** — Check geometry objects span ≥ 10 \
 cells. Pass: object_name, min_dimension_m (smallest extent of the object), \
 max_cell_m. Call once per object in advanced_params (cylinders, boxes, \
 spheres). For cylinders: min_dimension_m = 2 * radius. For boxes: \
 min_dimension_m = min of (x2-x1, y2-y1, z2-z1). For spheres: \
 min_dimension_m = 2 * radius. **Skip if no objects.**
 
-8. **`validate_rxarray_step_vs_cell`** — Check rx_array step sizes ≥ cell \
+7. **`validate_rxarray_step_vs_cell`** — Check rx_array step sizes ≥ cell \
 size. Pass: rx_dx, rx_dy, rx_dz (from advanced_params.rx_array), \
 cell_dx=cell_dy=cell_dz=max_cell_m. **Skip if no rx_array configured.**
 
-9. **`validate_object_pml_distance`** — Check objects are ≥ 15 cells from \
+8. **`validate_object_pml_distance`** — Check objects are ≥ 15 cells from \
 PML boundaries. Pass: object_name, obj_x_min/max, obj_y_min/max, \
 obj_z_min/max, domain_x_m, domain_y_m, domain_z_m, max_cell_m, pml_cells. \
 Call once per object. For cylinders: use axis-aligned bounding box. For \
-spheres: use (cx-r, cx+r) etc. **Skip if no objects.**""",
+spheres: use (cx-r, cx+r) etc. **Skip if no objects.**
+
+9. **`validate_layer_thickness`** — Check each soil layer spans at least 3 \
+FDTD cells. Pass: layer_names (list of layer name strings from \
+`get_parameters("layers")`), layer_thicknesses_m (list of midpoint \
+thicknesses: `(thickness_m_min + thickness_m_max) / 2` for each layer), \
+max_cell_m (from model_config). Layers thinner than 3 cells are not \
+physically meaningful in FDTD. **Always run this check.**
+
+10. **`validate_domain_z_alignment`** — Check that domain_z is an integer \
+multiple of dz (cell size). gprMax rounds domain_z / dz to the nearest \
+integer, so a non-integer ratio means the actual simulated domain differs \
+from intended. Pass: domain_z_m (computed: sum of layer thicknesses + air \
+buffer), dz=max_cell_m. **Always run this check.**
+
+11. **`validate_domain_geometry`** — Check domain dimensions are positive and \
+that the declared number of layers matches the actual layer count. Pass: \
+domain_x_m, domain_y_m (from model_config), num_layers (from \
+`get_parameters("layers").num_layers`), actual_layer_count (length of the \
+layers list). **Always run this check.**""",
 )
 
 
@@ -593,9 +649,10 @@ as null will overwrite existing values and destroy data.
 4. Once `resolve_and_validate` passes, use the `task` tool to delegate to \
 the **"validation-agent"** sub-agent. In the task description, tell it to \
 run all cross-parameter physics checks. It will fetch data from all four \
-parameter sections itself and run 9 validation tools (memory estimate, PML \
-vs domain, domain Z alignment, dispersive tau, snapshot time, waveform \
-bandwidth, object resolution, rx_array step, object PML distance). \
+parameter sections itself and run 11 validation tools (memory estimate, PML \
+vs domain, domain Z alignment, domain geometry, dispersive tau, snapshot \
+time, waveform bandwidth, object resolution, rx_array step, object PML \
+distance, layer thickness). \
 If the validation agent reports failures, inform the user and help fix via \
 `patch_parameters`, then re-run both `resolve_and_validate` and the \
 validation agent.

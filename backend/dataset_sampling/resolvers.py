@@ -19,7 +19,7 @@ from backend.schema import (
     ExtractedModelConfig,
     ExtractedAdvancedParams,
 )
-from validation import (
+from dataset_sampling.validation import (
     validate_extracted_layer_params,
     check_layer_completeness,
     layer_has_any_range,
@@ -52,6 +52,8 @@ class ResolvedLayerRange:
     bulk_density_gcm3_max: Optional[float]
     particle_density_gcm3_min: Optional[float]
     particle_density_gcm3_max: Optional[float]
+    porosity_min: Optional[float]
+    porosity_max: Optional[float]
     organic_fraction: float          # single value, defaults to 0.0
     salinity_classes: Optional[List[str]]
     porewater_sigma_Sm: Optional[float]
@@ -99,6 +101,8 @@ def resolve_layer(layer: ExtractedLayerParams) -> ResolvedLayerRange:
         bulk_density_gcm3_max=bd_max,
         particle_density_gcm3_min=pd_min,
         particle_density_gcm3_max=pd_max,
+        porosity_min=layer.porosity_min,
+        porosity_max=layer.porosity_max,
         organic_fraction=layer.organic_fraction if layer.organic_fraction is not None else 0.0,
         salinity_classes=layer.salinity_classes,
         porewater_sigma_Sm=layer.porewater_sigma_Sm,
@@ -260,6 +264,7 @@ def merge_extractions(
             theta_v=_mid(r.theta_v_min, r.theta_v_max),
             bulk_density_gcm3=_mid(r.bulk_density_gcm3_min, r.bulk_density_gcm3_max),
             particle_density_gcm3=_mid(r.particle_density_gcm3_min, r.particle_density_gcm3_max),
+            porosity=_mid(r.porosity_min, r.porosity_max),
             organic_fraction=r.organic_fraction,
             salinity_class=r.salinity_classes[0] if r.salinity_classes else None,
             porewater_sigma_Sm=r.porewater_sigma_Sm,

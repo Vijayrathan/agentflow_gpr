@@ -19,12 +19,14 @@ from backend.validation_tools import (
     validate_memory_estimate,
     validate_pml_vs_domain,
     validate_domain_z_alignment,
+    validate_domain_geometry,
     validate_dispersive_tau_vs_dt,
     validate_snapshot_time_range,
     validate_waveform_bandwidth,
     validate_object_resolution,
     validate_rxarray_step_vs_cell,
     validate_object_pml_distance,
+    validate_layer_thickness,
 )
 
 # Add this directory (dataset_sampling) to sys.path so bare imports like
@@ -41,8 +43,8 @@ from backend.schema import (
     SurfaceRoughnessConfigSchema,
     RxArrayConfigSchema,
 )
-from resolvers import merge_extractions
-from dataset_generator import generate_dataset
+from dataset_sampling.resolvers import merge_extractions
+from dataset_sampling.dataset_generator import generate_dataset
 
 dotenv.load_dotenv()
 
@@ -89,24 +91,26 @@ def _fetch_and_parse():
 validation_subagent = {
     "name": "validation-agent",
     "description": (
-        "Cross-parameter physics validation specialist. Runs 9 checks that "
+        "Cross-parameter physics validation specialist. Runs 11 checks that "
         "span multiple extraction sections: memory estimate, PML vs domain, "
-        "domain Z alignment, dispersive tau vs dt, snapshot time range, "
-        "waveform bandwidth, object resolution, rx_array step vs cell, and "
-        "object PML distance. Call after resolve_and_validate passes, before "
-        "dataset generation."
+        "domain Z alignment, domain geometry, dispersive tau vs dt, snapshot "
+        "time range, waveform bandwidth, object resolution, rx_array step vs "
+        "cell, object PML distance, and layer thickness vs cell size. "
+        "Call after resolve_and_validate passes, before dataset generation."
     ),
     "system_prompt": DATASET_VALIDATION_PROMPT,
     "tools": [
         validate_memory_estimate,
         validate_pml_vs_domain,
         validate_domain_z_alignment,
+        validate_domain_geometry,
         validate_dispersive_tau_vs_dt,
         validate_snapshot_time_range,
         validate_waveform_bandwidth,
         validate_object_resolution,
         validate_rxarray_step_vs_cell,
         validate_object_pml_distance,
+        validate_layer_thickness,
         get_parameters,
     ],
 }

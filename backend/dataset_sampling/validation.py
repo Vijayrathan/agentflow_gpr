@@ -24,13 +24,20 @@ from backend.schema import (
 MODEL_CONSTRAINTS = {
     "peplinski": {
         "theta_v_max": 0.30,
-        "sand_pct": (15, 50),
-        "silt_pct": (35, 65),
-        "clay_pct": (5, 20),
+        "sand_pct": (15, 50),   # Peplinski (1995) Table I calibration soils
+        "silt_pct": (35, 65),   # Peplinski (1995) Table I calibration soils
+        "clay_pct": (5, 20),    # Peplinski (1995) Table I calibration soils
+        "freq_hz": (0.3e9, 1.3e9),
     },
-    "dobson": {"theta_v_max": 0.50},
-    "mironov": {"theta_v_max": 0.45},
-    # crim has no restrictions
+    "dobson": {
+        "theta_v_max": 0.50,
+        "freq_hz": (1.4e9, 18e9),
+    },
+    "mironov": {
+        "theta_v_max": 0.45,
+        "freq_hz": (0.6e9, 18e9),
+    },
+    # crim has no frequency restriction
 }
 
 VALID_SALINITY_CLASSES = {"fresh", "slightly_saline", "brackish", "saline"}
@@ -73,6 +80,15 @@ def validate_sampled_layer(
             return (
                 f"theta_v ({theta_v:.3f}) exceeds porosity ({porosity:.3f}); "
                 "soil cannot hold more water than its pore space"
+            )
+    else:
+        from backend.physics_modelling import estimate_porosity
+        porosity_est = estimate_porosity(sand, silt, clay)
+        if theta_v > porosity_est:
+            return (
+                f"theta_v ({theta_v:.3f}) exceeds texture-estimated "
+                f"porosity ({porosity_est:.3f}); soil cannot hold more "
+                "water than its pore space"
             )
 
     # 3. Model-specific constraints
@@ -177,6 +193,24 @@ def clamp_theta_v_to_model(
                 f"with {model} max ({tv_max})"
             )
     return tv_lo, tv_hi
+
+
+def validate_frequency_for_model(
+    f_hz: float,
+    model: str,
+) -> Optional[str]:
+    """Return an error string if frequency is outside model's validity band,
+    or None if OK."""
+    constraints = MODEL_CONSTRAINTS.get(model.lower(), {})
+    freq_band = constraints.get("freq_hz")
+    if freq_band is not None:
+        f_lo, f_hi = freq_band
+        if not (f_lo <= f_hz <= f_hi):
+            return (
+                f"{model}: frequency {f_hz:.3e} Hz is outside validity band "
+                f"({f_lo:.1e}–{f_hi:.1e} Hz)"
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +358,7 @@ def check_antenna_waveform_stage_complete(
 ) -> List[str]:
     """Check whether the antenna/waveform stage has all required information."""
     # Lazy import to avoid circular dependency with resolvers
-    from resolvers import resolve_antenna_waveform
+    from dataset_sampling.resolvers import resolve_antenna_waveform
 
     missing: List[str] = []
     antenna, waveform = resolve_antenna_waveform(antenna_wf)
@@ -338,7 +372,7 @@ def check_antenna_waveform_stage_complete(
 def check_model_stage_complete(model: ExtractedModelConfig) -> List[str]:
     """Check whether the model/domain stage has all required information."""
     # Lazy import to avoid circular dependency with resolvers
-    from resolvers import resolve_model_config
+    from dataset_sampling.resolvers import resolve_model_config
 
     missing: List[str] = []
 

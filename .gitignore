@@ -29,3 +29,5 @@ dvc.lock
 .plans/
 
 db/retrieval_docs/
+review_docs/
+.cursor/

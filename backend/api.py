@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 # Configure root logger so all modules' log output reaches the terminal
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )

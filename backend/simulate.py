@@ -131,7 +131,7 @@ def run_batch_simulation(
         expected_out = output_dir / f"{stem}.out"
 
         if skip_existing and expected_out.exists():
-            logger.debug(f"[SIMULATE] [{idx}/{total}] SKIP {in_file.name}")
+            logger.info(f"[SIMULATE] [{idx}/{total}] SKIP {in_file.name}")
             skipped += 1
             continue
 

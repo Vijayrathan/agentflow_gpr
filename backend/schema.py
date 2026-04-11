@@ -38,6 +38,7 @@ class LayerSchema(BaseModel):
     theta_v: float
     bulk_density_gcm3: Optional[float] = None
     particle_density_gcm3: Optional[float] = None
+    porosity: Optional[float] = None
     organic_fraction: Optional[float] = None
     salinity_class: Optional[str] = None
     porewater_sigma_Sm: Optional[float] = None
@@ -261,7 +262,7 @@ class SampledLayerValues(BaseModel):
     """Concrete single-valued layer produced by sampling from a ResolvedLayerRange.
 
     bulk_density_gcm3 and particle_density_gcm3 are always populated: either with
-    the user-supplied sampled value or with the physics model fallback (1.5 / 2.65)
+    the user-supplied sampled value or with the physics model fallback (1.5 / 2.66)
     so the manifest is a complete record of what was used in the dielectric computation.
     """
     name: Optional[str] = None
@@ -271,9 +272,11 @@ class SampledLayerValues(BaseModel):
     clay_pct: float
     theta_v: float
     bulk_density_gcm3: float          # user-supplied or fallback (1.5 g/cm³)
-    particle_density_gcm3: float      # user-supplied or fallback (2.65 g/cm³)
+    particle_density_gcm3: float      # user-supplied or fallback (2.66 g/cm³)
+    porosity: Optional[float] = None  # user-supplied; None when derived from densities/texture
     organic_fraction: float
     salinity_class: Optional[str] = None
+    porewater_sigma_Sm: Optional[float] = None
 
 
 class SampleRecord(BaseModel):

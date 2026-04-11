@@ -342,7 +342,7 @@ class GeophysicsRAG:
         # Rerank the top 20 candidates to find the true best matches
         print("Reranking candidates...")
         pairs = [[query, doc] for doc in candidate_docs]
-        scores = self.reranker.compute_score(pairs)
+        scores = self.reranker.compute_score(pairs, normalize=True)
         
         # Handle both single score and list of scores
         if not isinstance(scores, list):
@@ -451,7 +451,7 @@ def _get_rag() -> GeophysicsRAG:
     return _rag_instance
 
 
-RELEVANCE_THRESHOLD = 0.5
+RELEVANCE_THRESHOLD = 0.7
 
 
 @tool
@@ -474,6 +474,9 @@ def rag_search(
         parts = []
         for i, (doc, score) in enumerate(relevant, 1):
             parts.append(f"[Passage {i}, relevance={score:.3f}]\n{doc}")
+            print(f"Relevance: {score:.3f}")
+            print(doc[:100] + "...")
+            print("-" * 60)
         return "\n\n---\n\n".join(parts)
     except Exception as e:
         tb = traceback.format_exc()

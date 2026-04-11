@@ -349,8 +349,10 @@ def validate_surface(
 ) -> str:
     """Validate surface roughness configuration."""
     errors: list[str] = []
-    if fractal_dim < 0:
-        errors.append("fractal_dim must be >= 0")
+    if fractal_dim < 1.0:
+        errors.append("fractal_dim must be >= 1.0 for physically meaningful surface roughness")
+    if fractal_dim > 3.0:
+        errors.append("fractal_dim must be <= 3.0")
     if weight_x < 0:
         errors.append("weight_x must be >= 0")
     if weight_y < 0:
@@ -410,6 +412,7 @@ def validate_mesh(
     domain_x_m: Annotated[float, "Domain width in metres"],
     domain_y_m: Annotated[float, "Domain depth/height in metres"],
     eps_r_max: Annotated[float, "Estimated max relative permittivity in the model"] = 10.0,
+    waveform_kind: Annotated[Optional[str], "Waveform type for bandwidth multiplier (e.g. 'ricker')"] = None,
     domain_z_m: Annotated[Optional[float], "Domain Z extent in metres (checked for integer cell multiple)"] = None,
     pml_cells: Annotated[Optional[int], "Number of PML cells (must be >= 0)"] = None,
 ) -> str:
@@ -428,14 +431,25 @@ def validate_mesh(
         errors.append("eps_r_max must be > 0")
         return _result(errors, [])
 
-    # Minimum wavelength in the highest-permittivity medium
-    lambda_min = C0 / (center_freq_hz * math.sqrt(eps_r_max))
+    # Bandwidth multiplier by waveform type
+    _BW_MULT = {
+        'ricker': 2.5, 'gaussiandotdot': 2.5, 'gaussiandotdotnorm': 2.5,
+        'gaussiandot': 2.0, 'gaussiandotnorm': 2.0,
+        'gaussian': 2.0, 'gaussianprime': 2.5, 'gaussiandoubleprime': 3.0,
+        'sine': 1.2, 'contsine': 1.2,
+    }
+    if waveform_kind:
+        mult = _BW_MULT.get(waveform_kind.lower(), 2.0)
+    else:
+        mult = 1.0  # backward-compatible: no multiplier if waveform not specified
+    f_max = center_freq_hz * mult
+    lambda_min = C0 / (f_max * math.sqrt(eps_r_max))
     max_allowed = lambda_min / 10.0
     if max_cell_m > max_allowed:
         errors.append(
             f"max_cell_m ({max_cell_m:.6f}) exceeds lambda_min/10 "
             f"({max_allowed:.6f} m, lambda_min={lambda_min:.4f} m at "
-            f"eps_r_max={eps_r_max})"
+            f"f_max={f_max:.3e} Hz, eps_r_max={eps_r_max})"
         )
 
     # Grid dimensions must be exact integer multiples of cell size
@@ -501,28 +515,76 @@ def validate_antenna_placement(
     rx_x_m: Annotated[float, "Receiver x-coordinate in metres"],
     domain_x_m: Annotated[float, "Domain width in metres"],
     max_cell_m: Annotated[float, "Cell size in metres"],
-    min_edge_cells: Annotated[int, "Minimum cells from domain edge (including PML)"] = 15,
+    min_edge_cells: Annotated[int, "Minimum cells from PML inner boundary"] = 15,
+    pml_cells: Annotated[int, "Number of PML cells"] = 10,
+    tx_z_m: Annotated[Optional[float], "Transmitter z-coordinate in metres"] = None,
+    domain_z_m: Annotated[Optional[float], "Domain Z extent in metres"] = None,
 ) -> str:
     """Validate that Tx and Rx antennas are at least min_edge_cells cells
-    away from the domain boundaries to avoid PML interference."""
+    away from the PML inner boundary to avoid interference.
+    
+    PML cells are inside the domain, so the margin from the domain edge
+    must be (pml_cells + min_edge_cells) * cell_size."""
     errors: list[str] = []
     if max_cell_m <= 0:
         errors.append("max_cell_m must be > 0")
         return _result(errors, [])
-    margin_m = min_edge_cells * max_cell_m
+    margin_m = (pml_cells + min_edge_cells) * max_cell_m
     for label, x in [("Tx", tx_x_m), ("Rx", rx_x_m)]:
         if x < margin_m:
             errors.append(
                 f"{label} at x={x:.4f} m is only {x / max_cell_m:.1f} cells from "
-                f"the left edge (need >= {min_edge_cells})"
+                f"the left edge (need >= {pml_cells + min_edge_cells} = "
+                f"pml({pml_cells}) + gap({min_edge_cells}))"
             )
         dist_right = domain_x_m - x
         if dist_right < margin_m:
             errors.append(
                 f"{label} at x={x:.4f} m is only {dist_right / max_cell_m:.1f} cells "
-                f"from the right edge (need >= {min_edge_cells})"
+                f"from the right edge (need >= {pml_cells + min_edge_cells})"
+            )
+    # Vertical (Z) checks
+    if tx_z_m is not None and domain_z_m is not None:
+        dist_top = domain_z_m - tx_z_m
+        if dist_top < margin_m:
+            errors.append(
+                f"Tx at z={tx_z_m:.4f} m is only {dist_top / max_cell_m:.1f} cells "
+                f"from the top edge (need >= {pml_cells + min_edge_cells})"
+            )
+        if tx_z_m < margin_m:
+            errors.append(
+                f"Tx at z={tx_z_m:.4f} m is only {tx_z_m / max_cell_m:.1f} cells "
+                f"from the bottom edge (need >= {pml_cells + min_edge_cells})"
             )
     return _result(errors, [])
+
+
+# ---------------------------------------------------------------------------
+# Layer thickness vs cell size
+# ---------------------------------------------------------------------------
+
+@tool
+def validate_layer_thickness(
+    layer_names: Annotated[List[str], "List of layer names"],
+    layer_thicknesses_m: Annotated[List[float], "List of layer thicknesses in metres"],
+    max_cell_m: Annotated[float, "Maximum cell size in metres"],
+    min_cells: Annotated[int, "Minimum cells per layer thickness"] = 3,
+) -> str:
+    """Validate that each soil layer is thick enough to span at least min_cells
+    FDTD cells. Layers thinner than ~3 cells are not physically meaningful."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    if max_cell_m <= 0:
+        errors.append("max_cell_m must be > 0")
+        return _result(errors, [])
+    for name, thick in zip(layer_names, layer_thicknesses_m):
+        cells = thick / max_cell_m
+        if cells < min_cells:
+            warnings.append(
+                f"Layer '{name}': thickness {thick:.6g} m is only {cells:.1f} cells "
+                f"(need >= {min_cells} for physically meaningful FDTD resolution)"
+            )
+    return _result(errors, warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -962,12 +1024,15 @@ def validate_waveform_bandwidth(
     # Bandwidth multiplier by waveform type
     bw_mult = {
         "ricker": 2.5,
-        "gaussiandot": 2.5,
-        "gaussiandotnorm": 2.5,
-        "gaussiandotdot": 3.0,
-        "gaussiandotdotnorm": 3.0,
+        "gaussiandot": 2.0,
+        "gaussiandotnorm": 2.0,
+        "gaussiandotdot": 2.5,
+        "gaussiandotdotnorm": 2.5,
+        "gaussian": 2.0,
         "gaussianprime": 2.5,
         "gaussiandoubleprime": 3.0,
+        "sine": 1.2,
+        "contsine": 1.2,
     }
     mult = bw_mult.get(kind.lower(), 1.5)
     f_max = center_freq_hz * mult

@@ -16,18 +16,9 @@ from backend.schema import (
     SampleRecord,
     DatasetGenerationResult,
 )
-from backend.physics_modelling import (
-    generate_gprmax_input_file,
-    SurfaceRoughnessConfig,
-    RxArrayConfig,
-    SnapshotConfig,
-    CylinderObject,
-    BoxObject,
-    SphereObject,
-    CustomMaterial,
-)
-from resolvers import ResolvedLayerRange
-from validation import (
+from backend.physics_modelling import build_gprmax_input
+from dataset_sampling.resolvers import ResolvedLayerRange
+from dataset_sampling.validation import (
     validate_sampled_layer,
     clamp_texture_to_model,
     validate_texture_feasibility,
@@ -43,7 +34,7 @@ logger = logging.getLogger(__name__)
 # NOTE: CRIM and Mironov use texture-based porosity estimation when density is None,
 #       so the fallback values here are NOT necessarily what those models use.
 FALLBACK_BULK_DENSITY_GCM3 = 1.5
-FALLBACK_PARTICLE_DENSITY_GCM3 = 2.65
+FALLBACK_PARTICLE_DENSITY_GCM3 = 2.66
 
 
 def _sample_uniform(lo: float, hi: float, rng: random.Random) -> float:
@@ -107,7 +98,7 @@ def _sample_layer(
 
     Returns (SampledLayerValues, LayerSchema).  The LayerSchema keeps density as
     None when not provided by the user so physics_modelling.py chooses the correct
-    computation path (texture-based porosity for CRIM/Mironov vs. the 1.5/2.65
+    computation path (texture-based porosity for CRIM/Mironov vs. the 1.5/2.66
     fallback for Peplinski/Dobson).  The SampledLayerValues records either the
     user-sampled value or the physics fallback so the manifest is never blank.
 
@@ -140,6 +131,12 @@ def _sample_layer(
 
     sal = rng.choice(r.salinity_classes) if r.salinity_classes else None
 
+    porosity_sampled = (
+        _sample_uniform(r.porosity_min, r.porosity_max, rng)
+        if r.porosity_min is not None
+        else None
+    )
+
     # Manifest values: use sampled value when provided, fallback constant otherwise.
     # This makes the manifest a complete record of what was used in the computation.
     bd_manifest = bd_sampled if bd_sampled is not None else FALLBACK_BULK_DENSITY_GCM3
@@ -154,8 +151,10 @@ def _sample_layer(
         theta_v=theta_v,
         bulk_density_gcm3=bd_manifest,
         particle_density_gcm3=pd_manifest,
+        porosity=porosity_sampled,
         organic_fraction=r.organic_fraction,
         salinity_class=sal,
+        porewater_sigma_Sm=r.porewater_sigma_Sm,
     )
     ls = LayerSchema(
         name=r.name,
@@ -168,6 +167,7 @@ def _sample_layer(
         # model selects the appropriate dielectric computation path.
         bulk_density_gcm3=bd_sampled,
         particle_density_gcm3=pd_sampled,
+        porosity=porosity_sampled,
         organic_fraction=r.organic_fraction,
         salinity_class=sal,
         porewater_sigma_Sm=r.porewater_sigma_Sm,
@@ -207,141 +207,8 @@ def _gpr_schema_for_sample(
 
 
 def _call_generate(gpr: GprSchema, output_filepath: str) -> None:
-    """Call physics_modelling.generate_gprmax_input_file with the given schema."""
-    layer_thicknesses_m = [l.thickness_m for l in gpr.layers]
-    layer_sand_pcts = [l.sand_pct for l in gpr.layers]
-    layer_silt_pcts = [l.silt_pct for l in gpr.layers]
-    layer_clay_pcts = [l.clay_pct for l in gpr.layers]
-    layer_theta_vs = [l.theta_v for l in gpr.layers]
-    layer_bulk_densities_gcm3 = [l.bulk_density_gcm3 for l in gpr.layers]
-    layer_particle_densities_gcm3 = [l.particle_density_gcm3 for l in gpr.layers]
-    layer_organic_fractions = [
-        l.organic_fraction if l.organic_fraction is not None else 0.0
-        for l in gpr.layers
-    ]
-    layer_salinity_classes = [l.salinity_class for l in gpr.layers]
-    layer_porewater_sigmas_Sm = [l.porewater_sigma_Sm for l in gpr.layers]
-    layer_names = [l.name for l in gpr.layers]
-
-    # Convert surface_roughness schema to dataclass
-    surface_roughness = None
-    if gpr.surface_roughness is not None:
-        sr = gpr.surface_roughness
-        surface_roughness = SurfaceRoughnessConfig(
-            fractal_dim=sr.fractal_dim,
-            weight_x=sr.weight_x,
-            weight_y=sr.weight_y,
-            amplitude_m=sr.amplitude_m,
-            add_water=sr.add_water,
-            water_depth_m=sr.water_depth_m,
-            seed=sr.seed,
-        )
-
-    # Convert rx_array schema to dataclass
-    rx_array = None
-    if gpr.rx_array is not None:
-        ra = gpr.rx_array
-        rx_array = RxArrayConfig(
-            x1=ra.x1, y1=ra.y1, z1=ra.z1,
-            x2=ra.x2, y2=ra.y2, z2=ra.z2,
-            dx=ra.dx, dy=ra.dy, dz=ra.dz,
-        )
-
-    # Convert snapshots schema to dataclass list
-    snapshots = None
-    if gpr.snapshots is not None:
-        snapshots = []
-        for s in gpr.snapshots:
-            snapshots.append(SnapshotConfig(
-                time_s=s.time_s, filename=s.filename,
-                dx=s.dx, dy=s.dy, dz=s.dz,
-                x1=s.x1, y1=s.y1, z1=s.z1,
-                x2=s.x2, y2=s.y2, z2=s.z2,
-            ))
-
-    # Convert objects schemas to physics_modelling dataclasses
-    objects = None
-    if gpr.objects:
-        objects = []
-        for obj in gpr.objects:
-            custom_mat = (
-                CustomMaterial(**obj.custom_material.model_dump())
-                if obj.custom_material else None
-            )
-            if hasattr(obj, 'radius') and hasattr(obj, 'cx'):
-                # SphereSchema
-                objects.append(SphereObject(
-                    name=obj.name, cx=obj.cx, cy=obj.cy, cz=obj.cz,
-                    radius=obj.radius, material=obj.material,
-                    custom_material=custom_mat,
-                    dielectric_smoothing=obj.dielectric_smoothing,
-                ))
-            elif hasattr(obj, 'radius'):
-                # CylinderSchema
-                objects.append(CylinderObject(
-                    name=obj.name,
-                    x1=obj.x1, y1=obj.y1, z1=obj.z1,
-                    x2=obj.x2, y2=obj.y2, z2=obj.z2,
-                    radius=obj.radius, material=obj.material,
-                    custom_material=custom_mat,
-                    dielectric_smoothing=obj.dielectric_smoothing,
-                ))
-            else:
-                # BoxSchema
-                objects.append(BoxObject(
-                    name=obj.name,
-                    x1=obj.x1, y1=obj.y1, z1=obj.z1,
-                    x2=obj.x2, y2=obj.y2, z2=obj.z2,
-                    material=obj.material,
-                    custom_material=custom_mat,
-                    dielectric_smoothing=obj.dielectric_smoothing,
-                ))
-
-    output_dir = str(Path(output_filepath).parent)
-    output_filename = str(output_filepath)
-
-    generate_gprmax_input_file(
-        layer_thicknesses_m=layer_thicknesses_m,
-        layer_sand_pcts=layer_sand_pcts,
-        layer_silt_pcts=layer_silt_pcts,
-        layer_clay_pcts=layer_clay_pcts,
-        layer_theta_vs=layer_theta_vs,
-        layer_bulk_densities_gcm3=layer_bulk_densities_gcm3,
-        layer_particle_densities_gcm3=layer_particle_densities_gcm3,
-        layer_organic_fractions=layer_organic_fractions,
-        layer_salinity_classes=layer_salinity_classes,
-        layer_porewater_sigmas_Sm=layer_porewater_sigmas_Sm,
-        layer_names=layer_names,
-        waveform_kind=gpr.waveform.kind,
-        waveform_amplitude=gpr.waveform.amplitude,
-        waveform_center_freq_hz=gpr.waveform.center_freq_hz,
-        waveform_name=gpr.waveform.name,
-        antenna_kind=gpr.antenna.kind,
-        antenna_axis=gpr.antenna.axis,
-        antenna_tx_rx_offset_m=gpr.antenna.tx_rx_offset_m,
-        antenna_resistance=gpr.antenna.resistance,
-        antenna_source_start_time=gpr.antenna.source_start_time,
-        antenna_source_end_time=gpr.antenna.source_end_time,
-        model_title=gpr.title,
-        source_height_m=gpr.source_height_m,
-        domain_xy_m=gpr.domain_xy_m,
-        top_air_extra_m=gpr.top_air_extra_m,
-        cells_per_wavelength=int(gpr.cells_per_wavelength),
-        max_cell_m=gpr.max_cell_m,
-        rx_same_height=gpr.rx_same_height,
-        temperature_c=gpr.temperature_c,
-        model=gpr.model,
-        enforce_validity=gpr.enforce_validity,
-        output_filename=output_filename,
-        objects=objects,
-        pml_cells=gpr.pml_cells,
-        num_threads=gpr.num_threads,
-        output_dir=output_dir,
-        surface_roughness=surface_roughness,
-        snapshots=snapshots,
-        rx_array=rx_array,
-        fractal_nbins=gpr.fractal_nbins,
-    )
+    """Generate a gprMax .in file from a resolved GprSchema."""
+    build_gprmax_input(gpr, output_filepath)
 
 
 def _write_manifest(
@@ -358,9 +225,10 @@ def _write_manifest(
         # Determine layer column names from first sample
         n_layers = len(samples[0].layers)
         layer_fields = [
-            "thickness_m", "sand_pct", "silt_pct", "clay_pct", "theta_v",
-            "bulk_density_gcm3", "particle_density_gcm3", "organic_fraction",
-            "salinity_class",
+            "name", "thickness_m", "sand_pct", "silt_pct", "clay_pct",
+            "theta_v", "bulk_density_gcm3", "particle_density_gcm3",
+            "porosity", "organic_fraction", "salinity_class",
+            "porewater_sigma_Sm",
         ]
         fieldnames = ["sample_index", "filename", "filepath"]
         for li in range(n_layers):
@@ -378,6 +246,7 @@ def _write_manifest(
                 }
                 for li, lv in enumerate(rec.layers):
                     prefix = f"layer_{li + 1}_"
+                    row[prefix + "name"] = lv.name
                     row[prefix + "thickness_m"] = lv.thickness_m
                     row[prefix + "sand_pct"] = lv.sand_pct
                     row[prefix + "silt_pct"] = lv.silt_pct
@@ -385,8 +254,10 @@ def _write_manifest(
                     row[prefix + "theta_v"] = lv.theta_v
                     row[prefix + "bulk_density_gcm3"] = lv.bulk_density_gcm3
                     row[prefix + "particle_density_gcm3"] = lv.particle_density_gcm3
+                    row[prefix + "porosity"] = lv.porosity
                     row[prefix + "organic_fraction"] = lv.organic_fraction
                     row[prefix + "salinity_class"] = lv.salinity_class
+                    row[prefix + "porewater_sigma_Sm"] = lv.porewater_sigma_Sm
                 writer.writerow(row)
     else:
         # Write empty CSV with minimal headers
@@ -431,6 +302,15 @@ def generate_dataset(
     """
 
     rng = random.Random(seed)
+
+    # Validate frequency against model validity band
+    from dataset_sampling.validation import validate_frequency_for_model
+    freq_err = validate_frequency_for_model(
+        gpr_schema_template.waveform.center_freq_hz,
+        gpr_schema_template.model,
+    )
+    if freq_err is not None:
+        logger.warning(f"[DATASET] Frequency validation warning: {freq_err}")
 
     # Set up output directories — always relative to the project root,
     # regardless of the current working directory.
@@ -482,7 +362,7 @@ def generate_dataset(
                 samples.append(record)
                 num_generated += 1
                 succeeded = True
-                logger.debug(f"[DATASET] Sample {i} generated: {output_filepath}")
+                logger.info(f"[DATASET] Sample {i} generated: {output_filepath}")
                 break
 
             except ValueError as e:
