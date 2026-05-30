@@ -201,6 +201,16 @@ def validate_antenna(
             errors.append("resistance must be finite")
         elif resistance < 0:
             errors.append("resistance must be >= 0")
+        elif resistance > 376.73:
+            errors.append(
+                f"resistance ({resistance:.6g} Ω) must be <= 376.73 Ω "
+                "(free-space impedance is the physical upper bound)"
+            )
+        elif resistance > 0 and not (50.0 <= resistance <= 100.0):
+            warnings.append(
+                f"resistance ({resistance:.6g} Ω) is outside the recommended "
+                "50–100 Ω range for voltage_source feeds"
+            )
     elif kind.lower() == "voltage_source":
         warnings.append("voltage_source typically requires a resistance parameter")
 

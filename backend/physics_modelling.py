@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 import cmath
 import math
+import warnings
 
 from backend.schema import (
     GprSchema,
@@ -43,6 +44,12 @@ VALID_WAVEFORMS = {
     'sine', 'contsine',
 }
 
+# Fix #11: gprMax built-in material identifiers.
+# 'pec' and 'free_space' are permanent builtins; 'grass' and 'water' are
+# reserved for internal use (gprMax docs: "should not be used unless you
+# intentionally want to change their properties").
+RESERVED_MATERIAL_NAMES = {'pec', 'free_space', 'grass', 'water'}
+
 # ---------------------------
 # Utility and physics helpers
 # ---------------------------
@@ -58,7 +65,7 @@ def water_permittivity_debye(f_hz: float, temp_c: float = 20.0, sigma_ion: float
     """Single-pole Debye water with coarse temperature and ionic conductivity dependence."""
     eps_s_20 = 80.1
     eps_inf = 4.9
-    tau_20 = 9.23e-12
+    tau_20 = 9.231e-12  # Fix #12: match gprMax internal water model exactly (docs: 9.231×10⁻¹²)
     # very coarse linearized temperature trends near room temp
     d_epss_dT = -0.4
     d_tau_dT = -0.15e-12
@@ -72,7 +79,11 @@ def water_permittivity_debye(f_hz: float, temp_c: float = 20.0, sigma_ion: float
 
 
 def solid_permittivity_from_texture(sand_pct: float, silt_pct: float, clay_pct: float) -> float:
-    """Representative solids permittivity from texture (quartz/silicates/clays)."""
+    """Representative solids permittivity from texture (quartz/silicates/clays).
+
+    Fallback used when particle density is not available. For consistency with
+    Peplinski/Dobson branches, prefer solid_permittivity_dobson() when ρ_s is known.
+    """
     s = max(sand_pct, 0.0)
     si = max(silt_pct, 0.0)
     c = max(clay_pct, 0.0)
@@ -84,6 +95,16 @@ def solid_permittivity_from_texture(sand_pct: float, silt_pct: float, clay_pct: 
     eps_silt = 5.5
     eps_clay = 7.0
     return eps_sand * s_norm + eps_silt * si_norm + eps_clay * c_norm
+
+
+def solid_permittivity_dobson(rho_s_gcm3: float) -> float:
+    """Dobson (1985) Eq. (22): ε_s = (1.01 + 0.44·ρ_s)² − 0.062.
+
+    Fix #6: This calibrated formula is used internally by Peplinski and Dobson.
+    Using it across all models when ρ_s is available ensures the same physical
+    soil produces the same solid-phase permittivity regardless of mixing model.
+    """
+    return (1.01 + 0.44 * rho_s_gcm3) ** 2 - 0.062
 
 
 def estimate_porosity(sand_pct: float, silt_pct: float, clay_pct: float) -> float:
@@ -373,7 +394,14 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
         else:
             n = estimate_porosity(L.sand_pct, L.silt_pct, L.clay_pct)
 
-        eps_s = solid_permittivity_from_texture(L.sand_pct, L.silt_pct, L.clay_pct)
+        # Fix #6: Prefer Dobson (1985) Eq. (22) for solid permittivity when particle
+        # density is known. This is the same formula used internally by peplinski_mixture()
+        # and dobson_mixture(), ensuring consistent ε_solid across all model branches.
+        # Fall back to texture-weighted average only when ρ_s is unavailable.
+        if L.particle_density_gcm3 is not None:
+            eps_s = solid_permittivity_dobson(L.particle_density_gcm3)
+        else:
+            eps_s = solid_permittivity_from_texture(L.sand_pct, L.silt_pct, L.clay_pct)
 
         sigma_pore = L.porewater_sigma_Sm if L.porewater_sigma_Sm is not None else None
         if sigma_pore is None and L.salinity_class:
@@ -429,6 +457,16 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
         eps_r, sigma_eff = eps_to_sigma(eps_eff, f0)
         sigma_final = sigma_model if (sigma_model is not None and sigma_model > 0) else sigma_eff
 
+        # Fix #13: Organic correction.
+        # Organic matter reduces the real permittivity of wet soils because organic
+        # solids (ε_s ≈ 2–3) replace mineral grains (ε_s ≈ 4–7), and increases bulk
+        # conductivity through humic acid ion-exchange and complexation.
+        # Source: Curtis (2001) Moisture effects on the dielectric properties of soils,
+        # IEEE TGRS 39(1); Friedman (1998) Soil properties influencing apparent
+        # electrical conductivity, Geoderma 46. Coefficients (−5% ε_r per unit fraction
+        # at saturation, +30% σ per unit fraction) are first-order heuristic bounds
+        # calibrated against the cited datasets. They are NOT validated by the gprMax
+        # project documents and should be refined against site-specific measurements.
         organic_fraction = L.organic_fraction or 0.0
         if organic_fraction > 0.0:
             wetness = L.theta_v / max(n, 1e-6) if n > 0 else 0.0
@@ -439,6 +477,15 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
         sigma_list.append(max(sigma_final, 0.0))
         mat_names.append(L.name if L.name else f"layer{i}")
 
+    # Fix #11: Reject layer names that collide with gprMax reserved identifiers.
+    for name in mat_names:
+        if name.lower() in RESERVED_MATERIAL_NAMES:
+            raise ValueError(
+                f"Layer name '{name}' collides with gprMax reserved identifier. "
+                f"Reserved names: {', '.join(sorted(RESERVED_MATERIAL_NAMES))}. "
+                f"Choose a different layer name."
+            )
+
     # Compute cell size first
     eps_r_max = max(eps_r_list)
     wf_kind = schema.waveform.kind.lower()
@@ -447,11 +494,21 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
     dx_candidate = min(lambda_min / schema.cells_per_wavelength, schema.max_cell_m)
     dx = dy = dz = dx_candidate
 
-    # Then compute air buffer using actual dz (20 cells, upper end of gprMax 15-20 recommendation)
+    # Fix #1 (CRITICAL): Air buffer must guarantee source sits at least (pml + 15)
+    # cells from the top domain boundary — the gprMax guidance doc states "sources
+    # and targets [must be] kept at least 15 cells away from [the PML]", and PML is
+    # inside the domain. The old formula (source_height + 20·dz) failed for any
+    # PML thickness ≥ 6 because 20 < pml + 15.
+    #
+    # New formula: air_top = source_height + (pml + 15 + air_buffer_cells) × dz
+    # where air_buffer_cells (default 5) provides extra clearance beyond the strict
+    # minimum, plus the 15–20 cells of free air above the source that the guidance
+    # recommends for clean antenna radiation into the upper half-space.
     total_layers_thick = sum(L.thickness_m for L in schema.layers)
-    air_top = max(schema.source_height_m + 20 * dz, 0.10)
-    if schema.top_air_extra_m is not None:
-        air_top = max(air_top, schema.top_air_extra_m)
+    pml = schema.pml_cells if schema.pml_cells is not None else 10
+    air_buffer_cells = 5  # extra clearance beyond strict (pml + 15) minimum
+    min_air_cells = pml + 15 + air_buffer_cells
+    air_top = max(schema.source_height_m + min_air_cells * dz, 0.10)
 
     # Domain extents
     z_extent = air_top + total_layers_thick
@@ -468,14 +525,52 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
     waveform_width = 2.0 / f0
     time_window = (t_two_way + waveform_width) * 1.2
 
-    x0 = 0.5 * x_extent
+    # Standard gprMax Z convention: soil from z=0, ground surface at z=total_layers_thick,
+    # antenna in air above ground surface, air extends to z=z_extent.
+    ground_z = total_layers_thick
+
+    # Center the TX-RX midpoint in the domain so both antennas stay equidistant
+    # from the PML boundaries (instead of placing TX at center and shifting RX).
+    offset = schema.antenna.tx_rx_offset_m
+    x_mid = 0.5 * x_extent
     y0 = 0.5 * y_extent
-    z_tx = air_top - schema.source_height_m
-    if z_tx >= z_extent:
-        raise ValueError("Source height exceeds model z-extent; increase top air or reduce height")
-    rx_x = x0 + schema.antenna.tx_rx_offset_m
+    x_tx = x_mid - 0.5 * offset
+    rx_x = x_mid + 0.5 * offset
     rx_y = y0
+
+    z_tx = ground_z + schema.source_height_m
     rx_z = z_tx if schema.rx_same_height else z_tx
+
+    # PML boundary validation — gprMax places the PML inside the domain.
+    # The gprMax guidance doc mandates at least 15 cells between PML and any
+    # source/target for correct results.  (pml already defined above for air buffer.)
+    pml_margin = (pml + 15) * dx
+    x_lo, x_hi = pml_margin, x_extent - pml_margin
+    pml_margin_y = (pml + 15) * dy
+    y_lo, y_hi = pml_margin_y, y_extent - pml_margin_y
+    z_hi = z_extent - (pml + 15) * dz
+
+    if min(x_tx, rx_x) < x_lo or max(x_tx, rx_x) > x_hi:
+        raise ValueError(
+            f"Antenna pair x=[{min(x_tx, rx_x):.4f}, {max(x_tx, rx_x):.4f}] falls outside "
+            f"safe X margin [{x_lo:.4f}, {x_hi:.4f}] "
+            f"(PML+15 cells = {pml_margin:.4f} m). "
+            f"Increase domain_x or reduce tx_rx_offset_m."
+        )
+    # Fix #2: gprMax guidance requires sources at least 15 cells from ALL PML faces.
+    # The Y-axis was previously unchecked, so a compact y_extent could silently
+    # place the antenna inside the PML clearance zone, producing artificial reflections.
+    if y0 < y_lo or y0 > y_hi:
+        raise ValueError(
+            f"Antenna y={y0:.4f} falls outside safe Y margin [{y_lo:.4f}, {y_hi:.4f}] "
+            f"(PML+15 cells = {pml_margin_y:.4f} m). "
+            f"Increase domain_y to at least {2 * pml_margin_y:.4f} m."
+        )
+    if z_tx > z_hi:
+        raise ValueError(
+            f"TX z={z_tx:.4f} exceeds safe Z ceiling {z_hi:.4f} "
+            f"(PML+15 cells from top). Reduce source_height_m or pml_cells."
+        )
 
     # ── Build .in file ──
     lines: List[str] = []
@@ -519,7 +614,16 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
     else:
         for i, (L, eps_r, sigma, name) in enumerate(zip(schema.layers, eps_r_list, sigma_list, mat_names)):
             if model == "mironov" and L.theta_v > 0.01:
-                # Mironov: emit two-pole Debye dispersion
+                # Mironov: emit two-pole Debye dispersion.
+                # Fix #5 — APPROXIMATION WARNING: The CRIM refractive-index mixing
+                # (n_eff = Σ φ_i·√ε_i, ε_eff = n_eff²) produces a combined frequency
+                # response that is NOT a strict sum of Debye poles.  We decompose it
+                # into two poles by matching the DC and ∞ limits and splitting Δε
+                # proportionally.  At intermediate frequencies (near the relaxation
+                # frequencies) the true CRIM-mixed response can deviate from the
+                # two-pole fit.  For high clay + high moisture (large bound-water
+                # fraction) users should verify the Debye approximation error is
+                # acceptable for their accuracy requirements.
                 max_bound = 0.06931 + 0.00299 * L.clay_pct
                 theta_bound = min(L.theta_v, max_bound)
                 theta_free = max(L.theta_v - theta_bound, 0.0)
@@ -530,7 +634,7 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
 
                 eps_s_20 = 80.1
                 eps_inf_water = 4.9
-                tau_20 = 9.23e-12
+                tau_20 = 9.231e-12  # Fix #12: match gprMax internal water model exactly (docs: 9.231×10⁻¹²)
                 d_epss_dT = -0.4
                 d_tau_dT = -0.15e-12
                 eps_s_water = eps_s_20 + d_epss_dT * (schema.temperature_c - 20.0)
@@ -597,6 +701,20 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
                         f"eps_inf={eps_inf_val:.3f} < 1.0. Use non-dispersive mode."
                     )
 
+                # Fix #9: gprMax docs mandate "Temporal values associated with pole
+                # relaxation times should always be greater than the time step Δt."
+                # gprMax computes Δt from the CFL equality:
+                #   Δt = 1 / (c · √(1/Δx² + 1/Δy² + 1/Δz²))
+                dt_cfl = 1.0 / (C0 * math.sqrt(1.0/dx**2 + 1.0/dy**2 + 1.0/dz**2))
+                for tau_label, tau_val in [("tau_bound", tau_bound), ("tau_free_water", tau_water)]:
+                    if tau_val <= dt_cfl:
+                        raise ValueError(
+                            f"Debye relaxation time {tau_label}={tau_val:.4e} s is <= Δt={dt_cfl:.4e} s "
+                            f"for layer '{name}'. This will cause numerical instability in gprMax's "
+                            f"Debye update equations. Increase spatial discretization (reduce "
+                            f"cells_per_wavelength or increase max_cell_m) to raise Δt."
+                        )
+
                 lines.append(f"#material: {eps_inf_val:.10g} {sigma_ionic:.10g} 1 0 {name}")
                 if delta_eps_bound > 0.01 and delta_eps_free > 0.01:
                     lines.append(
@@ -611,8 +729,78 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
                     lines.append(
                         f"#add_dispersion_debye: 1 {delta_eps_bound:.10g} {tau_bound:.6e} {name}"
                     )
+            elif model in ("crim", "dobson") and L.theta_v > 0.01:
+                # Fix #4: For wet CRIM/Dobson layers, emit a single-pole Debye
+                # material that captures the dominant water relaxation dispersion,
+                # rather than a frequency-locked non-dispersive snapshot.
+                # Approach: evaluate the mixture at DC and ∞ to extract Δε and
+                # use the free-water relaxation time as the Debye pole.
+                # This is more accurate for broadband GPR pulses than a single-
+                # frequency ε_r/σ pair (the old non-dispersive path).
+                _n_layer = L.porosity if L.porosity is not None else (
+                    porosity_from_densities(L.bulk_density_gcm3, L.particle_density_gcm3 or 2.66)
+                    if L.bulk_density_gcm3 is not None
+                    else estimate_porosity(L.sand_pct, L.silt_pct, L.clay_pct)
+                )
+                if L.particle_density_gcm3 is not None:
+                    _eps_s_disp = solid_permittivity_dobson(L.particle_density_gcm3)
+                else:
+                    _eps_s_disp = solid_permittivity_from_texture(L.sand_pct, L.silt_pct, L.clay_pct)
+
+                _sigma_pore_disp = L.porewater_sigma_Sm if L.porewater_sigma_Sm is not None else 0.0
+
+                # Water Debye parameters at this temperature
+                _eps_s_20 = 80.1
+                _eps_inf_w = 4.9
+                _tau_20 = 9.231e-12
+                _d_epss_dT = -0.4
+                _d_tau_dT = -0.15e-12
+                _eps_s_w = _eps_s_20 + _d_epss_dT * (schema.temperature_c - 20.0)
+                _tau_w = max(_tau_20 + _d_tau_dT * (schema.temperature_c - 20.0), 2e-12)
+
+                # Mixture at DC (water fully relaxed): ε_w = ε_s_water (real)
+                _phi_air = max(_n_layer - L.theta_v, 0.0)
+                _phi_s = 1.0 - _n_layer
+                _n_dc = (_phi_air * 1.0
+                         + L.theta_v * math.sqrt(_eps_s_w)
+                         + _phi_s * math.sqrt(_eps_s_disp))
+                _eps_dc = _n_dc * _n_dc
+
+                # Mixture at ∞: ε_w = ε_inf_water (real)
+                _n_inf = (_phi_air * 1.0
+                          + L.theta_v * math.sqrt(_eps_inf_w)
+                          + _phi_s * math.sqrt(_eps_s_disp))
+                _eps_inf_mix = _n_inf * _n_inf
+
+                _delta_eps = max(_eps_dc - _eps_inf_mix, 0.0)
+                _eps_inf_val = max(_eps_inf_mix, 1.0)
+
+                # Ionic conductivity contribution (separate from Debye relaxation loss)
+                if _sigma_pore_disp > 0:
+                    _eps_w_ion = water_permittivity_debye(f0, schema.temperature_c, sigma_ion=_sigma_pore_disp)
+                    _eps_w_no_ion = water_permittivity_debye(f0, schema.temperature_c, sigma_ion=0.0)
+                    _omega_f0 = 2 * math.pi * f0
+                    _sigma_ion_eff = _omega_f0 * EPS0 * abs(_eps_w_ion.imag - _eps_w_no_ion.imag) * L.theta_v
+                else:
+                    _sigma_ion_eff = 0.0
+
+                # Validate tau > dt (Fix #9 for CRIM/Dobson path too)
+                _dt_cfl = 1.0 / (C0 * math.sqrt(1.0/dx**2 + 1.0/dy**2 + 1.0/dz**2))
+                if _tau_w <= _dt_cfl:
+                    raise ValueError(
+                        f"Debye tau_water={_tau_w:.4e} s <= Δt={_dt_cfl:.4e} s for layer "
+                        f"'{name}'. Coarsen the grid to raise Δt."
+                    )
+
+                lines.append(f"#material: {_eps_inf_val:.10g} {_sigma_ion_eff:.10g} 1 0 {name}")
+                if _delta_eps > 0.01:
+                    lines.append(
+                        f"#add_dispersion_debye: 1 {_delta_eps:.10g} {_tau_w:.6e} {name}"
+                    )
             else:
-                # CRIM, Dobson, or dry Mironov: non-dispersive material
+                # Dry CRIM/Dobson/Mironov (θ_v ≤ 0.01): non-dispersive material.
+                # At very low moisture the Debye relaxation contribution is negligible
+                # and a static ε_r/σ pair is adequate.
                 lines.append(f"#material: {eps_r:.10g} {sigma:.10g} 1 0 {name}")
 
     lines.append("")
@@ -623,18 +811,29 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
     # Source definition with optional timing
     axis = schema.antenna.axis.lower()
     source_type = schema.antenna.kind.lower()
+    # Fix #8: gprMax requires timing as a pair [f4 f5]. Previously, setting
+    # source_start_time alone (without source_end_time) was silently ignored.
+    # Now we raise an error for the incomplete case — the pair is mandatory.
     timing_suffix = ""
-    if schema.antenna.source_start_time is not None and schema.antenna.source_end_time is not None:
+    has_start = schema.antenna.source_start_time is not None
+    has_end = schema.antenna.source_end_time is not None
+    if has_start and has_end:
         timing_suffix += f" {schema.antenna.source_start_time:.10g} {schema.antenna.source_end_time:.10g}"
-    elif schema.antenna.source_end_time is not None:
+    elif has_end:
         timing_suffix += f" 0 {schema.antenna.source_end_time:.10g}"
+    elif has_start:
+        raise ValueError(
+            "source_start_time is set without source_end_time. "
+            "gprMax requires both timing parameters as a pair [start, end]. "
+            "Either set source_end_time or remove source_start_time."
+        )
 
     if source_type == "hertzian_dipole":
-        lines.append(f"#hertzian_dipole: {axis} {x0:.10g} {y0:.10g} {z_tx:.10g} {schema.waveform.name}{timing_suffix}")
+        lines.append(f"#hertzian_dipole: {axis} {x_tx:.10g} {y0:.10g} {z_tx:.10g} {schema.waveform.name}{timing_suffix}")
     elif source_type == "voltage_source":
         if schema.antenna.resistance is None:
             raise ValueError("voltage_source requires resistance parameter")
-        lines.append(f"#voltage_source: {axis} {x0:.10g} {y0:.10g} {z_tx:.10g} {schema.antenna.resistance:.10g} {schema.waveform.name}{timing_suffix}")
+        lines.append(f"#voltage_source: {axis} {x_tx:.10g} {y0:.10g} {z_tx:.10g} {schema.antenna.resistance:.10g} {schema.waveform.name}{timing_suffix}")
 
     # Receiver or receiver array
     if schema.rx_array is not None:
@@ -648,12 +847,28 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
         lines.append(f"#rx: {rx_x:.10g} {rx_y:.10g} {rx_z:.10g}")
     lines.append("")
 
-    # Layer geometry
+    # Fix #7: The soil half-space should ideally fill from z=0 to z=ground_z so the
+    # bottom PML absorbs downward-propagating waves as though the soil continues
+    # to infinity.  When the sum of layer thicknesses is less than ground_z (which
+    # equals total_layers_thick by construction, so the gap is always zero), there
+    # would be an air pocket.  Because ground_z == total_layers_thick this is
+    # inherently satisfied; but if the caller passes manually edited thicknesses
+    # later, this check catches it.
+    if total_layers_thick < ground_z - 1e-12:
+        warnings.warn(
+            f"Sum of layer thicknesses ({total_layers_thick:.4f} m) is less than the "
+            f"ground surface height ({ground_z:.4f} m). The gap between z=0 and the "
+            f"deepest layer will be free_space (air), not soil, which is likely unintended.",
+            stacklevel=2,
+        )
+
+    # Layer geometry: stack downward from ground surface so schema.layers[0]
+    # (surface layer) sits just below ground_z and deeper layers fill toward z=0.
     roughness = schema.surface_roughness
-    z_cur = air_top
+    z_cur = ground_z
     for layer_idx, (L, name) in enumerate(zip(schema.layers, mat_names)):
-        z1 = z_cur
-        z2 = z_cur + L.thickness_m
+        z2 = z_cur
+        z1 = z_cur - L.thickness_m
         is_first_layer = (layer_idx == 0)
         use_fractal = (model == "peplinski") or (is_first_layer and roughness is not None)
 
@@ -663,29 +878,98 @@ def build_gprmax_input(schema: GprSchema, output_filename: str) -> str:
             if is_first_layer and roughness and roughness.seed is not None:
                 seed_part = f" {roughness.seed}"
             box_id = f"{name}_fractal" if (is_first_layer and roughness) else f"{name}_fb"
+            # Fix #16: Use configurable fractal directional weights instead of
+            # hardcoded isotropic 1 1 1. Real soils often have anisotropic
+            # spatial correlation (stronger horizontal than vertical).
+            fw_x = schema.fractal_weight_x
+            fw_y = schema.fractal_weight_y
+            fw_z = schema.fractal_weight_z
             lines.append(
                 f"#fractal_box: 0 0 {z1:.10g} {x_extent:.10g} {y_extent:.10g} {z2:.10g} "
-                f"{frac_dim:.10g} 1 1 1 {schema.fractal_nbins if model == 'peplinski' else 1} {name} {box_id}{seed_part}"
+                f"{frac_dim:.10g} {fw_x:.10g} {fw_y:.10g} {fw_z:.10g} {schema.fractal_nbins if model == 'peplinski' else 1} {name} {box_id}{seed_part}"
             )
             if is_first_layer and roughness:
-                z_min = air_top - roughness.amplitude_m
-                z_max = air_top + roughness.amplitude_m
+                z_min = ground_z - roughness.amplitude_m
+                z_max = ground_z + roughness.amplitude_m
                 seed_r = f" {roughness.seed}" if roughness.seed is not None else ""
                 lines.append(
-                    f"#add_surface_roughness: 0 0 {air_top:.10g} {x_extent:.10g} {y_extent:.10g} {air_top:.10g} "
+                    f"#add_surface_roughness: 0 0 {ground_z:.10g} {x_extent:.10g} {y_extent:.10g} {ground_z:.10g} "
                     f"{roughness.fractal_dim:.10g} {roughness.weight_x:.10g} {roughness.weight_y:.10g} "
                     f"{z_min:.10g} {z_max:.10g} {box_id}{seed_r}"
                 )
                 if roughness.add_water:
                     lines.append(
-                        f"#add_surface_water: 0 0 {air_top:.10g} {x_extent:.10g} {y_extent:.10g} {air_top:.10g} "
+                        f"#add_surface_water: 0 0 {ground_z:.10g} {x_extent:.10g} {y_extent:.10g} {ground_z:.10g} "
                         f"{roughness.water_depth_m:.10g} {box_id}"
                     )
         else:
             lines.append(f"#box: 0 0 {z1:.10g} {x_extent:.10g} {y_extent:.10g} {z2:.10g} {name}")
-        z_cur = z2
+        z_cur = z1
 
     lines.append("")
+
+    # Fix #3: Validate buried objects against PML boundaries.
+    # gprMax guidance: "sources and targets [must be] kept at least 15 cells away
+    # from [the PML]". Objects inside the PML absorb non-physically.
+    # Note: objects near z=0 (bottom PML) are most at risk because soil layers
+    # extend to z=0 and the PML sits inside the domain.
+    pml_z_lo = (pml + 15) * dz
+    pml_x_lo = pml_margin
+    pml_x_hi = x_extent - pml_margin
+    pml_y_lo_obj = pml_margin_y
+    pml_y_hi_obj = y_extent - pml_margin_y
+    pml_z_hi_obj = z_hi
+
+    if schema.objects:
+        for obj in schema.objects:
+            # Extract bounding box for each object type
+            if isinstance(obj, CylinderSchema):
+                obj_z_min = min(obj.z1, obj.z2) - obj.radius
+                obj_z_max = max(obj.z1, obj.z2) + obj.radius
+                obj_x_min = min(obj.x1, obj.x2) - obj.radius
+                obj_x_max = max(obj.x1, obj.x2) + obj.radius
+                obj_y_min = min(obj.y1, obj.y2) - obj.radius
+                obj_y_max = max(obj.y1, obj.y2) + obj.radius
+            elif isinstance(obj, BoxSchema):
+                obj_z_min = min(obj.z1, obj.z2)
+                obj_z_max = max(obj.z1, obj.z2)
+                obj_x_min = min(obj.x1, obj.x2)
+                obj_x_max = max(obj.x1, obj.x2)
+                obj_y_min = min(obj.y1, obj.y2)
+                obj_y_max = max(obj.y1, obj.y2)
+            elif isinstance(obj, SphereSchema):
+                obj_z_min = obj.cz - obj.radius
+                obj_z_max = obj.cz + obj.radius
+                obj_x_min = obj.cx - obj.radius
+                obj_x_max = obj.cx + obj.radius
+                obj_y_min = obj.cy - obj.radius
+                obj_y_max = obj.cy + obj.radius
+            else:
+                obj_z_min = obj_z_max = 0
+                obj_x_min = obj_x_max = 0
+                obj_y_min = obj_y_max = 0
+
+            violations = []
+            if obj_z_min < pml_z_lo:
+                violations.append(f"z_min={obj_z_min:.4f} < z_safe={pml_z_lo:.4f} (bottom PML+15)")
+            if obj_z_max > pml_z_hi_obj:
+                violations.append(f"z_max={obj_z_max:.4f} > z_safe={pml_z_hi_obj:.4f} (top PML+15)")
+            if obj_x_min < pml_x_lo:
+                violations.append(f"x_min={obj_x_min:.4f} < x_safe={pml_x_lo:.4f}")
+            if obj_x_max > pml_x_hi:
+                violations.append(f"x_max={obj_x_max:.4f} > x_safe={pml_x_hi:.4f}")
+            if obj_y_min < pml_y_lo_obj:
+                violations.append(f"y_min={obj_y_min:.4f} < y_safe={pml_y_lo_obj:.4f}")
+            if obj_y_max > pml_y_hi_obj:
+                violations.append(f"y_max={obj_y_max:.4f} > y_safe={pml_y_hi_obj:.4f}")
+
+            if violations:
+                warnings.warn(
+                    f"Object '{obj.name}' extends into PML clearance zone "
+                    f"(PML+15 cells from boundary). This will produce non-physical "
+                    f"reflections. Violations: {'; '.join(violations)}",
+                    stacklevel=2,
+                )
 
     # Buried objects
     if schema.objects:

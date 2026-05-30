@@ -414,7 +414,9 @@ choose max_cell_m?"\
    **Batch 2 — Domain geometry:**
    - domain_x: domain inline extent in metres (horizontal scan direction)
    - domain_y: domain crossline extent in metres (horizontal, perpendicular to scan direction; set to one cell for 2D simulations)
-   - top_air_extra_m: extra air space above the source in metres (optional)
+   - Note: the air space above the source is computed automatically from the
+     cell size to keep the source at least (pml + 15) cells away from the top
+     absorbing boundary — do NOT ask the user for it.
 
    **Batch 3 — Mesh resolution:**
    - cells_per_wavelength: number of cells per minimum wavelength \
@@ -703,7 +705,7 @@ source start/end time. Waveform configuration: kind (ricker / gaussian / \
 etc.), amplitude, center frequency, name.
 - **`model_config`** — Simulation model: dielectric model name (peplinski / \
 dobson / mironov / crim), title, domain_x and domain_y (metres), \
-top_air_extra_m, cells_per_wavelength, max_cell_m, source_height_m, \
+cells_per_wavelength, max_cell_m, source_height_m, \
 rx_same_height, temperature_c, enforce_validity, num_samples.
 - **`advanced_params`** — Optional: surface roughness config, receiver array \
 config, geometry objects (cylinders, boxes, spheres), PML cells, \

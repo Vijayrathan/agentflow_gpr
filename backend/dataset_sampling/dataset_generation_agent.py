@@ -364,7 +364,6 @@ def post_dataset_to_db() -> str:
             "source_height_m": mc["source_height_m"],
             "domain_x": mc["domain_x"],
             "domain_y": mc["domain_y"],
-            "top_air_extra_m": mc.get("top_air_extra_m"),
             "cells_per_wavelength": mc["cells_per_wavelength"],
             "max_cell_m": mc["max_cell_m"],
             "rx_same_height": mc.get("rx_same_height", True),

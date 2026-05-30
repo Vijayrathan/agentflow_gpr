@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Literal
 
 # 1. Parsing & Chunking Libraries
-from docling.document_converter import DocumentConverter  # Layout-aware parser
+from mineru.cli.common import do_parse
+
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from langchain_core.tools import tool
@@ -52,7 +53,8 @@ class GeophysicsRAG:
             base_embedder = HuggingFaceBgeEmbeddings(model_name="BAAI/bge-small-en-v1.5")
             self.text_splitter = SemanticChunker(
                 base_embedder, 
-                breakpoint_threshold_type="percentile" # Splits when topics shift significantly
+                breakpoint_threshold_type="percentile",
+                breakpoint_threshold_amount=70 
             )
             self.reranker = None  # Not needed for training
             
@@ -100,26 +102,55 @@ class GeophysicsRAG:
 
     def parse_and_chunk(self, pdf_path: str) -> List[str]:
         """
-        Step 1: Layout-Aware Parsing & Semantic Chunking
+        Step 1: Layout-Aware Parsing & Semantic Chunking (via MinerU).
         Only available in training mode.
         """
         if self.mode != "training":
             raise ValueError("parse_and_chunk is only available in training mode.")
-        
+
         if self.text_splitter is None:
             raise ValueError("Text splitter not initialized. Use training mode.")
-        
-        print(f"Parsing {pdf_path}...")
-        converter = DocumentConverter()
-        result = converter.convert(pdf_path)
-        
-        # Export to Markdown to preserve headers/tables
-        full_text_markdown = result.document.export_to_markdown()
-        
+
+        pdf_path = str(Path(pdf_path).resolve())
+        pdf_stem = Path(pdf_path).stem
+
+        # Persist parsed output next to the Qdrant storage so it's inspectable.
+        parse_output_dir = Path(self.qdrant_path) / "mineru_parsed"
+        parse_output_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"Parsing {pdf_path} with MinerU...")
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        do_parse(
+            output_dir=str(parse_output_dir),
+            pdf_file_names=[pdf_stem],
+            pdf_bytes_list=[pdf_bytes],
+            p_lang_list=["en"],
+            backend="pipeline",
+            parse_method="ocr",
+            formula_enable=True,
+            table_enable=True,
+            f_draw_layout_bbox=False,
+            f_draw_span_bbox=False,
+            f_dump_md=True,
+            f_dump_middle_json=False,
+            f_dump_model_output=False,
+            f_dump_orig_pdf=False,
+            f_dump_content_list=False,
+            f_make_md_mode="mm_markdown",
+        )
+
+        md_path = parse_output_dir / pdf_stem / "ocr" / f"{pdf_stem}.md"
+        full_text_markdown = md_path.read_text(encoding="utf-8")
+        # Strip null bytes left by any ligature-decoding failures.
+        full_text_markdown = full_text_markdown.replace("\x00", "")
+        print(f"Parsed markdown saved to {md_path}")
+
         print("Chunking text semantically...")
         docs = self.text_splitter.create_documents([full_text_markdown])
         return [d.page_content for d in docs]
-    
+
     def index_all_documents(self, retrieval_docs_path: str | None = None):
         """
         Index all PDF documents from the retrieval_docs directory.
@@ -302,11 +333,11 @@ class GeophysicsRAG:
             # Extract points from response
             sparse_results = sparse_response.points if hasattr(sparse_response, 'points') else sparse_response
             
-            for result in sparse_results:
-                point_id = result.id if hasattr(result, 'id') else str(result)
-                candidate_ids.add(point_id)
-                if point_id not in candidate_map:
-                    candidate_map[point_id] = result
+            # for result in sparse_results:
+            #     point_id = result.id if hasattr(result, 'id') else str(result)
+            #     candidate_ids.add(point_id)
+            #     if point_id not in candidate_map:
+            #         candidate_map[point_id] = result
             
             # Combine results (simple union for now, could use RRF scoring)
             points = list(candidate_map.values())
@@ -372,9 +403,7 @@ class GeophysicsRAG:
         
         if not results:
             return (
-                "I couldn't find specific information about that in the knowledge base. "
-                "However, I can help you create a GPR simulation. "
-                "Would you like to start setting up a simulation instead?"
+                "I couldn't find specific information about that in the knowledge base."
             )
         
         # Prepare context from retrieved documents

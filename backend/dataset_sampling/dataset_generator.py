@@ -186,7 +186,6 @@ def _gpr_schema_for_sample(
         title=title,
         source_height_m=template.source_height_m,
         domain_xy_m=template.domain_xy_m,
-        top_air_extra_m=template.top_air_extra_m,
         cells_per_wavelength=template.cells_per_wavelength,
         max_cell_m=template.max_cell_m,
         rx_same_height=template.rx_same_height,

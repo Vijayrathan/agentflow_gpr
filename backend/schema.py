@@ -127,7 +127,6 @@ class GprSchema(BaseModel):
     title: str
     source_height_m: float
     domain_xy_m: Tuple[float, float] = (0.6, 0.4)
-    top_air_extra_m: Optional[float] = None
     cells_per_wavelength: int = 15
     max_cell_m: float = 0.005
     rx_same_height: bool = True
@@ -144,7 +143,15 @@ class GprSchema(BaseModel):
     pml_cells: Optional[int] = None
     num_threads: Optional[int] = None
     output_dir: Optional[str] = None
-    fractal_nbins: int = 3
+    # Fix #10: gprMax docs example uses 50 bins; 3 gave only 3 discrete moisture
+    # levels defeating the purpose of fractal heterogeneity.
+    fractal_nbins: int = 50
+    # Fix #16: fractal box directional weights (default isotropic).
+    # Real soils often have stronger horizontal than vertical correlation;
+    # weight_z < 1.0 emphasises horizontal layering.
+    fractal_weight_x: float = 1.0
+    fractal_weight_y: float = 1.0
+    fractal_weight_z: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +227,6 @@ class ExtractedModelConfig(BaseModel):
     source_height_m: float  # required: antenna height above ground (m)
     domain_x: float  # required: domain width (m)
     domain_y: float  # required: domain depth (m)
-    top_air_extra_m: Optional[float] = None  # extra air space above source
     cells_per_wavelength: float  # required: cells per minimum wavelength
     max_cell_m: float  # required: maximum cell size (m)
     rx_same_height: Optional[bool] = True  # Rx at same height as Tx
