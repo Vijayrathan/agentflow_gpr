@@ -152,9 +152,6 @@ class Simulation(SQLModel, table=True):
     )
     domain_x: float = Field(sa_column=Column(Float, nullable=False))
     domain_y: float = Field(sa_column=Column(Float, nullable=False))
-    top_air_extra_m: Optional[float] = Field(
-        default=None, sa_column=Column(Float, nullable=True)
-    )
     cells_per_wavelength: float = Field(
         sa_column=Column(Float, nullable=False)
     )

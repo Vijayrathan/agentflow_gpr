@@ -31,3 +31,4 @@ dvc.lock
 db/retrieval_docs/
 review_docs/
 .cursor/
+test_notebooks/

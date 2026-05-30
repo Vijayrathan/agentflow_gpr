@@ -1,0 +1,468 @@
+================================================================================
+COMPREHENSIVE PHYSICS SOLVING & VALIDATION REFERENCE
+================================================================================
+
+================================================================================
+SECTION 1: PHYSICAL CONSTANTS
+================================================================================
+
+EPS0  = 8.854187817e-12 F/m     (permittivity of free space)
+MU0   = 4π × 10⁻⁷ H/m          (permeability of free space)
+C0    = 1/√(EPS0×MU0)           (speed of light ≈ 299,792,458 m/s)
+
+Defined identically in both physics_modelling.py and validation_tools.py.
+
+================================================================================
+SECTION 2: CORE DIELECTRIC MODELS
+================================================================================
+
+Four soil-water mixing models are implemented. Selection is user-driven and each
+has distinct valid operating ranges.
+
+--------------------------------------------------------------------------------
+2.1  CRIM — Complex Refractive Index Method
+--------------------------------------------------------------------------------
+Function : crim_mixture(theta_v, porosity, eps_solid, eps_water)
+Freq range: No restriction
+
+Three-phase mixing in refractive-index space:
+  phi_air  = max(porosity - theta_v, 0)
+  phi_w    = theta_v
+  phi_s    = 1 - porosity
+  n_eff    = phi_air·1 + phi_w·√(ε_w) + phi_s·√(ε_s)
+  ε_eff    = n_eff²
+
+Inputs  : theta_v [0, porosity], porosity [0, 0.9], eps_solid (real),
+          eps_water (complex)
+Outputs : Complex effective permittivity ε_eff
+
+--------------------------------------------------------------------------------
+2.2  Mironov (2004) — Bound + Free Water Decomposition
+--------------------------------------------------------------------------------
+Function : mironov_mixture(theta_v, porosity, eps_solid, f_hz, temp_c,
+                           clay_frac_pct, sigma_free=0)
+Freq range: 0.6–18 GHz
+
+Step 1 — Bound water threshold (clay-dependent):
+  theta_bound_max = 0.06931 + 0.00299 × clay_pct   [Mironov 2004]
+  theta_bound     = min(theta_v, theta_bound_max)
+  theta_free      = max(theta_v - theta_bound, 0)
+
+Step 2 — Free water permittivity:
+  ε_w = water_permittivity_debye(f_hz, temp_c, sigma=sigma_free)
+
+Step 3 — Bound water Debye (distinct parameters):
+  ε_s_bound  = 35.5        (not 50.0)
+  ε_∞_bound  = 3.3         (not 4.9)
+  τ_bound    = 1.8×10⁻⁹ s (~1.8 ns, not 30 ps)
+  ε_b        = ε_∞_b + (ε_s_b - ε_∞_b) / (1 + jωτ_b)
+
+Step 4 — CRIM mixing with 4 phases:
+  n_eff = phi_air·1 + theta_bound·√(ε_b) + theta_free·√(ε_w) + phi_s·√(ε_s)
+  ε_eff = n_eff²
+
+Step 5 — Conductivity from free water only:
+  sigma_model = sigma_free × (theta_free / theta_v)
+
+Outputs : (ε_eff complex, sigma_model or None)
+
+--------------------------------------------------------------------------------
+2.3  Peplinski (1995) — α-Mixing Model
+--------------------------------------------------------------------------------
+Function : peplinski_mixture(theta_v, rho_b_gcm3, rho_s_gcm3, sand_pct,
+                              clay_pct, f_hz, temp_c, sigma_pore=0)
+Freq range: 0.3–1.3 GHz
+θ_v range : [0, 0.30]
+Texture   : sand ∈ [15,50]%, clay ∈ [5,20]%, silt ∈ [35,65]%
+
+Exponents (Eqs. 4–5):
+  α   = 0.65
+  β'  = 1.2748 - 0.519·S - 0.152·C     (S = sand/100, C = clay/100)
+  β'' = 1.33797 - 0.603·S - 0.166·C
+
+Solid permittivity (Dobson Eq. 22):
+  ε_s = (1.01 + 0.44·ρ_s)² - 0.062
+
+Free water permittivity:
+  ε_w = water_permittivity_debye(f, T, sigma=0)
+
+Effective conductivity (Eq. 10):
+  σ_eff   = 0.0467 + 0.2204·ρ_b - 0.4111·S + 0.6614·C
+  σ_total = σ_eff + sigma_pore
+
+Imaginary part of free water (Eq. 7):
+  ε''_fw = |Im(ε_w)| + (σ_total/(ωε₀)) × (ρ_s - ρ_b)/(ρ_s·max(θ_v, 1e-9))
+
+Real part mixing (Eq. 3):
+  X_real  = 1 + (ρ_b/ρ_s)(ε_s^α - 1) + (θ_v^β')(ε_fw_real^α) - θ_v
+  ε'_m    = X_real^(1/α)
+  ε_real  = 1.15·ε'_m - 0.68     ← Eq. 9 empirical correction
+
+Imaginary part mixing:
+  X_imag = (θ_v^β'')(ε''_fw^α)
+  ε''_m  = X_imag^(1/α)
+
+Outputs : Complex permittivity, Re ≥ 1.0
+
+--------------------------------------------------------------------------------
+2.4  Dobson (1985) — α-Mixing Model
+--------------------------------------------------------------------------------
+Function : dobson_mixture(theta_v, rho_b_gcm3, rho_s_gcm3, sand_pct,
+                           clay_pct, f_hz, temp_c, sigma_pore=0)
+Freq range: 1.4–18 GHz
+θ_v range : [0, 0.50]
+
+Identical α-mixing structure to Peplinski with two differences:
+
+  1) Conductivity formula (Eq. 32):
+       σ_eff = -1.645 + 1.939·ρ_b - 0.02013·sand_pct + 0.01594·clay_pct
+       σ_eff = max(σ_eff, 0)
+
+  2) NO real-part correction (Eq. 9 not applied):
+       ε_real = X_real^(1/α)    (no 1.15×-0.68 step)
+
+Outputs : Complex permittivity
+
+================================================================================
+SECTION 3: SUPPORTING PHYSICS CALCULATIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1  Water Permittivity — Single-Pole Debye
+--------------------------------------------------------------------------------
+Function : water_permittivity_debye(f_hz, temp_c=20, sigma_ion=0.0)
+
+Temperature-dependent static permittivity:
+  ε_s(T) = 80.1 + (-0.4) × (T - 20)
+
+Temperature-dependent relaxation time:
+  τ(T) = 9.231×10⁻¹² + (-0.15×10⁻¹²) × (T - 20)
+  τ     = max(τ, 2×10⁻¹²)    [clamped]
+
+Debye formula:
+  ω   = 2πf
+  ε_w = ε_∞ + (ε_s - ε_∞) / (1 + jωτ)
+
+Ionic conductivity correction (if sigma_ion > 0):
+  ε_w -= j·sigma_ion / (ω·ε₀)
+
+NOTE: τ constant 9.231×10⁻¹² matches gprMax internal model exactly.
+
+--------------------------------------------------------------------------------
+3.2  Solid Permittivity — Two Methods
+--------------------------------------------------------------------------------
+Method A — Texture-weighted average:
+  Function : solid_permittivity_from_texture(sand_pct, silt_pct, clay_pct)
+  Normalize fractions; apply empirical component values:
+    ε_sand = 4.5,  ε_silt = 5.5,  ε_clay = 7.0
+    ε_solid = 4.5·s_norm + 5.5·si_norm + 7.0·c_norm
+  Default to 5.0 if total texture = 0.
+
+Method B — Dobson (1985) Eq. 22 from particle density [PREFERRED]:
+  Function : solid_permittivity_dobson(rho_s_gcm3)
+    ε_s = (1.01 + 0.44·ρ_s)² - 0.062
+  Used when particle density is available (consistent across all model branches).
+
+Priority: particle density → Method B; otherwise → Method A.
+
+--------------------------------------------------------------------------------
+3.3  Porosity Estimation
+--------------------------------------------------------------------------------
+Method A — From bulk and particle density [PREFERRED]:
+  Function : porosity_from_densities(bulk_gcm3, particle_gcm3=2.66)
+    P = 1 - (ρ_bulk / ρ_particle)
+    P = clamp(P, 0.0, 0.9)
+
+Method B — Texture heuristic:
+  Function : estimate_porosity(sand_pct, silt_pct, clay_pct)
+    base  = 0.42
+    Δn    = 0.0012 × (clay - 0.4·sand)
+    P     = clamp(base + Δn, 0.30, 0.60)
+
+Priority: bulk density available → Method A; otherwise → Method B.
+
+--------------------------------------------------------------------------------
+3.4  Complex Permittivity → Conductivity
+--------------------------------------------------------------------------------
+Function : eps_to_sigma(eps_eff, f_hz)
+  ε_r = max(Re(ε_eff), 1.0)
+  σ   = ω·ε₀·|Im(ε_eff)|      (absolute value; σ never clipped to 0)
+
+Output : (ε_r, σ)
+
+--------------------------------------------------------------------------------
+3.5  Attenuation & Phase Constants — Lossy Dielectric
+--------------------------------------------------------------------------------
+Function : attenuation_constants(eps_r, sigma, f_hz)
+  ω    = 2πf
+  ε    = eps_r × ε₀
+  term = √(1 + (σ/(ωε))²)
+  α    = ω√(μ₀ε) × √(0.5·(term - 1))   [Np/m, attenuation constant]
+  β    = ω√(μ₀ε) × √(0.5·(term + 1))   [rad/m, phase constant]
+
+Output : (alpha, beta)
+
+--------------------------------------------------------------------------------
+3.6  Skin Depth
+--------------------------------------------------------------------------------
+Function : skin_depth(eps_r, sigma, f_hz)
+  δ = 1/α    (returns ∞ if α = 0)
+
+Output : Skin depth in metres.
+
+--------------------------------------------------------------------------------
+3.7  Maximum Unambiguous Range (Stepped-Frequency GPR)
+--------------------------------------------------------------------------------
+Function : rmax_unambiguous(delta_f_hz, eps_r)
+  R_max = c / (2·√(ε_r) · Δf)
+  Enforces: ε_r ≥ 1, Δf ≥ 1e-12
+
+Output : Max range in metres.
+
+--------------------------------------------------------------------------------
+3.8  Two-Way Travel Time (Time Window Calculation)
+--------------------------------------------------------------------------------
+  v_air       = c
+  v_soil      = c / √(ε_r_max)
+  t_air       = 2 × air_top / c
+  t_soil      = 2 × soil_depth / v_soil
+  t_two_way   = t_air + t_soil
+  time_window = (t_two_way + 2/f_center) × 1.2
+
+Used to set the simulation #time_window directive.
+
+--------------------------------------------------------------------------------
+3.9  Organic Matter Correction (Empirical Heuristic)
+--------------------------------------------------------------------------------
+Applied when organic fraction > 0:
+  wetness  = clamp(theta_v / porosity, 0, 1)
+  ε_r_wet *= 1 - 0.05 × organic_fraction × wetness
+  σ       *= 1 + 0.3 × organic_fraction
+
+NOTE: Empirical bounds only; not validated against gprMax.
+
+--------------------------------------------------------------------------------
+3.10  Salinity → Porewater Conductivity Mapping
+--------------------------------------------------------------------------------
+Default mapping (customisable):
+  fresh            → 0.0  S/m
+  slightly_saline  → 0.1  S/m
+  brackish         → 1.0  S/m
+  saline           → 3.5  S/m
+
+Only applied when explicit porewater_sigma_Sm is not provided.
+
+--------------------------------------------------------------------------------
+3.11  Dispersive Material Decomposition (Debye directives)
+--------------------------------------------------------------------------------
+Single-pole Debye (CRIM / Dobson, when θ_v > 0.01):
+  Evaluates mixture at DC (relaxed) and ∞ (unrelaxed) frequencies.
+  Extracts Δε_1 and uses water relaxation time τ_water.
+  Emits: #add_dispersion_debye 1 Δε_1 τ_water
+
+Two-pole Debye (Mironov, when θ_v > 0.01):
+  Pole 1 → bound water:  Δε_b, τ_bound = 1.8×10⁻⁹ s
+  Pole 2 → free water:   Δε_f, τ_free  = τ_water(T)
+  Emits: #add_dispersion_debye 2 Δε_b τ_bound Δε_f τ_free
+
+Non-dispersive (any model, θ_v ≤ 0.01):
+  Emits static: #material ε_r σ 1 0
+
+Constraint: all τ values must satisfy τ > Δt_CFL (validated before writing).
+
+================================================================================
+SECTION 4: DOMAIN & GEOMETRY CALCULATIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1  Cell Size (Spatial Discretisation)
+--------------------------------------------------------------------------------
+  f_max     = f_center × BW_MULTIPLIER[waveform_kind]
+  λ_min     = c / (f_max × √(ε_r_max))
+  cell_size = min(λ_min / cells_per_wavelength, max_cell_m)
+
+BW multipliers by waveform type:
+  ricker / gaussiandotdot / gaussiandotdotnorm : 2.5–3.0
+  gaussian / gaussiandot / gaussiandotnorm     : 2.0
+  sine / contsine                              : 1.2
+
+--------------------------------------------------------------------------------
+4.2  Domain Extent
+--------------------------------------------------------------------------------
+  min_air_cells = pml_cells + 15 + 5        (PML + antenna clearance + margin)
+  air_top       = max(source_height + min_air_cells·dz, 0.10 m)
+  z_extent      = air_top + Σ(layer_thicknesses)
+
+  All domain dimensions padded to integer multiples of cell size.
+
+--------------------------------------------------------------------------------
+4.3  Peplinski Fractal Heterogeneity
+--------------------------------------------------------------------------------
+  spread   = clamp(theta_v × 0.05, 0.001, 0.30), minimum 0.002
+  theta_lo = theta_v - spread
+  theta_hi = theta_v + spread
+
+  fractal_nbins = 50 (default; not 3)
+  Directional weights: fractal_weight_x, fractal_weight_y, fractal_weight_z
+    (all default 1.0; configurable for anisotropic horizontal correlation)
+
+================================================================================
+SECTION 5: VALIDATION RULES
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1  Numerical Stability
+--------------------------------------------------------------------------------
+CFL time step:
+  Δt = 1 / (c · √(1/dx² + 1/dy² + 1/dz²))
+  N_iterations = ceil(T / Δt)
+  WARNING if N > 20,000 (slow); ERROR if N > 50,000 (very slow)
+
+Debye τ > Δt:
+  Every Debye relaxation time must satisfy τ > Δt_CFL.
+  Validated for all poles before writing #add_dispersion_debye.
+
+Nyquist / mesh resolution:
+  f_max     = f_center × BW_multiplier[waveform]
+  λ_min     = c / (f_max · √(ε_r_max))
+  REQUIRED  : cell_size ≤ λ_min / 10
+  Also checked at waveform-bandwidth level for highest frequency content.
+
+PML vs domain size:
+  2 × pml_cells < domain_cells   (per axis; gprMax hard requirement)
+
+--------------------------------------------------------------------------------
+5.2  Physical Bounds on Material Parameters
+--------------------------------------------------------------------------------
+  ε_r    ≥ 1.0    (physical permittivity)
+  σ      ≥ 0      (no negative conductivity)
+  μ_r    ≥ 1.0    (physical permeability)
+  σ_m    ≥ 0      (no negative magnetic loss)
+
+Soil texture integrity:
+  |sand + silt + clay - 100| < 0.01
+
+Density ordering:
+  ρ_bulk < ρ_particle
+
+Porosity physical range:
+  0 < P < 1
+
+Water content vs pore space:
+  θ_v ≤ porosity   (cannot hold more water than pore volume)
+
+--------------------------------------------------------------------------------
+5.3  Model-Specific Parameter Bounds
+--------------------------------------------------------------------------------
+Peplinski (0.3–1.3 GHz):
+  θ_v   ≤ 0.30
+  sand  ∈ [15, 50]%
+  clay  ∈ [5, 20]%
+  silt  ∈ [35, 65]%
+
+Dobson (1.4–18 GHz):
+  θ_v   ≤ 0.50
+  (no texture constraints)
+
+Mironov (0.6–18 GHz):
+  θ_v   ≤ 0.45
+
+CRIM (no restriction):
+  No frequency or texture constraints
+
+Waveform center frequency must fall within the selected model's validity band.
+Texture ranges can be clamped to model-valid windows via clamp_texture_to_model().
+
+--------------------------------------------------------------------------------
+5.4  Waveform Validation
+--------------------------------------------------------------------------------
+Valid kinds: gaussian, gaussiandot, gaussiandotnorm, gaussiandotdot,
+             gaussiandotdotnorm, ricker, gaussianprime, gaussiandoubleprime,
+             sine, contsine
+
+  center_freq_hz > 0
+  amplitude must be finite
+  center_freq_hz must lie within selected model's frequency band
+
+--------------------------------------------------------------------------------
+5.5  Geometry & Placement
+--------------------------------------------------------------------------------
+Antenna placement vs PML (all 3 axes):
+  REQUIRED: source position ≥ (pml_cells + 15) × cell_size from PML boundary
+
+Layer thickness:
+  Each layer must span ≥ 3 cells for physically meaningful FDTD resolution.
+
+Object minimum resolution:
+  Objects need ≥ 10 cells across their smallest dimension (realistic scattering).
+
+Object distance from PML:
+  Objects should be ≥ (pml_cells + 15) cells from PML boundary (WARNING only).
+
+Domain alignment:
+  domain_x, domain_y, domain_z must each be integer multiples of cell size.
+
+Rx array step size:
+  rx_array step ≥ cell size (gprMax hard requirement).
+
+Layer gap detection:
+  WARNING if total layer thicknesses do not fill the soil portion of the domain.
+
+--------------------------------------------------------------------------------
+5.6  Simulation Setup
+--------------------------------------------------------------------------------
+Time window:
+  t_min = 2 × depth / (c / √(ε_r_max))
+  time_window ≥ t_min
+
+Source timing:
+  Both start time and end time are mandatory (not optional).
+
+Reserved material names (rejected):
+  pec, free_space, grass, water
+
+Memory estimate:
+  total_cells ≈ (domain_x/dx) × (domain_y/dy) × (domain_z/dz)
+  memory_MB   ≈ total_cells × 146 bytes + 50 MB baseline
+  (96 bytes fields + 24 ID + 22 solid/rigid + 4 PML overhead)
+  WARNING issued on large domains.
+
+Texture feasibility:
+  lower_sum ≤ 100 AND upper_sum ≥ 100
+  (verifies that sampling ranges can produce valid sand+silt+clay=100 draws)
+
+Water content clamping:
+  θ_v range clamped to model's maximum before sampling.
+
+================================================================================
+SECTION 6: KEY PHYSICS FIXES & THEIR RATIONALE
+================================================================================
+
+Fix #1  — Air buffer minimum: (pml + 15 + 5) cells above source.
+Fix #2  — Y-axis antenna clearance added (PML margin check).
+Fix #3  — Bounding-box PML validation for placed objects.
+Fix #4  — CRIM/Dobson: single-pole Debye dispersion for wet layers.
+Fix #5  — Mironov: two-pole Debye decomposition with approximation warning.
+Fix #6  — Solid permittivity: Dobson (1985) Eq. 22 used consistently across
+           all model branches (ensures identical ε_solid for identical inputs).
+Fix #7  — Warning if layer stack does not fill domain soil depth.
+Fix #8  — Source timing: both start and end time required (not optional).
+Fix #9  — Debye τ > Δt_CFL validated for every pole before output.
+Fix #10 — Fractal bin count set to 50 (not 3) for realistic heterogeneity.
+Fix #11 — Reserved material names (pec, free_space, grass, water) rejected.
+Fix #12 — Water relaxation time: τ = 9.231×10⁻¹² s (matches gprMax exactly).
+Fix #13 — Organic matter: heuristic ε_r and σ corrections added.
+Fix #16 — Fractal anisotropy: configurable weight_x, weight_y, weight_z.
+
+================================================================================
+SECTION 7: SUMMARY COUNTS
+================================================================================
+
+  Physical constants              :  3
+  Dielectric mixing models        :  4   (CRIM, Mironov, Peplinski, Dobson)
+  Supporting physics functions    : 10+
+  Validation rule categories      :  6
+  Individual validation checks    : 26+
+  Documented physics-critical fixes: 14
+
+================================================================================
