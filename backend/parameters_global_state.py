@@ -8,9 +8,10 @@ Provides:
   via HTTP against a central, durable state.
 
 Sections:
+  dataset_config  -> DatasetConfig
   layers          -> ExtractedLayers
-  antenna_waveform -> ExtractedAntennaWaveform
-  model_config    -> ExtractedModelConfig
+  waveform        -> ExtractedWaveform
+  antenna         -> ExtractedAntenna
   advanced_params -> ExtractedAdvancedParams
 """
 
@@ -33,9 +34,10 @@ from pydantic import BaseModel
 from langchain_core.tools import tool
 
 from schema import (
+    DatasetConfig,
     ExtractedLayers,
-    ExtractedAntennaWaveform,
-    ExtractedModelConfig,
+    ExtractedWaveform,
+    ExtractedAntenna,
     ExtractedAdvancedParams,
 )
 from db.db import upsert_extraction_section, batch_insert_simulations, bulk_update_signals
@@ -52,9 +54,10 @@ BASE_URL = f"http://{API_HOST}:{API_PORT}"
 
 # Section name -> Pydantic model class
 SECTION_SCHEMAS = {
+    "dataset_config": DatasetConfig,
     "layers": ExtractedLayers,
-    "antenna_waveform": ExtractedAntennaWaveform,
-    "model_config": ExtractedModelConfig,
+    "waveform": ExtractedWaveform,
+    "antenna": ExtractedAntenna,
     "advanced_params": ExtractedAdvancedParams,
 }
 
@@ -312,7 +315,7 @@ def start_parameter_server() -> None:
 
 @tool
 def post_parameters(
-    section: Annotated[str, "Section name: 'layers', 'antenna_waveform', 'model_config', or 'advanced_params'"],
+    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'waveform', 'antenna', or 'advanced_params'"],
     payload: Annotated[str, "JSON string of the parameters to store for this section"],
 ) -> str:
     """Store (create or replace) the extracted parameters for a given section.
@@ -325,16 +328,17 @@ def post_parameters(
 
 
 _SECTION_AGENT_NAMES = {
+    "dataset_config": "Dataset Config Agent",
     "layers": "Layer Extraction Agent",
-    "antenna_waveform": "Antenna & Waveform Agent",
-    "model_config": "Model & Domain Agent",
+    "waveform": "Waveform Agent",
+    "antenna": "Antenna Agent",
     "advanced_params": "Advanced Parameters Agent",
 }
 
 
 @tool
 def get_parameters(
-    section: Annotated[str, "Section name: 'layers', 'antenna_waveform', 'model_config', or 'advanced_params'"],
+    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'waveform', 'antenna', or 'advanced_params'"],
 ) -> str:
     """Retrieve the currently stored parameters for a given section.
 
@@ -360,7 +364,7 @@ def get_parameters(
 
 @tool
 def patch_parameters(
-    section: Annotated[str, "Section name: 'layers', 'antenna_waveform', 'model_config', or 'advanced_params'"],
+    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'waveform', 'antenna', or 'advanced_params'"],
     updates: Annotated[str, "JSON string of the fields to update (partial update, merged with existing data)"],
 ) -> str:
     """Partially update the stored parameters for a given section.

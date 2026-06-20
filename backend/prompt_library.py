@@ -1,4 +1,10 @@
-from backend.schema import ExtractedLayers,ExtractedAdvancedParams,ExtractedModelConfig, ExtractedAntennaWaveform
+from backend.schema import (
+    DatasetConfig,
+    ExtractedLayers,
+    ExtractedWaveform,
+    ExtractedAntenna,
+    ExtractedAdvancedParams,
+)
 import json
 
 def schema_to_json(Schema):
@@ -56,71 +62,70 @@ LAYER_VALIDATION_PROMPT = _make_validation_prompt(
     domain_description="soil layer parameters",
     section="layers",
     tool_guidance="""\
-1. **`validate_layer`** — Call once **per layer**. Pass only the non-range \
-optional fields: organic_fraction, porewater_sigma_Sm. These are single \
-values (not ranges) and are checked for basic bounds (>= 0).
-
-2. **`validate_material_names`** — Call once with the list of ALL layer names \
+1. **`validate_material_names`** — Call once with the list of ALL layer names \
 (from all layers that have a name). Checks that no name contains whitespace \
 (gprMax splits command lines on spaces, so material names with spaces cause \
 parse errors) and that names are unique (case-insensitive). Extract the \
 `name` field from each layer in the collected parameters.
 
-**Note on range-based parameters**: Thickness, sand/silt/clay percentages, \
-theta_v, bulk_density, particle_density, and porosity are extracted as \
-min/max ranges. Cross-checks on these (texture sum = 100, density ordering, \
-theta_v <= porosity, model-specific bounds) are enforced automatically at \
-dataset sampling time — do NOT attempt to validate them here.""",
+**Note on range-based parameters**: Thickness, sand/clay percentages, \
+theta_v, bulk_density, and particle_density are extracted as min/max ranges. \
+The schema already rejects min > max, sand_min + clay_min > 100, and a \
+moisture envelope that exceeds the loosest porosity. Remaining cross-checks \
+(per-sample texture closure with silt, density ordering, theta_v <= porosity) \
+are enforced automatically at dataset sampling time — do NOT attempt to \
+validate them here. Silt is NOT collected; it is derived as 100 - sand - clay \
+downstream.""",
+)
+
+
+WAVEFORM_VALIDATION_PROMPT = _make_validation_prompt(
+    domain_description="waveform parameters",
+    section="waveform",
+    tool_guidance="""\
+1. **`validate_waveform`** — Call once with: kind (waveform_kind), \
+center_freq_hz (waveform_center_freq_hz), amplitude (waveform_amplitude). \
+Checks that the waveform kind is supported and the centre frequency / \
+amplitude are physically sensible. (Frequency-band feasibility against the \
+Peplinski soil model is checked downstream, not here.)""",
 )
 
 
 ANTENNA_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="antenna and waveform parameters",
-    section="antenna_waveform",
+    domain_description="antenna parameters",
+    section="antenna",
     tool_guidance="""\
-1. **`validate_antenna`** — Call once with the antenna configuration: kind, \
-axis, source_start_time, source_end_time, resistance, tx_rx_offset_m. \
-For cell_size_m, use `get_parameters("model_config")` to retrieve \
-max_cell_m if available.
-2. **`validate_waveform`** — Call once with: kind, center_freq_hz, amplitude. \
-Also pass the dielectric model from `get_parameters("model_config")` if \
-available, to check frequency-model compatibility.
-3. **`validate_antenna_placement`** — Call once with tx_x_m, rx_x_m, \
-domain_x_m, max_cell_m. Use `get_parameters("model_config")` to get \
-domain_x and max_cell_m. Skip if model_config is not yet populated.""",
+1. **`validate_antenna`** — Call once with the antenna configuration: \
+kind (antenna_kind), axis (antenna_axis), resistance, tx_rx_offset_m. \
+Note: resistance is required for antenna_kind="voltage_source" or \
+"transmission_line" and must satisfy 0 < R < 376.73 ohm (the schema already \
+enforces this — surface any remaining warnings).
+2. **`validate_antenna_placement`** — Call once with tx_x_m, rx_x_m, \
+domain_x_m, max_cell_m. Domain/cell size are DERIVED downstream and are not \
+collected in this flow, so skip this check unless you can obtain those values \
+— it is informational only at extraction time.""",
 )
 
 
-MODEL_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="simulation model and domain parameters",
-    section="model_config",
+DATASET_CONFIG_VALIDATION_PROMPT = _make_validation_prompt(
+    domain_description="dataset / run orchestration parameters",
+    section="dataset_config",
     tool_guidance="""\
-1. **`validate_model`** — Call once with: model name, f0 (center_freq_hz \
-from `get_parameters("antenna_waveform")`). Checks model name validity \
-and that frequency falls within the model's validity band. \
-Note: texture and moisture checks are enforced at sampling time, not here.
-2. **`validate_temperature`** — Call once with temperature_c.
-3. **`validate_mesh`** — Call once with: max_cell_m, center_freq_hz, \
-domain_x_m, domain_y_m, eps_r_max (estimate from soil properties), \
-waveform_kind (from `get_parameters("antenna_waveform").waveform_kind`). \
-The waveform_kind enables bandwidth-aware checking (e.g. Ricker has \
-significant energy at 2.5× centre frequency). \
-Checks Nyquist spatial sampling and domain divisibility.
-4. **`validate_time_window`** — Call once with: source_end_time_s (use an \
-estimate based on (2 * total_layer_thickness * sqrt(eps_r_max) / 3e8) * 1.2 \
-if source_end_time is not set), domain_depth_m (sum of all layer thicknesses \
-from `get_parameters("layers")`), eps_r_max.
-5. **`validate_essential_params`** — Call once with booleans: has_domain, \
-has_dx_dy_dz, has_time_window. Verifies essential gprMax params are present.
-6. **`validate_cfl`** — Call once with: dx=dy=dz=max_cell_m, \
-time_window_s (estimated from `(2 * total_layer_thickness) / (3e8 / sqrt(10))` \
-or source_end_time, whichever is larger). Note: domain_z (vertical) is \
-auto-computed from layers + air, domain_y is the crossline extent.
+There are no dedicated validation tools for this section — all of its \
+constraints (num_samples > 0, the 2D/3D literal, integer cell/PML counts) are \
+enforced by the Pydantic schema itself at POST time. There is nothing to run \
+here.
 
-**Note on range-based parameters**: Texture percentages, theta_v, densities, \
-and model-specific bounds (e.g. Peplinski sand/silt/clay ranges, moisture \
-limits) are enforced automatically at dataset sampling time — do NOT attempt \
-to validate them here.""",
+Simply confirm that:
+- `num_samples` is a positive integer.
+- `cells_per_wavelength`, `pml_cells`, `buffer_cells`, and `fractal_nbins` are \
+positive integers (10 / 10 / 10 / 50 are sensible defaults).
+- `dimensionality` is "2D" or "3D".
+
+Return **"ALL VALIDATIONS PASSED"** if these hold; otherwise list the offending \
+field so the master agent can ask the user to correct it. Do NOT validate \
+physics/domain/mesh quantities — those are DERIVED downstream from the soil \
+and waveform parameters and are not collected in this section.""",
 )
 
 
@@ -129,25 +134,26 @@ ADVANCED_VALIDATION_PROMPT = _make_validation_prompt(
     section="advanced_params",
     tool_guidance="""\
 1. **`validate_cylinder`** — Call once per cylinder. Pass: name, radius, \
-material, has_custom_material, coordinates (x1,y1,z1,x2,y2,z2), \
-domain dimensions from `get_parameters("model_config")`.
+material, has_custom_material, coordinates (x1,y1,z1,x2,y2,z2). Domain \
+dimensions are DERIVED downstream and not collected here, so pass them only \
+if known.
 2. **`validate_box`** — Call once per box. Pass: name, coordinates, material, \
-has_custom_material, domain dimensions.
+has_custom_material.
 3. **`validate_sphere`** — Call once per sphere. Pass: name, radius, material, \
-has_custom_material, centre (cx,cy,cz), domain dimensions.
+has_custom_material, centre (cx,cy,cz).
 4. **`validate_surface`** — Call once if surface roughness is configured. \
 Pass: fractal_dim, weight_x, weight_y, amplitude_m, add_water, \
 water_depth_m.
-5. **`validate_rxarray`** — Call once if receiver array is configured. \
-Pass: x1,y1,z1,x2,y2,z2,dx,dy,dz.
-6. **`validate_snapshot`** — Call once per snapshot. Pass: time_s.
-7. **`validate_custom_material`** — Call once per custom material definition. \
+5. **`validate_snapshot`** — Call once per snapshot. Pass: time_s.
+6. **`validate_custom_material`** — Call once per custom material definition. \
 Pass: eps_r, sigma, mu_r, sigma_m.
-8. **`validate_material_references`** — Call once with the list of all \
+7. **`validate_material_references`** — Call once with the list of all \
 material names used across geometry objects and whether each has a \
 custom_material definition.
-9. **`validate_simulation_metadata`** — Call once with: title, num_threads, \
-output_dir.""",
+
+**Note**: the receiver array now lives in the `antenna` section, and \
+simulation/run settings (threads, output dir, PML) live in the \
+`dataset_config` section — do NOT validate those here.""",
 )
 
 
@@ -192,9 +198,10 @@ def _make_agent_prompt(
     extra_intro="",
 ):
     section_owners = [
+        ("dataset_config", "Dataset Config Agent"),
         ("layers", "Layer Extraction Agent"),
-        ("antenna_waveform", "Antenna & Waveform Agent"),
-        ("model_config", "Model & Domain Agent"),
+        ("waveform", "Waveform Agent"),
+        ("antenna", "Antenna Agent"),
         ("advanced_params", "Advanced Parameters Agent"),
     ]
 
@@ -235,7 +242,7 @@ parameters for any section. `updates` is a JSON string of only the fields \
 to change. The section must already have been populated by its responsible \
 agent.
 
-There are four sections in the global parameter store. Each section is \
+There are five sections in the global parameter store. Each section is \
 owned by a specialist agent:
 {sections_list}
 
@@ -312,19 +319,27 @@ Peplinski model?", "suggest a range for bulk density", "what is theta_v?"\
     collect_suffix=""", \
 one layer at a time""",
     batch_descriptions="""\
-   - Batch 1: layer name (optional) and thickness range (min/max in metres)
-   - Batch 2: texture fractions — sand, silt, clay percentage ranges
-   - Batch 3: volumetric water content range (theta_v min/max, 0.0–1.0)
-   - Batch 4: optional params — density ranges (bulk_density_gcm3, \
-particle_density_gcm3), porosity range, salinity_classes (list of \
-allowed classes from: "fresh", "slightly_saline", "brackish", "saline"), \
-organic_fraction, porewater_sigma_Sm (conductivity in S/m)
+   - Batch 1: layer name (optional) and thickness range (thickness_m_min / \
+thickness_m_max, in metres)
+   - Batch 2: texture fraction ranges — sand (sand_pct_min/max) and clay \
+(clay_pct_min/max), in percent. Do NOT collect silt — it is derived as \
+100 - sand - clay downstream.
+   - Batch 3: volumetric water content range (theta_v_min / theta_v_max, \
+0.0–1.0). This is the per-layer moisture ENVELOPE; the sampler draws a \
+sub-band inside it per sample.
+   - Batch 4: density ranges — bulk_density_gcm3_min/max and \
+particle_density_gcm3_min/max (g/cm³). These are REQUIRED (porosity is \
+derived from them).
 
-   **Physics constraints** (enforce during collection):
-   - Texture fractions (sand + silt + clay) must sum to 100%
-   - theta_v must not exceed porosity (porosity ≈ 1 - bulk_density/particle_density)
-   - bulk_density must be < particle_density (typical: bulk 1.1–1.8, particle ~2.66 g/cm³)
-   - For Peplinski model: sand 15–50%, clay 5–20%, silt 35–65%, theta_v ≤ 0.30\
+   **Physics constraints** (enforce during collection — the schema also checks \
+these at store time):
+   - sand_pct_min + clay_pct_min must be ≤ 100 (leave room for silt)
+   - bulk_density must be < particle_density (typical: bulk 1.1–1.8, \
+particle ~2.66 g/cm³)
+   - theta_v_max must not exceed the loosest porosity \
+(1 - bulk_density_min/particle_density_max); water cannot exceed pore space
+   - For the Peplinski soil model: sand 15–50%, clay 5–20% (silt 35–65% \
+results), theta_v ≤ 0.30\
 """,
     skip_policy="""\
 user should explicitly tell to skip. You should not skip on your own\
@@ -333,19 +348,61 @@ phase_name="layer extraction phase",
     cross_section_examples="antenna frequency, domain size, PML cells",
 )
 
-ANTENNA_AGENT_PROMPT = _make_agent_prompt(
-    agent_title="gprMax Antenna & Waveform Configurator",
-    collecting_description="antenna and waveform parameters",
+WAVEFORM_AGENT_PROMPT = _make_agent_prompt(
+    agent_title="gprMax Waveform Configurator",
+    collecting_description="waveform parameters",
     knowledge_examples="""\
 "what is a Ricker wavelet?", \
-"what frequency should I use?", "hertzian dipole vs voltage source?", \
-"what is tx_rx_offset?"\
+"what frequency should I use?", "what does the centre frequency control?", \
+"what is source start/end time?"\
 """,
-    own_section="antenna_waveform",
-    schema_class=ExtractedAntennaWaveform,
+    own_section="waveform",
+    schema_class=ExtractedWaveform,
+    todo_items="""\
+   - Collect waveform parameters
+   - Store to parameter API
+   - Confirm completion\
+""",
+    collect_suffix="",
+    batch_descriptions="""
+   **Batch 1 — Waveform configuration:**
+   - waveform_kind: type of waveform (default: "ricker"). Valid types: \
+"ricker", "gaussian", "gaussiandot", "gaussiandotnorm", "gaussiandotdot", \
+"gaussiandotdotnorm", "gaussianprime", "gaussiandoubleprime", "sine", \
+"contsine". Note: "ricker" and "gaussiandotdot" are spectrally equivalent \
+in gprMax.
+   - waveform_amplitude: signal amplitude (default: 1.0)
+   - waveform_center_freq_hz: centre frequency in Hz (e.g. 900e6 for 900 MHz)
+   - waveform_name: descriptive name for the waveform (required)
+
+   **Batch 2 — Source timing (optional):**
+   - source_start_time: optional source start time / delay in seconds
+   - source_end_time: optional source removal time in seconds
+
+   **Frequency guidance:** this pipeline uses the Peplinski soil model, which is \
+valid for 0.3–1.3 GHz. The peak/centre frequency drives the derived band, \
+wavelength, grid size and time window downstream — collect it carefully.
+""",
+    skip_policy="""\
+the user should explicitly say to skip. Do not skip on your own\
+""",
+phase_name="waveform configuration phase",
+    cross_section_examples="soil layers, antenna offset, domain size",
+)
+
+ANTENNA_AGENT_PROMPT = _make_agent_prompt(
+    agent_title="gprMax Antenna Configurator",
+    collecting_description="antenna parameters",
+    knowledge_examples="""\
+"hertzian dipole vs voltage source?", \
+"what is tx_rx_offset?", "what is the antenna polarisation axis?", \
+"what is a receiver array?"\
+""",
+    own_section="antenna",
+    schema_class=ExtractedAntenna,
     todo_items="""\
    - Collect antenna parameters
-   - Collect waveform parameters
+   - Collect receiver placement (and optional receiver array)
    - Store to parameter API
    - Confirm completion\
 """,
@@ -353,109 +410,85 @@ ANTENNA_AGENT_PROMPT = _make_agent_prompt(
     batch_descriptions="""
    **Batch 1 — Antenna configuration:**
    - antenna_kind: type of antenna (default: "hertzian_dipole"; \
-alternative: "voltage_source")
-   - antenna_axis: polarisation axis ("x", "y", or "z"; default: "x")
-   - tx_rx_offset_m: transmitter-receiver offset in metres
-   - resistance: internal resistance in ohms (required when \
-antenna_kind="voltage_source", otherwise skip)
-   - source_start_time: optional source start time in seconds
-   - source_end_time: optional source end time in seconds
+alternatives: "voltage_source", "transmission_line")
+   - antenna_axis: polarisation axis ("x", "y", or "z"; default: "x"). \
+Conventionally perpendicular to the B-scan survey direction.
+   - tx_rx_offset_m: transmitter-receiver offset in metres (required)
+   - resistance: internal resistance in ohms. REQUIRED when \
+antenna_kind="voltage_source" or "transmission_line", and must satisfy \
+0 < R < 376.73 ohm. Skip for hertzian_dipole.
 
-   **Batch 2 — Waveform configuration:**
-   - waveform_kind: type of waveform (default: "ricker"). Valid types: \
-"ricker", "gaussian", "gaussiandot", "gaussiandotnorm", "gaussiandotdot", \
-"gaussiandotdotnorm", "gaussianprime", "gaussiandoubleprime", "sine", \
-"contsine". Note: "ricker" and "gaussiandotdot" are spectrally equivalent \
-in gprMax.
-   - waveform_amplitude: signal amplitude
-   - waveform_center_freq_hz: centre frequency in Hz (e.g. 900e6 for 900 MHz)
-   - waveform_name: optional descriptive name for the waveform
+   **Batch 2 — Receiver placement:**
+   - rx_same_height: whether the receiver is at the same height as the \
+transmitter (true/false, default: true)
+   - source_height_m: antenna height above the ground surface in metres \
+(optional — if omitted it is DERIVED downstream as ≥ half the maximum \
+wavelength)
 
-   **Frequency guidance by model:**
-   - Peplinski: 0.3–1.3 GHz
-   - Dobson: 1.4–18 GHz
-   - Mironov: 0.6–18 GHz
-   - CRIM: any frequency
-
-   **Note**: transmission_line source type is not yet supported in this pipeline. \
-Only hertzian_dipole and voltage_source are available.
+   **Batch 3 — Receiver array (optional):**
+   - rx_array: start position (x1, y1, z1), end position (x2, y2, z2), and \
+step sizes (dx, dy, dz) — all in metres. This replaces the default single \
+receiver. Skip unless the user wants a multi-receiver survey.
 """,
     skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
 """,
-phase_name="antenna/waveform configuration phase",
-    cross_section_examples="soil layers, domain size, PML cells",
+phase_name="antenna configuration phase",
+    cross_section_examples="soil layers, waveform frequency, domain size",
 )
 
-MODEL_AGENT_PROMPT = _make_agent_prompt(
-    agent_title="gprMax Model & Domain Configurator",
-    collecting_description="simulation model and domain parameters",
+DATASET_CONFIG_AGENT_PROMPT = _make_agent_prompt(
+    agent_title="gprMax Dataset Configurator",
+    collecting_description="dataset / run orchestration parameters",
     knowledge_examples="""\
-"what is the Peplinski model?", \
-"what cells_per_wavelength should I use?", "what is domain_x?", "how do I \
-choose max_cell_m?"\
+"what is cells_per_wavelength?", \
+"what are PML cells?", "how many samples should I generate?", "what is \
+fractal_nbins?"\
 """,
-    own_section="model_config",
-    schema_class=ExtractedModelConfig,
+    own_section="dataset_config",
+    schema_class=DatasetConfig,
     todo_items="""\
-   - Collect dielectric model and simulation identity
-   - Collect domain and mesh parameters
-   - Collect survey and environment parameters
+   - Collect dataset size and naming
+   - Collect FDTD grid / boundary policy
+   - Collect resolution & frequency-interpretation policy
    - Store to parameter API
    - Confirm completion\
 """,
     collect_suffix="",
     batch_descriptions="""
-   **Batch 1 — Simulation identity & dielectric model:**
-   - model: dielectric mixing model to use (e.g. "peplinski", "dobson", \
-"mironov", "crim")
-   - title: descriptive title for this simulation
+   **Batch 1 — Dataset size & naming:**
+   - num_samples: number of input files / data samples to generate \
+(required, > 0). NOTE: this is the number of .in files, NOT time samples.
+   - model_basename: base name for the #title and output filename stem \
+(default: "soil_sample")
+   - output_dir: directory for generated files (default: "./dataset")
+   - num_threads: OpenMP threads (optional; None = gprMax default)
 
-   **Batch 2 — Domain geometry:**
-   - domain_x: domain inline extent in metres (horizontal scan direction)
-   - domain_y: domain crossline extent in metres (horizontal, perpendicular to scan direction; set to one cell for 2D simulations)
-   - Note: the air space above the source is computed automatically from the
-     cell size to keep the source at least (pml + 15) cells away from the top
-     absorbing boundary — do NOT ask the user for it.
+   **Batch 2 — FDTD grid / boundary policy:**
+   - pml_cells: number of PML absorbing boundary cells (default: 10)
+   - buffer_cells: extra cells between the PML and the objects (default: 10)
+   - cells_per_wavelength: cells per minimum wavelength, the λ/N rule \
+(default: 10; higher = more accurate but slower)
+   - dimensionality: "2D" or "3D" (default: "2D")
+   - fractal_nbins: number of materials in the #soil_peplinski fractal series \
+(default: 50)
 
-   **Batch 3 — Mesh resolution:**
-   - cells_per_wavelength: number of cells per minimum wavelength \
-(typically 10–20; higher = more accurate but slower)
-   - max_cell_m: maximum cell size in metres (spatial resolution limit)
+   **Batch 3 — Resolution & frequency policy:**
+   - high_freq_factor: highest SIGNIFICANT frequency as a multiple of the \
+centre frequency, used for the λ_min / Δx resolution check (default: 3.0)
+   - center_freq_is_peak: whether the waveform's centre frequency is the gprMax \
+#waveform PEAK frequency (True) or Wang's band-centre frequency (False). \
+Default: True.
 
-   **Batch 4 — Survey & environment:**
-   - source_height_m: antenna height above ground surface in metres
-   - rx_same_height: whether receiver is at the same height as the \
-transmitter (true/false, default: true)
-   - temperature_c: ambient temperature in degrees Celsius
-   - enforce_validity: whether to enforce strict parameter validity \
-checks (true/false)
-   - num_samples: number of simulation samples to generate (for \
-dataset/batch runs)
-
-   **Batch 5 — Coordinate convention (informational, no parameters to collect):**
-   Note to agent: gprMax uses a right-handed Cartesian coordinate system.
-   In this pipeline, Z is the vertical axis (layers stacked in Z, source
-   height measured in Z). X is the inline direction. Y is the crossline
-   direction. domain_z is computed automatically from layer thicknesses
-   plus air buffer — do NOT ask the user for it.
-
-   **Model validity ranges** (inform user if relevant):
-   - Peplinski: 0.3–1.3 GHz, sand 15–50%, clay 5–20%, silt 35–65%, theta_v 0–0.30
-   - Dobson: 1.4–18 GHz, theta_v 0–0.50
-   - Mironov: 0.6–18 GHz, theta_v 0–0.45
-   - CRIM: no frequency restriction, requires porosity estimate
-
-   **Bandwidth effect on cells_per_wavelength**: A Ricker wavelet has
-   significant energy up to ~2.5x its centre frequency. The pipeline
-   automatically accounts for this when computing cell size from
-   cells_per_wavelength, so the user does not need to manually adjust.
+   **Note:** the dielectric model is fixed to **Peplinski** in this pipeline. \
+Domain size, cell size, depth, time window and source height are DERIVED \
+downstream from the soil + waveform parameters — do NOT collect them here.
 """,
     skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
 """,
-phase_name="model/domain configuration phase",
-    cross_section_examples="soil layers, antenna frequency, buried objects",
+phase_name="dataset configuration phase",
+    cross_section_examples="soil layers, waveform frequency, buried objects",
 )
 
 ADVANCED_AGENT_PROMPT = _make_agent_prompt(
@@ -471,9 +504,7 @@ fractal dimension?", "what is a snapshot?", "what is dielectric smoothing?"\
    - Ask which advanced sections to configure
    - Collect geometry objects (if wanted)
    - Collect surface roughness (if wanted)
-   - Collect receiver array (if wanted)
    - Collect snapshots (if wanted)
-   - Collect simulation settings (PML, threads, output dir)
    - Store to parameter API
    - Confirm completion\
 """,
@@ -501,25 +532,16 @@ material identifier, optional custom_material, dielectric_smoothing
 amplitude_m when add_water=true)
    - seed: optional random seed for reproducibility
 
-   **Batch 3 — Receiver array:**
-   - Start position (x1, y1, z1), end position (x2, y2, z2), step sizes \
-(dx, dy, dz) — all in metres. This replaces the default single receiver.
-
-   **Batch 4 — Snapshots:**
+   **Batch 3 — Snapshots:**
    The user may add zero or more snapshots. For each snapshot, collect:
    - time_s: snapshot time in seconds
    - filename: output filename for the snapshot
    - Optional: spatial extent (x1, y1, z1, x2, y2, z2) and resolution \
 (dx, dy, dz) — defaults to full domain at simulation resolution
 
-   **Batch 5 — Simulation settings:**
-   - pml_cells: number of PML absorbing boundary cells (optional)
-   - num_threads: number of OpenMP threads for parallel execution (optional)
-   - output_dir: directory path for simulation output files (optional)
-   - fractal_nbins: number of bins for fractal box mixing (integer ≥ 2, \
-default: 3). Only applies to Peplinski model (gprMax's built-in \
-#soil_peplinski). For CRIM, Dobson, and Mironov, the pipeline automatically \
-uses 1 bin (single material per fractal_box). Must be > 1 for Peplinski.
+   **Moved elsewhere (do NOT collect here):** the receiver array is now part \
+of the `antenna` section, and run settings (PML cells, threads, output dir, \
+fractal_nbins) are part of the `dataset_config` section.
 """,
     skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\

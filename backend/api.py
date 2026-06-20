@@ -35,9 +35,10 @@ for _p in [_project_root, _ds_dir, _gprmax_root]:
         sys.path.insert(0, _p)
 
 from parameters_global_state import start_parameter_server, BASE_URL
+from extraction_agents.dataset_config_extraction import agent as dataset_config_agent
 from extraction_agents.layer_extraction import agent as layer_agent
+from extraction_agents.waveform_extraction import agent as waveform_agent
 from extraction_agents.antenna_extraction import agent as antenna_agent
-from extraction_agents.model_specifics_extraction import agent as model_agent
 from extraction_agents.advanced_params_extraction import agent as advanced_agent
 from dataset_sampling import dataset_generation_agent as _ds_gen_mod
 dataset_agent = _ds_gen_mod.agent
@@ -57,6 +58,14 @@ logger = logging.getLogger(__name__)
 
 STAGES = [
     {
+        "agent": dataset_config_agent,
+        "name": "Dataset Configuration",
+        "init_message": (
+            "I need to configure the dataset/run parameters for a gprMax "
+            "simulation batch. Please begin the dataset configuration process."
+        ),
+    },
+    {
         "agent": layer_agent,
         "name": "Layer Extraction",
         "init_message": (
@@ -65,19 +74,19 @@ STAGES = [
         ),
     },
     {
-        "agent": antenna_agent,
-        "name": "Antenna & Waveform",
+        "agent": waveform_agent,
+        "name": "Waveform Extraction",
         "init_message": (
-            "I need to configure the antenna and waveform for a gprMax simulation. "
-            "Please begin the antenna/waveform parameter extraction process."
+            "I need to configure the waveform for a gprMax simulation. "
+            "Please begin the waveform parameter extraction process."
         ),
     },
     {
-        "agent": model_agent,
-        "name": "Model & Domain",
+        "agent": antenna_agent,
+        "name": "Antenna Extraction",
         "init_message": (
-            "I need to configure the simulation model and domain parameters for a "
-            "gprMax simulation. Please begin the model/domain parameter extraction process."
+            "I need to configure the antenna for a gprMax simulation. "
+            "Please begin the antenna parameter extraction process."
         ),
     },
     {

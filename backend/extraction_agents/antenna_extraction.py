@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from backend.rag import rag_search
 from backend.prompt_library import RAG_SUBAGENT_PROMPT, ANTENNA_AGENT_PROMPT, ANTENNA_VALIDATION_PROMPT
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
-from backend.validation_tools import validate_antenna, validate_waveform, validate_antenna_placement
+from backend.validation_tools import validate_antenna, validate_antenna_placement
 
 dotenv.load_dotenv()
 
@@ -46,13 +46,12 @@ rag_subagent = {
 validation_subagent = {
     "name": "validation-agent",
     "description": (
-        "Validates antenna and waveform parameters. Checks antenna type/axis, "
-        "waveform kind/frequency, Tx/Rx placement relative to domain edges, "
-        "and frequency-model compatibility. Call after collecting parameters, "
-        "before storing."
+        "Validates antenna parameters. Checks antenna type/axis, resistance "
+        "bounds for voltage_source/transmission_line, and Tx/Rx placement. "
+        "Call after collecting parameters, before storing."
     ),
     "system_prompt": ANTENNA_VALIDATION_PROMPT,
-    "tools": [validate_antenna, validate_waveform, validate_antenna_placement, get_parameters],
+    "tools": [validate_antenna, validate_antenna_placement, get_parameters],
 }
 
 # ---------------------------------------------------------------------------
@@ -82,15 +81,15 @@ if __name__ == "__main__":
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
 
     # Kick off with the initial request
-    print("Starting antenna & waveform extraction agent...\n")
+    print("Starting antenna extraction agent...\n")
     result = agent.invoke(
         {
             "messages": [
                 HumanMessage(
                     content=(
-                        "I need to configure the antenna and waveform for a "
-                        "gprMax simulation. Please begin the antenna/waveform "
-                        "parameter extraction process."
+                        "I need to configure the antenna for a gprMax "
+                        "simulation. Please begin the antenna parameter "
+                        "extraction process."
                     )
                 )
             ]
