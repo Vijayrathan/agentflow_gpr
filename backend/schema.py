@@ -4,6 +4,41 @@ from typing import Optional, List, Dict, Any, Tuple, Literal
 # Resistance bound for #transmission_line / #voltage_source (exclusive upper bound).
 MAX_TL_RESISTANCE_OHM = 376.73
 
+# The pipeline emits 2D TMz models as a one-cell-thick z domain. A scalar
+# gprMax #pml_cells value would also apply to z and fail because nz == 1, so the
+# extracted pml_cells value is treated as the in-plane PML thickness and z faces
+# are forced to zero in the effective gprMax command.
+THIN_2D_NZ_CELLS = 1
+
+
+def validate_gprmax_pml_profile(
+    pml_cells: Tuple[int, int, int, int, int, int],
+    *,
+    nx: Optional[int] = None,
+    ny: Optional[int] = None,
+    nz: Optional[int] = None,
+) -> None:
+    """Validate a six-face gprMax PML profile against known axis cell counts.
+
+    gprMax rejects a PML when the opposing PML faces consume the whole axis. For
+    symmetric PML values this is the familiar 2*pml >= n_axis condition.
+    Unknown axes are skipped because their cell counts are derived downstream.
+    """
+    axis_specs = (
+        ("x", pml_cells[0], pml_cells[3], nx),
+        ("y", pml_cells[1], pml_cells[4], ny),
+        ("z", pml_cells[2], pml_cells[5], nz),
+    )
+    for axis, lower, upper, cells in axis_specs:
+        if lower < 0 or upper < 0:
+            raise ValueError(f"PML cells for {axis} faces must be >= 0")
+        if cells is not None and lower + upper >= cells:
+            raise ValueError(
+                f"gprMax rejects PML on {axis}: lower+upper PML cells "
+                f"({lower + upper}) >= n{axis} ({cells}); for symmetric PML this "
+                "is the 2*pml_cells >= n_axis rule"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Core component schemas (used in final GprSchema)
@@ -163,7 +198,7 @@ class GprSchema(BaseModel):
 # These are the ONLY parameters the extraction agents collect. Everything the
 # physics fixes (Peplinski eps/sig, peak frequency, wavelengths, grid, domain,
 # depth, time window) is DERIVED downstream, never collected here. See
-# temp_schema_file.py for the full pipeline / derive-stage documentation.
+# ENTIRE_MIGRATION.md for the full pipeline / derive-stage documentation.
 #
 # Sections (one per agent):
 #   dataset_config   -> DatasetConfig
@@ -185,20 +220,33 @@ class DatasetConfig(BaseModel):
     num_threads: Optional[int] = None      # OpenMP threads; None -> gprMax default
 
     # FDTD boundary / grid policy (enter the GLOBAL derive downstream)
-    pml_cells: int = 10                    # gprMax default; sized into the domain
-    buffer_cells: int = 10                 # extra cells between PML and objects
-    cells_per_wavelength: int = 10         # lambda/10 rule-of-thumb
+    pml_cells: int = Field(10, ge=0)       # gprMax default; in-plane for 2D
+    buffer_cells: int = Field(10, ge=0)    # extra cells between PML and objects
+    cells_per_wavelength: int = Field(10, gt=0)  # lambda/10 rule-of-thumb
     dimensionality: Literal["2D", "3D"] = "2D"
 
     # Resolution policy: highest SIGNIFICANT frequency = factor * centre freq.
-    high_freq_factor: float = 3.0
+    high_freq_factor: float = Field(3.0, gt=0)
 
     # Does waveform_center_freq_hz mean the PEAK freq (what gprMax's #waveform
     # takes) or Wang's BAND-CENTRE freq? Pin it down once here.
     center_freq_is_peak: bool = True
 
     # Soil build: #soil_peplinski via #fractal_box needs a material count.
-    fractal_nbins: int = 50
+    fractal_nbins: int = Field(50, gt=0)
+
+    def gprmax_pml_cells(self) -> Tuple[int, int, int, int, int, int]:
+        """Six-face #pml_cells tuple in gprMax order: x0 y0 z0 xmax ymax zmax."""
+        p = self.pml_cells
+        if self.dimensionality == "2D":
+            return (p, p, 0, p, p, 0)
+        return (p, p, p, p, p, p)
+
+    @model_validator(mode="after")
+    def _check_pml_policy(self):
+        known_nz = THIN_2D_NZ_CELLS if self.dimensionality == "2D" else None
+        validate_gprmax_pml_profile(self.gprmax_pml_cells(), nz=known_nz)
+        return self
 
 
 class ExtractedLayerParams(BaseModel):
@@ -325,6 +373,46 @@ class ExtractedAdvancedParams(BaseModel):
     spheres: Optional[List[SphereSchema]] = None
 
 
+# ---------------------------------------------------------------------------
+# Variable buried-target ranges (collected by the early target-range mini-stage,
+# BEFORE the soil draw). The target geometry is DRAWN per sample over these
+# ranges; only its size/extent affect the global grid (its material does not
+# feed the eps_r corners). Cylinders only for now; box/sphere are future.
+# ---------------------------------------------------------------------------
+
+class CylinderTargetRange(BaseModel):
+    """Per-sample sampling range for a buried cylinder target (2D: a disc of the
+    given radius in the x-y plane, axis along the thin z). x_center/depth are
+    absolute-metre ranges; depth is measured BELOW the ground surface."""
+    name: str = "target"
+    material: str = "pec"
+    x_center_min_m: float
+    x_center_max_m: float
+    depth_min_m: float           # depth below ground surface
+    depth_max_m: float
+    radius_min_m: float
+    radius_max_m: float
+
+    @model_validator(mode="after")
+    def _check_ranges(self):
+        for lo, hi, label in [
+            (self.x_center_min_m, self.x_center_max_m, "x_center"),
+            (self.depth_min_m, self.depth_max_m, "depth"),
+            (self.radius_min_m, self.radius_max_m, "radius"),
+        ]:
+            if lo > hi:
+                raise ValueError(f"{label}: min ({lo}) > max ({hi})")
+        if self.radius_min_m <= 0:
+            raise ValueError(f"radius_min_m must be > 0 (got {self.radius_min_m})")
+        return self
+
+
+class ExtractedTargetRanges(BaseModel):
+    """Output of the target-range mini-stage (collected right after layers)."""
+    cylinder: Optional[CylinderTargetRange] = None
+    # box / sphere target ranges are future work (stubbed); cylinders only now.
+
+
 #the smallest target feature must resolve to ≥10 cells, which can tighten Δx below λmin/10, and target extents enlarge the domain
 
 # ---------------------------------------------------------------------------
@@ -368,10 +456,26 @@ class SampledLayer(BaseModel):
         return self
 
 
+class SampledTarget(BaseModel):
+    """One concrete buried target drawn for a sample (cylinder only for now).
+
+    x_center_m/depth_m/radius_m are absolute metres; depth is BELOW the ground
+    surface. The absolute y of the centre is resolved at placement time once the
+    global derive fixes the surface (y_center = ground_y - depth).
+    """
+    kind: Literal["cylinder"] = "cylinder"
+    name: str = "target"
+    material: str = "pec"
+    x_center_m: float
+    depth_m: float
+    radius_m: float
+
+
 class SampledSample(BaseModel):
-    """One drawn sample: concrete values for every layer."""
+    """One drawn sample: concrete values for every layer (+ optional target)."""
     sample_id: int
     layers: List[SampledLayer]
+    target: Optional[SampledTarget] = None
 
 
 # ---------------------------------------------------------------------------
@@ -396,12 +500,20 @@ class DerivedSample(BaseModel):
 
 class GlobalEpsAggregate(BaseModel):
     """eps_r corners aggregated across all sampled layers (soil only; free space
-    eps=1 is folded in later at the global-derive stage)."""
+    eps=1 is folded in later at the global-derive stage).
+
+    The target corners (size/extent) are aggregated in the SAME per-sample pass:
+    they are size-only — the target material does NOT feed eps_r_max/min.
+    """
     eps_r_max: float    # max wettest-bin eps over all sample-layers -> finest dx
     eps_r_min: float    # min driest-bin eps over all sample-layers  -> largest domain
     num_samples: int
     frequency_hz: float
     nbins: int
+    # Buried-target corners (None when no target was drawn):
+    smallest_feature_global_m: Optional[float] = None   # min 2*radius   -> tightens dx
+    largest_extent_global_m: Optional[float] = None      # max 2*radius   -> enlarges domain_x
+    deepest_target_bottom_global_m: Optional[float] = None  # max depth+radius -> enlarges depth_z
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +535,17 @@ class GlobalDerived(BaseModel):
     surface_xy_m: float
     source_height_m: float
     depth_z_m: float
-    domain_x_m: float
-    domain_y_m: float        # vertical: air gap + soil + buffers + PML
+    domain_x_m: float        # snapped up to an integer number of cells
+    domain_y_m: float        # vertical: air gap + soil + buffers + PML (snapped)
     dt_s: float
     time_window_s: float
     peplinski_gate_ok: bool
+    # Static geometry — derived ONCE, identical for every sample:
+    ground_y_m: float        # ground surface y = bottom pad + depth_z
+    tx_x_m: float            # transmitter x (= domain_x/2 - tx_rx_offset/2)
+    rx_x_m: float            # receiver x   (= domain_x/2 + tx_rx_offset/2)
+    tx_y_m: float            # transmitter height = ground_y + source_height
+    rx_y_m: float            # receiver height (= tx_y if rx_same_height)
 
 
 # ---------------------------------------------------------------------------

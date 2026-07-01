@@ -10,9 +10,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from backend.rag import rag_search
-from backend.prompt_library import RAG_SUBAGENT_PROMPT, ANTENNA_AGENT_PROMPT, ANTENNA_VALIDATION_PROMPT
+from backend.prompt_library import RAG_SUBAGENT_PROMPT, ANTENNA_AGENT_PROMPT
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
-from backend.validation_tools import validate_antenna, validate_antenna_placement
 
 dotenv.load_dotenv()
 
@@ -40,27 +39,15 @@ rag_subagent = {
 }
 
 # ---------------------------------------------------------------------------
-# Validation Sub-Agent
-# ---------------------------------------------------------------------------
-
-validation_subagent = {
-    "name": "validation-agent",
-    "description": (
-        "Validates antenna parameters. Checks antenna type/axis, resistance "
-        "bounds for voltage_source/transmission_line, and Tx/Rx placement. "
-        "Call after collecting parameters, before storing."
-    ),
-    "system_prompt": ANTENNA_VALIDATION_PROMPT,
-    "tools": [validate_antenna, validate_antenna_placement, get_parameters],
-}
-
-# ---------------------------------------------------------------------------
 # Build & Run
+#   No validation subagent: antenna sanity (axis, resistance bounds) is
+#   schema-enforced at POST time; Tx/Rx placement is derived and validated
+#   downstream in global_validation.
 # ---------------------------------------------------------------------------
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent, validation_subagent],
+    subagents=[rag_subagent],
     system_prompt=ANTENNA_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]

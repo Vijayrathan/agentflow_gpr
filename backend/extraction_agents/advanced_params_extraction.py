@@ -20,13 +20,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from backend.rag import rag_search
-from backend.prompt_library import ADVANCED_AGENT_PROMPT, RAG_SUBAGENT_PROMPT, ADVANCED_VALIDATION_PROMPT
+from backend.prompt_library import ADVANCED_AGENT_PROMPT, RAG_SUBAGENT_PROMPT
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
-from backend.validation_tools import (
-    validate_surface, validate_sphere, validate_snapshot,
-    validate_box, validate_cylinder,
-    validate_custom_material, validate_material_references,
-)
 
 
 dotenv.load_dotenv()
@@ -56,33 +51,15 @@ rag_subagent = {
 }
 
 # ---------------------------------------------------------------------------
-# Validation Sub-Agent
-# ---------------------------------------------------------------------------
-
-validation_subagent = {
-    "name": "validation-agent",
-    "description": (
-        "Validates advanced geometry parameters. Checks buried objects "
-        "(cylinders, boxes, spheres) for valid dimensions, surface roughness, "
-        "snapshots, custom materials, and material references. Call after "
-        "collecting parameters, before storing."
-    ),
-    "system_prompt": ADVANCED_VALIDATION_PROMPT,
-    "tools": [
-        validate_surface, validate_cylinder, validate_box, validate_sphere,
-        validate_snapshot, validate_custom_material,
-        validate_material_references,
-        get_parameters,
-    ],
-}
-
-# ---------------------------------------------------------------------------
 # Build & Run
+#   No validation subagent: geometry-object structure is schema-enforced at POST
+#   time; grid-dependent placement/resolution is validated downstream in
+#   global_validation / target_placement.
 # ---------------------------------------------------------------------------
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent, validation_subagent],
+    subagents=[rag_subagent],
     system_prompt=ADVANCED_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]

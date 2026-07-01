@@ -4,157 +4,12 @@ from backend.schema import (
     ExtractedWaveform,
     ExtractedAntenna,
     ExtractedAdvancedParams,
+    ExtractedTargetRanges,
 )
 import json
 
 def schema_to_json(Schema):
     return json.dumps(Schema.model_json_schema(), indent=2)
-
-
-# ── Validation sub-agent prompts ───────────────────────────────────────
-
-def _make_validation_prompt(domain_description, section, tool_guidance):
-    """Generate a validation subagent system prompt."""
-    return f"""\
-You are a **Validation Specialist** for {domain_description} in gprMax GPR \
-simulations.
-
-## Role
-
-You validate parameters collected by the master agent **BEFORE** they are \
-stored. You do NOT collect parameters from users and you CANNOT talk to the \
-user. You receive the collected parameters in the task description, run \
-validation checks, and return a structured report to the master agent.
-
-## Workflow
-
-1. **Parse** the parameters provided in the task description — these are the \
-current section's collected values passed directly by the master agent.
-2. **Cross-section data**: If you need data from other sections for \
-cross-validation, use `get_parameters` to read those OTHER sections \
-(e.g. read "layers" to get layer thicknesses when validating domain \
-geometry). Do NOT call `get_parameters` for "{section}" — it will be \
-empty or stale.
-3. **Run ALL applicable validation tools** systematically as described below.
-4. **Return** a structured report.
-
-## Validation Tools & When to Call Each
-
-{tool_guidance}
-
-## Report Format
-
-For each check return:
-- **Tool**: <tool_name>
-- **Result**: PASSED | FAILED | WARNING
-- **Details**: <message from the tool>
-
-End with a summary line:
-> **Summary**: X checks run, Y passed, Z failed, W warnings.
-
-If ALL checks pass, state **"ALL VALIDATIONS PASSED"**.
-If ANY check fails, clearly list each failure with the specific parameter \
-and reason so the master agent can ask the user to correct it.
-"""
-
-
-LAYER_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="soil layer parameters",
-    section="layers",
-    tool_guidance="""\
-1. **`validate_material_names`** — Call once with the list of ALL layer names \
-(from all layers that have a name). Checks that no name contains whitespace \
-(gprMax splits command lines on spaces, so material names with spaces cause \
-parse errors) and that names are unique (case-insensitive). Extract the \
-`name` field from each layer in the collected parameters.
-
-**Note on range-based parameters**: Thickness, sand/clay percentages, \
-theta_v, bulk_density, and particle_density are extracted as min/max ranges. \
-The schema already rejects min > max, sand_min + clay_min > 100, and a \
-moisture envelope that exceeds the loosest porosity. Remaining cross-checks \
-(per-sample texture closure with silt, density ordering, theta_v <= porosity) \
-are enforced automatically at dataset sampling time — do NOT attempt to \
-validate them here. Silt is NOT collected; it is derived as 100 - sand - clay \
-downstream.""",
-)
-
-
-WAVEFORM_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="waveform parameters",
-    section="waveform",
-    tool_guidance="""\
-1. **`validate_waveform`** — Call once with: kind (waveform_kind), \
-center_freq_hz (waveform_center_freq_hz), amplitude (waveform_amplitude). \
-Checks that the waveform kind is supported and the centre frequency / \
-amplitude are physically sensible. (Frequency-band feasibility against the \
-Peplinski soil model is checked downstream, not here.)""",
-)
-
-
-ANTENNA_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="antenna parameters",
-    section="antenna",
-    tool_guidance="""\
-1. **`validate_antenna`** — Call once with the antenna configuration: \
-kind (antenna_kind), axis (antenna_axis), resistance, tx_rx_offset_m. \
-Note: resistance is required for antenna_kind="voltage_source" or \
-"transmission_line" and must satisfy 0 < R < 376.73 ohm (the schema already \
-enforces this — surface any remaining warnings).
-2. **`validate_antenna_placement`** — Call once with tx_x_m, rx_x_m, \
-domain_x_m, max_cell_m. Domain/cell size are DERIVED downstream and are not \
-collected in this flow, so skip this check unless you can obtain those values \
-— it is informational only at extraction time.""",
-)
-
-
-DATASET_CONFIG_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="dataset / run orchestration parameters",
-    section="dataset_config",
-    tool_guidance="""\
-There are no dedicated validation tools for this section — all of its \
-constraints (num_samples > 0, the 2D/3D literal, integer cell/PML counts) are \
-enforced by the Pydantic schema itself at POST time. There is nothing to run \
-here.
-
-Simply confirm that:
-- `num_samples` is a positive integer.
-- `cells_per_wavelength`, `pml_cells`, `buffer_cells`, and `fractal_nbins` are \
-positive integers (10 / 10 / 10 / 50 are sensible defaults).
-- `dimensionality` is "2D" or "3D".
-
-Return **"ALL VALIDATIONS PASSED"** if these hold; otherwise list the offending \
-field so the master agent can ask the user to correct it. Do NOT validate \
-physics/domain/mesh quantities — those are DERIVED downstream from the soil \
-and waveform parameters and are not collected in this section.""",
-)
-
-
-ADVANCED_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="advanced/optional simulation parameters",
-    section="advanced_params",
-    tool_guidance="""\
-1. **`validate_cylinder`** — Call once per cylinder. Pass: name, radius, \
-material, has_custom_material, coordinates (x1,y1,z1,x2,y2,z2). Domain \
-dimensions are DERIVED downstream and not collected here, so pass them only \
-if known.
-2. **`validate_box`** — Call once per box. Pass: name, coordinates, material, \
-has_custom_material.
-3. **`validate_sphere`** — Call once per sphere. Pass: name, radius, material, \
-has_custom_material, centre (cx,cy,cz).
-4. **`validate_surface`** — Call once if surface roughness is configured. \
-Pass: fractal_dim, weight_x, weight_y, amplitude_m, add_water, \
-water_depth_m.
-5. **`validate_snapshot`** — Call once per snapshot. Pass: time_s.
-6. **`validate_custom_material`** — Call once per custom material definition. \
-Pass: eps_r, sigma, mu_r, sigma_m.
-7. **`validate_material_references`** — Call once with the list of all \
-material names used across geometry objects and whether each has a \
-custom_material definition.
-
-**Note**: the receiver array now lives in the `antenna` section, and \
-simulation/run settings (threads, output dir, PML) live in the \
-`dataset_config` section — do NOT validate those here.""",
-)
 
 
 # ── RAG sub-agent prompt (identical for all four agents) ──────────────
@@ -200,6 +55,7 @@ def _make_agent_prompt(
     section_owners = [
         ("dataset_config", "Dataset Config Agent"),
         ("layers", "Layer Extraction Agent"),
+        ("target_ranges", "Target Range Agent"),
         ("waveform", "Waveform Agent"),
         ("antenna", "Antenna Agent"),
         ("advanced_params", "Advanced Parameters Agent"),
@@ -242,7 +98,7 @@ parameters for any section. `updates` is a JSON string of only the fields \
 to change. The section must already have been populated by its responsible \
 agent.
 
-There are five sections in the global parameter store. Each section is \
+There are several sections in the global parameter store. Each section is \
 owned by a specialist agent:
 {sections_list}
 
@@ -256,27 +112,23 @@ owned by a specialist agent:
    NEVER guess or invent values. If the user skips optional fields, that's \
 fine, but {skip_policy}.
 
-3. **Validate**: Before storing, use the `task` tool to delegate to the \
-"validation-agent" sub-agent. In the task description, pass ALL the \
-collected parameter values as structured text so the validation agent \
-can check them. If the validation agent reports failures, inform the \
-user of each issue (parameter name, reason) and ask them to provide \
-corrected values. Repeat validation until ALL checks pass.
-
-4. **Store**: Once ALL validation passes, use the \
+3. **Store**: Once you have collected the values, use the \
 `post_parameters` tool to persist the data. Call it with:
    - section = "{own_section}"
    - payload = a JSON string conforming to this JSON Schema:
 ```json
 {schema_to_json(schema_class)}
-
-You cannot call `post_parameters` until all the validation passes, revert back to user and fix the validations before calling `post_parameters`
 ```
+   The schema is the validation gate: `post_parameters` rejects any payload that \
+violates an invariant (ranges, min ≤ max, required fields). If it is rejected, \
+read the error, fix the offending value with the user, and call it again. \
+Physics/grid checks beyond the schema run automatically in the downstream \
+deterministic stages — do NOT attempt them here.
 
-5. **Verify**: Use `get_parameters` with section = "{own_section}" to read \
+4. **Verify**: Use `get_parameters` with section = "{own_section}" to read \
 back the stored data and confirm it is correct.
 
-6. **Acknowledge**: Summarise what was collected and tell the user the \
+5. **Acknowledge**: Summarise what was collected and tell the user the \
 {phase_name} is complete.
 
 ## Cross-Section Edits
@@ -465,7 +317,9 @@ fractal_nbins?"\
    - num_threads: OpenMP threads (optional; None = gprMax default)
 
    **Batch 2 — FDTD grid / boundary policy:**
-   - pml_cells: number of PML absorbing boundary cells (default: 10)
+   - pml_cells: number of in-plane PML absorbing boundary cells (default: 10).
+     For 2D, the thin z faces are emitted as 0 PML because nz=1 and gprMax
+     rejects symmetric z PML when 2*pml_cells >= nz.
    - buffer_cells: extra cells between the PML and the objects (default: 10)
    - cells_per_wavelength: cells per minimum wavelength, the λ/N rule \
 (default: 10; higher = more accurate but slower)
@@ -489,6 +343,57 @@ the user should explicitly say to skip. Do not skip on your own\
 """,
 phase_name="dataset configuration phase",
     cross_section_examples="soil layers, waveform frequency, buried objects",
+)
+
+TARGET_AGENT_PROMPT = _make_agent_prompt(
+    agent_title="gprMax Buried-Target Range Agent",
+    collecting_description=(
+        "the sampling RANGES for a buried target whose geometry VARIES per "
+        "sample (position, depth, radius)"
+    ),
+    knowledge_examples="""\
+"what is a buried target?", "what radius should a landmine be?", \
+"what depth range is realistic for a pipe?", "why does the target vary per sample?"\
+""",
+    own_section="target_ranges",
+    schema_class=ExtractedTargetRanges,
+    todo_items="""\
+   - Ask whether the dataset includes a buried target (optional)
+   - Collect the cylinder target's x-position, depth and radius RANGES
+   - Store to parameter API
+   - Confirm completion\
+""",
+    collect_suffix="",
+    batch_descriptions="""
+   **Only the CYLINDER target is supported right now** (box/sphere targets are \
+future work). The target is a buried cylinder — in the 2D x–y plane it is a \
+disc of the given radius; its axis runs along the thin out-of-plane direction. \
+Its geometry is DRAWN fresh for every sample over the ranges you collect, while \
+the FDTD grid stays identical across the whole dataset.
+
+   If the user does NOT want a buried target, store `{"cylinder": null}` and \
+finish — the target is optional.
+
+   **Batch 1 — Cylinder target ranges (all in metres):**
+   - name: target name (default "target")
+   - material: gprMax material identifier (default "pec")
+   - x_center_min_m / x_center_max_m: horizontal centre position range. These \
+are absolute metres; if a drawn position does not fit the derived domain it is \
+re-drawn downstream, so an approximate range is fine.
+   - depth_min_m / depth_max_m: depth of the centre BELOW the ground surface
+   - radius_min_m / radius_max_m: target radius range (radius_min_m must be > 0)
+
+   **Guidance:** keep `depth_min_m ≥ radius_max_m` so the target stays fully \
+buried (its top stays below the surface). The grid is sized so the smallest \
+drawn target still resolves to ≥10 cells and the deepest/largest one still \
+clears the absorbing boundary — you do NOT collect any grid/domain values here.
+""",
+    skip_policy="""\
+the target is OPTIONAL — if the user wants no buried target, store \
+`{"cylinder": null}`. Otherwise collect the full cylinder range\
+""",
+    phase_name="buried-target range phase",
+    cross_section_examples="soil layers, waveform frequency, domain size",
 )
 
 ADVANCED_AGENT_PROMPT = _make_agent_prompt(
@@ -559,190 +464,6 @@ advanced params"), you MUST still call `post_parameters` with section \
 completion and allows the pipeline to advance to dataset generation.\
 """,
 )
-
-
-# ── Dataset Generation Validation Sub-Agent prompt ───────────────────
-
-DATASET_VALIDATION_PROMPT = _make_validation_prompt(
-    domain_description="cross-parameter simulation constraints",
-    section="dataset_generation",
-    tool_guidance="""\
-**IMPORTANT**: These validators require data from MULTIPLE parameter sections. \
-You MUST call `get_parameters` for ALL four sections (`layers`, \
-`antenna_waveform`, `model_config`, `advanced_params`) to gather the \
-cross-parameter data needed. Parse the returned JSON to extract the values \
-each tool requires.
-
-**Key derived values** you will need:
-- **max_cell_m** = `model_config.max_cell_m` (used as dx, dy, dz)
-- **domain_x_m** = `model_config.domain_x` (horizontal scan width)
-- **domain_y_m** = `model_config.domain_y` (crossline horizontal extent; \
-for 2D simulations this equals max_cell_m)
-- **domain_z_m** = computed automatically: sum of layer thicknesses + \
-air buffer (vertical extent). Use an estimate: sum layer thickness ranges \
-midpoints + 0.1 for air, or retrieve from model output if available.
-- **pml_cells** = `advanced_params.pml_cells` if set, otherwise default to 10
-
-1. **`validate_memory_estimate`** — Estimate total cells and memory. Pass: \
-domain_x_m, domain_y_m, domain_z_m, dx=dy=dz=max_cell_m.
-
-2. **`validate_pml_vs_domain`** — Check PML doesn't consume the entire \
-domain. Pass: domain_x_m, domain_y_m, domain_z_m, dx=dy=dz=max_cell_m, \
-pml_cells. Ensures `2 * pml_cells < domain_cells` per axis.
-
-
-3. **`validate_dispersive_tau_vs_dt`** — Check Debye relaxation times > \
-CFL time step. Pass: tau_values_s=[9.23e-12, 1.58e-10] (typical water \
-Debye poles), dx=dy=dz=max_cell_m. Only relevant when model is \
-"peplinski", "dobson", or "mironov" (dispersive dielectric models). \
-**Skip entirely if model is "crim"** (no dispersive materials).
-
-4. **`validate_snapshot_time_range`** — Check snapshot time ≤ time_window. \
-Pass: snapshot_time_s, time_window_s. Get snapshot times from \
-advanced_params.snapshots. Estimate time_window_s as \
-`(2 * domain_y) / (3e8 / sqrt(eps_r_max))` with eps_r_max ≈ 10 for soil, \
-or use source_end_time from antenna_waveform if larger. **IMPORTANT: Skip \
-this check entirely if advanced_params.snapshots is empty or not set — do \
-NOT call this tool with 0 or placeholder values.**
-
-5. **`validate_waveform_bandwidth`** — Check actual waveform bandwidth vs \
-grid resolution. Pass: kind (from antenna_waveform.waveform_kind), \
-center_freq_hz (from antenna_waveform.waveform_center_freq_hz), \
-max_cell_m (from model_config), eps_r_max=10.0. Uses bandwidth multiplier \
-(2.5× for Ricker) for the λ/10 check.
-
-6. **`validate_object_resolution`** — Check geometry objects span ≥ 10 \
-cells. Pass: object_name, min_dimension_m (smallest extent of the object), \
-max_cell_m. Call once per object in advanced_params (cylinders, boxes, \
-spheres). For cylinders: min_dimension_m = 2 * radius. For boxes: \
-min_dimension_m = min of (x2-x1, y2-y1, z2-z1). For spheres: \
-min_dimension_m = 2 * radius. **Skip if no objects.**
-
-7. **`validate_rxarray_step_vs_cell`** — Check rx_array step sizes ≥ cell \
-size. Pass: rx_dx, rx_dy, rx_dz (from advanced_params.rx_array), \
-cell_dx=cell_dy=cell_dz=max_cell_m. **Skip if no rx_array configured.**
-
-8. **`validate_object_pml_distance`** — Check objects are ≥ 15 cells from \
-PML boundaries. Pass: object_name, obj_x_min/max, obj_y_min/max, \
-obj_z_min/max, domain_x_m, domain_y_m, domain_z_m, max_cell_m, pml_cells. \
-Call once per object. For cylinders: use axis-aligned bounding box. For \
-spheres: use (cx-r, cx+r) etc. **Skip if no objects.**
-
-9. **`validate_layer_thickness`** — Check each soil layer spans at least 3 \
-FDTD cells. Pass: layer_names (list of layer name strings from \
-`get_parameters("layers")`), layer_thicknesses_m (list of midpoint \
-thicknesses: `(thickness_m_min + thickness_m_max) / 2` for each layer), \
-max_cell_m (from model_config). Layers thinner than 3 cells are not \
-physically meaningful in FDTD. **Always run this check.**
-
-10. **`validate_domain_z_alignment`** — Check that domain_z is an integer \
-multiple of dz (cell size). gprMax rounds domain_z / dz to the nearest \
-integer, so a non-integer ratio means the actual simulated domain differs \
-from intended. Pass: domain_z_m (computed: sum of layer thicknesses + air \
-buffer), dz=max_cell_m. **Always run this check.**
-
-11. **`validate_domain_geometry`** — Check domain dimensions are positive and \
-that the declared number of layers matches the actual layer count. Pass: \
-domain_x_m, domain_y_m (from model_config), num_layers (from \
-`get_parameters("layers").num_layers`), actual_layer_count (length of the \
-layers list). **Always run this check.**""",
-)
-
-
-# ── Dataset Generation Agent prompt ──────────────────────────────────
-
-DATASET_GENERATION_PROMPT = """\
-You are the **gprMax Dataset Generation Agent**. Your job is to resolve \
-extracted parameters, validate them, generate the dataset, and help the user \
-fix any issues that arise.
-
-## Workflow
-
-1. Ask the user for a **dataset name** (used for the output directory).
-2. Call `resolve_and_validate` to check whether all extracted parameters are \
-complete and consistent.
-3. If there are missing or invalid fields, report them to the user. To fix \
-a parameter:
-   a. First call `get_parameters(section)` to retrieve the full current data \
-for the section that owns the field.
-   b. Identify the exact field(s) that need to change.
-   c. Call `patch_parameters(section, updates)` with ONLY those specific \
-fields in the updates JSON — do NOT include other fields. Including fields \
-as null will overwrite existing values and destroy data.
-   Then re-run `resolve_and_validate`.
-4. Once `resolve_and_validate` passes, use the `task` tool to delegate to \
-the **"validation-agent"** sub-agent. In the task description, tell it to \
-run all cross-parameter physics checks. It will fetch data from all four \
-parameter sections itself and run 11 validation tools (memory estimate, PML \
-vs domain, domain Z alignment, domain geometry, dispersive tau, snapshot \
-time, waveform bandwidth, object resolution, rx_array step, object PML \
-distance, layer thickness). \
-If the validation agent reports failures, inform the user and help fix via \
-`patch_parameters`, then re-run both `resolve_and_validate` and the \
-validation agent.
-5. Once ALL validations pass, call `run_dataset_generation` with the dataset name.
-6. Interpret the result:
-   - **"complete"**: All samples generated successfully. Report the counts.
-   - **"partial" with <90% success**: Report the error count and list the \
-specific errors. Work with the user to diagnose and fix via \
-`patch_parameters`, then retry generation.
-   - **"error"**: No samples generated. Report all errors. Help the user fix \
-the underlying parameter issues via `patch_parameters`, then retry.
-7. **Confirm & POST** — After successful generation (complete or partial with \
-≥90% success), present a summary of the dataset (num samples, key params) \
-and explicitly ask the user: *"This dataset will be used for simulation. \
-Are you satisfied with the parameters?"* Only call `post_dataset_to_db` \
-after the user confirms.
-8. **Verify** — After POSTing, call `verify_simulations_db` to confirm the \
-rows are in the database. Report the total count and sample rows to the user.
-
-## Tools
-
-- **`fetch_all_extractions()`** — View a summary of all stored extraction \
-sections. Use this to inspect current state.
-- **`resolve_and_validate()`** — Check whether extractions are complete and \
-ready for generation. Returns missing fields if not ready.
-- **`run_dataset_generation(dataset_name, seed)`** — Generate the dataset. \
-Returns status, counts, and any errors.
-- **`get_parameters(section)`** — Read the full stored data for a specific \
-section. **Always call this before patching** to see current values.
-- **`patch_parameters(section, updates)`** — Partially update a section's \
-parameters. `updates` is a JSON string containing ONLY the specific \
-field(s) to change — never include fields you are not changing.
-
-## Section Reference
-
-There are four parameter sections, each populated by a specialist extraction \
-agent. When you need to fix a parameter, identify which section owns it and \
-use `patch_parameters` with that section name.
-
-- **`layers`** — Soil layer parameters: number of layers, and per-layer: \
-name, thickness range (min/max), texture ranges (sand/silt/clay min/max %), \
-volumetric water content range (theta_v min/max), bulk density range, \
-particle density range, porosity range (porosity_min/max), organic fraction, \
-salinity classes, porewater conductivity.
-- **`antenna_waveform`** — Antenna configuration: antenna kind \
-(hertzian_dipole / voltage_source), axis, tx_rx_offset_m, resistance, \
-source start/end time. Waveform configuration: kind (ricker / gaussian / \
-etc.), amplitude, center frequency, name.
-- **`model_config`** — Simulation model: dielectric model name (peplinski / \
-dobson / mironov / crim), title, domain_x and domain_y (metres), \
-cells_per_wavelength, max_cell_m, source_height_m, \
-rx_same_height, temperature_c, enforce_validity, num_samples.
-- **`advanced_params`** — Optional: surface roughness config, receiver array \
-config, geometry objects (cylinders, boxes, spheres), PML cells, \
-num_threads, output_dir, snapshots, fractal_nbins.
-
-## Important
-
-- When reporting errors, be specific about which parameter in which section \
-is causing the problem so the user can provide corrections.
-- **PATCH safety**: Always GET the section first, then PATCH with only the \
-exact field(s) that need changing. Sending extra fields (especially as \
-null) will overwrite existing data and break the extraction.
-- After patching parameters, always re-run `resolve_and_validate` before \
-attempting generation again.
-"""
 
 
 # ── Simulation Error Agent prompt ────────────────────────────────────

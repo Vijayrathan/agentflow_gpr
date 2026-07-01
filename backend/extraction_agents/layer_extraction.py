@@ -13,8 +13,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from backend.rag import rag_search
-from backend.prompt_library import RAG_SUBAGENT_PROMPT, LAYER_AGENT_PROMPT, LAYER_VALIDATION_PROMPT
-from backend.validation_tools import validate_material_names
+from backend.prompt_library import RAG_SUBAGENT_PROMPT, LAYER_AGENT_PROMPT
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
 dotenv.load_dotenv()
 
@@ -42,28 +41,15 @@ rag_subagent = {
 }
 
 # ---------------------------------------------------------------------------
-# Validation Sub-Agent
-# ---------------------------------------------------------------------------
-
-validation_subagent = {
-    "name": "validation-agent",
-    "description": (
-        "Validates soil layer material names (no whitespace, unique). "
-        "Range-based parameters like texture, theta_v, and densities are "
-        "checked by the schema at store time and again at dataset sampling "
-        "time. Call after collecting layer parameters, before storing."
-    ),
-    "system_prompt": LAYER_VALIDATION_PROMPT,
-    "tools": [validate_material_names, get_parameters],
-}
-
-# ---------------------------------------------------------------------------
 # Layer Agent
+#   No validation subagent: layer constraints (ranges, texture closure, moisture
+#   envelope, material-name uniqueness) are enforced by the Pydantic schema at
+#   POST time and re-checked per draw in the deterministic sampler/validators.
 # ---------------------------------------------------------------------------
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent, validation_subagent],
+    subagents=[rag_subagent],
     system_prompt=LAYER_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]

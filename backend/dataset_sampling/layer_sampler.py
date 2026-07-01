@@ -22,12 +22,52 @@ from collections import Counter
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from backend.schema import ExtractedLayers, ExtractedLayerParams, SampledLayer, SampledSample
+from backend.schema import (
+    ExtractedLayers,
+    ExtractedLayerParams,
+    SampledLayer,
+    SampledSample,
+    SampledTarget,
+    CylinderTargetRange,
+)
 from backend.validation_tools_new import validate_sampled_layer
+
+# Max attempts when re-drawing a target's geometry against the (later) global
+# grid in the per-sample placement pass (Stage 7). Defined here next to the
+# draw it governs; imported by the placement module.
+MAX_TARGET_ATTEMPTS = 20
 
 
 def _round(x: float, ndigits: int = 6) -> float:
     return round(x, ndigits)
+
+
+def _draw_target(
+    target_range: CylinderTargetRange,
+    rng: random.Random,
+) -> SampledTarget:
+    """Draw one concrete buried target from its range (cylinder only).
+
+    Grid-independent: only the user's ranges constrain the draw here (no domain
+    exists yet). Position/depth are re-validated and, if needed, re-drawn against
+    the derived domain downstream (Stage 7).
+    """
+    # Dispatch on class name (not isinstance) so the check is robust to the
+    # codebase's dual import paths (`schema` vs `backend.schema` resolve to
+    # distinct module objects). Box/sphere range types would be stubbed here.
+    if type(target_range).__name__ != "CylinderTargetRange":
+        raise NotImplementedError(
+            f"Only cylinder buried targets are supported; got "
+            f"{type(target_range).__name__} (box/sphere are future work)."
+        )
+    return SampledTarget(
+        kind="cylinder",
+        name=target_range.name,
+        material=target_range.material,
+        x_center_m=_round(rng.uniform(target_range.x_center_min_m, target_range.x_center_max_m)),
+        depth_m=_round(rng.uniform(target_range.depth_min_m, target_range.depth_max_m)),
+        radius_m=_round(rng.uniform(target_range.radius_min_m, target_range.radius_max_m)),
+    )
 
 
 def _normalise(msg: str) -> str:
@@ -109,12 +149,15 @@ def sample_layers(
     num_samples: int,
     seed: Optional[int] = None,
     enforce_validity: bool = True,
+    target_range: Optional[CylinderTargetRange] = None,
 ) -> Tuple[List[SampledSample], List[str]]:
     """Draw `num_samples` concrete parameter sets over the extracted layer ranges.
 
-    Returns (samples, warnings). Non-blocking warnings from the accepted draws
-    (e.g. texture outside the Peplinski calibration range) are grouped across all
-    draws and counted, so they surface here at draw time instead of being dropped.
+    When `target_range` is given, a buried target is drawn per sample alongside
+    the soil (grid-independent draw; placement against the domain is validated
+    in Stage 7). Returns (samples, warnings). Non-blocking warnings from the
+    accepted draws (e.g. texture outside the Peplinski calibration range) are
+    grouped across all draws and counted, so they surface here at draw time.
     """
     if num_samples < 1:
         raise ValueError(f"num_samples must be >= 1, got {num_samples}")
@@ -131,7 +174,8 @@ def sample_layers(
             n_layer_records += 1
             for m in warnings:
                 warn_counts[_normalise(m)] += 1
-        samples.append(SampledSample(sample_id=i, layers=layers))
+        target = _draw_target(target_range, rng) if target_range is not None else None
+        samples.append(SampledSample(sample_id=i, layers=layers, target=target))
 
     warnings_summary = [
         f"[{n}/{n_layer_records} sample-layers] {msg}"
@@ -188,13 +232,15 @@ def sample_and_write(
     seed: Optional[int] = None,
     enforce_validity: bool = True,
     filename: str = "sampled_layers.json",
+    target_range: Optional[CylinderTargetRange] = None,
 ) -> Tuple[List[SampledSample], str, List[str]]:
-    """Sample the layer ranges and persist the draws.
+    """Sample the layer ranges (and optional buried target) and persist the draws.
 
     Returns (samples, json_path, warnings).
     """
     samples, warnings = sample_layers(
-        extracted, num_samples, seed=seed, enforce_validity=enforce_validity
+        extracted, num_samples, seed=seed, enforce_validity=enforce_validity,
+        target_range=target_range,
     )
     path = write_samples(samples, output_dir, warnings=warnings, filename=filename)
     return samples, path, warnings

@@ -1,3 +1,16 @@
+"""
+Buried-target range extraction (early mini-stage).
+
+Runs right after the layer stage and BEFORE the per-sample draw. It collects the
+sampling RANGES for a buried cylinder target whose geometry varies per sample
+(x-position, depth, radius) and validates against the ExtractedTargetRanges /
+CylinderTargetRange schema, then posts the `target_ranges` section.
+
+Cylinders only for now (box/sphere are future). All grid-dependent placement
+checks are DERIVED/validated downstream once the global grid exists — nothing
+about the domain is collected here.
+"""
+
 import os
 import sys
 import uuid
@@ -10,7 +23,10 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 from backend.rag import rag_search
-from backend.prompt_library import RAG_SUBAGENT_PROMPT, WAVEFORM_AGENT_PROMPT
+from backend.prompt_library import (
+    RAG_SUBAGENT_PROMPT,
+    TARGET_AGENT_PROMPT,
+)
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
 
 dotenv.load_dotenv()
@@ -21,16 +37,11 @@ llm = ChatOpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
 )
 
-# ---------------------------------------------------------------------------
-# RAG Sub-Agent
-# ---------------------------------------------------------------------------
-
 rag_subagent = {
     "name": "knowledge-agent",
     "description": (
-        "Geophysics knowledge expert. Answers questions about soil properties, "
-        "dielectric models (Peplinski, Topp, etc.), GPR parameters, clay/sand/silt "
-        "characteristics, bulk density, volumetric water content, and related topics. "
+        "Geophysics knowledge expert. Answers questions about buried targets, "
+        "GPR survey geometry, realistic target depths/radii, and related topics. "
         "Searches the knowledge base first; falls back to domain expertise if needed."
     ),
     "system_prompt": RAG_SUBAGENT_PROMPT,
@@ -39,16 +50,17 @@ rag_subagent = {
 
 # ---------------------------------------------------------------------------
 # Build & Run
-#   No validation subagent: waveform sanity is schema-enforced at POST time; the
-#   waveform/Peplinski-band gate runs downstream (sample_validation).
+#   No validation subagent: CylinderTargetRange constraints (each min <= max,
+#   radius_min_m > 0) are schema-enforced at POST time; grid-dependent placement
+#   is validated downstream once the global grid is derived (target_placement).
 # ---------------------------------------------------------------------------
 
 agent = create_deep_agent(
     model=llm,
     subagents=[rag_subagent],
-    system_prompt=WAVEFORM_AGENT_PROMPT,
+    system_prompt=TARGET_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
-    tools=[post_parameters, get_parameters, patch_parameters]
+    tools=[post_parameters, get_parameters, patch_parameters],
 )
 
 
@@ -65,14 +77,14 @@ def _print_response(result: dict) -> None:
 if __name__ == "__main__":
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
 
-    print("Starting waveform extraction agent...\n")
+    print("Starting buried-target range agent...\n")
     result = agent.invoke(
         {
             "messages": [
                 HumanMessage(
                     content=(
-                        "I need to configure the waveform for a gprMax "
-                        "simulation. Please begin the waveform parameter "
+                        "I need to configure the buried-target geometry ranges for "
+                        "a gprMax simulation batch. Please begin the target range "
                         "extraction process."
                     )
                 )

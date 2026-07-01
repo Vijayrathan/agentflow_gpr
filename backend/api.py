@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse
 from langchain_core.messages import HumanMessage
 
 # Ensure project root is on sys.path so `backend.*` imports (used by agents) work,
-# and add dataset_sampling for its bare imports (resolvers, dataset_generator).
+# and add dataset_sampling for its bare imports (layer_sampler, global_derive, ...).
 _project_root = str(Path(__file__).resolve().parent.parent)
 _ds_dir = str(Path(__file__).resolve().parent / "dataset_sampling")
 _gprmax_root = str(Path(__file__).resolve().parent.parent / "gprMax")
@@ -40,8 +40,6 @@ from extraction_agents.layer_extraction import agent as layer_agent
 from extraction_agents.waveform_extraction import agent as waveform_agent
 from extraction_agents.antenna_extraction import agent as antenna_agent
 from extraction_agents.advanced_params_extraction import agent as advanced_agent
-from dataset_sampling import dataset_generation_agent as _ds_gen_mod
-dataset_agent = _ds_gen_mod.agent
 
 import httpx
 
@@ -98,20 +96,17 @@ STAGES = [
         ),
     },
     {
-        "agent": dataset_agent,
-        "name": "Dataset Generation",
-        "init_message": (
-            "All parameter extractions are complete. "
-            "Start by asking the user for a dataset name, then proceed with "
-            "resolve_and_validate before generating."
-        ),
-    },
-    {
         "agent": "simulation",
         "name": "Simulation",
         "init_message": None,
     },
 ]
+
+# NOTE: this websocket flow is NOT yet migrated to the full staged pipeline — it
+# is missing the target-range mini-stage and the deterministic sampling / derive /
+# global-validation / target-placement stages, and dataset emission is disabled.
+# It runs the extraction agents (and the simulation stage on pre-existing files).
+# Wiring the new staged flow here is a separate task (see agentflow_langgraph.py).
 
 STAGE_NAMES = [s["name"] for s in STAGES]
 
@@ -189,21 +184,6 @@ def _extract_responses(result: dict, seen: int = 0):
         elif kind == "ToolMessage":
             if msg.name == "post_parameters":
                 posted = True
-            elif msg.name == "post_dataset_to_db":
-                try:
-                    data = json.loads(msg.content)
-                    if data.get("status") == "ok":
-                        posted = True
-                        # Derive files_dir from the module-level generation
-                        # result (not exposed to the agent/user)
-                        gen_result = _ds_gen_mod._last_generation_result
-                        if gen_result and gen_result.output_dir:
-                            data["files_dir"] = str(
-                                Path(gen_result.output_dir) / "files"
-                            )
-                        dataset_info = data
-                except (json.JSONDecodeError, TypeError):
-                    pass
 
     return ai_texts, posted, dataset_info, len(messages)
 
@@ -647,7 +627,7 @@ async def _run_agent_turn(
 # File download endpoints
 # ---------------------------------------------------------------------------
 
-# dataset_generator.py writes to <project_root>/datasets/
+# generated datasets live under <project_root>/datasets/
 DATASETS_DIR = Path(__file__).resolve().parent.parent / "datasets"
 
 

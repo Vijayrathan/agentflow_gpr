@@ -22,7 +22,6 @@ from backend.rag import rag_search
 from backend.prompt_library import (
     RAG_SUBAGENT_PROMPT,
     DATASET_CONFIG_AGENT_PROMPT,
-    DATASET_CONFIG_VALIDATION_PROMPT,
 )
 from backend.parameters_global_state import post_parameters, get_parameters, patch_parameters
 
@@ -47,32 +46,15 @@ rag_subagent = {
 }
 
 # ---------------------------------------------------------------------------
-# Validation Sub-Agent
-#   DatasetConfig constraints are enforced by the Pydantic schema itself
-#   (num_samples > 0, the 2D/3D literal, integer counts). There are no
-#   dedicated validation tools for this section, so the sub-agent only reads
-#   state and confirms the schema-enforced invariants hold.
-# ---------------------------------------------------------------------------
-
-validation_subagent = {
-    "name": "validation-agent",
-    "description": (
-        "Confirms dataset/run orchestration parameters. All constraints "
-        "(num_samples > 0, dimensionality 2D/3D, positive integer cell/PML "
-        "counts) are schema-enforced; there are no physics checks here. "
-        "Call after collecting parameters, before storing."
-    ),
-    "system_prompt": DATASET_CONFIG_VALIDATION_PROMPT,
-    "tools": [get_parameters],
-}
-
-# ---------------------------------------------------------------------------
 # Build & Run
+#   No validation subagent: DatasetConfig constraints are enforced by the
+#   Pydantic schema at POST time; all physics/grid checks run downstream in the
+#   deterministic stages (validation_tools_new / global_validation).
 # ---------------------------------------------------------------------------
 
 agent = create_deep_agent(
     model=llm,
-    subagents=[rag_subagent, validation_subagent],
+    subagents=[rag_subagent],
     system_prompt=DATASET_CONFIG_AGENT_PROMPT,
     checkpointer=InMemorySaver(),
     tools=[post_parameters, get_parameters, patch_parameters]

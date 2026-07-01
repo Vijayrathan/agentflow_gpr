@@ -315,13 +315,16 @@ def validate_time_window(
 
 
 def validate_antenna_placement(
-    tx_x_m: float, rx_x_m: float, tx_z_m: float,
-    domain_x_m: float, domain_z_m: float, max_cell_m: float,
-    ground_z_m: float, source_height_m: float, lambda_max_air_m: float,
+    tx_x_m: float, rx_x_m: float, tx_vertical_m: float,
+    domain_x_m: float, domain_vertical_m: float, max_cell_m: float,
+    ground_vertical_m: float, source_height_m: float, lambda_max_air_m: float,
     pml_cells: int = 10,
 ) -> Tuple[List[str], List[str]]:
     """PML clearance on all faces + source height >= lambda_max/2 above ground.
-    lambda_max_air_m = c / f_min (Wang lower edge), in air (eps_r=1)."""
+    lambda_max_air_m = c / f_min (Wang lower edge), in air (eps_r=1).
+
+    Axis-neutral: the caller states which physical axis is vertical via
+    `*_vertical_m` (this project uses y); the thin axis keeps its own name."""
     e: List[str] = []
     if max_cell_m <= 0:
         return ["max_cell_m must be > 0"], []
@@ -329,8 +332,8 @@ def validate_antenna_placement(
     for label, x in [("Tx", tx_x_m), ("Rx", rx_x_m)]:
         if x < margin or (domain_x_m - x) < margin:
             e.append(f"{label} x={x:.4f} within PML+{PML_GAP_CELLS} margin {margin:.4f} m")
-    if tx_z_m > domain_z_m - margin or tx_z_m < margin:
-        e.append(f"Tx z={tx_z_m:.4f} within PML+{PML_GAP_CELLS} margin of a z face")
+    if tx_vertical_m > domain_vertical_m - margin or tx_vertical_m < margin:
+        e.append(f"Tx vertical={tx_vertical_m:.4f} within PML+{PML_GAP_CELLS} margin of a vertical face")
     min_h = 0.5 * lambda_max_air_m
     if source_height_m < min_h - 1e-12:
         e.append(f"source_height {source_height_m:.4f} m < lambda_max/2 = {min_h:.4f} m")

@@ -119,6 +119,21 @@ def derive_samples(
     derived: List[DerivedSample] = []
     eps_max = float("-inf")
     eps_min = float("inf")
+    # Buried-target corners, aggregated in the SAME pass (size-only — the target
+    # material does NOT feed the eps corners). All position-independent here.
+    #
+    # GHOST CORNER (conscious, conservative approximation): each quantity is
+    # aggregated INDEPENDENTLY across samples, so the worst-case feeding the grid
+    # is a synthetic target that may not correspond to any single drawn sample
+    # (smallest radius from one sample, deepest bottom from another, etc.). This
+    # mirrors the eps corners (eps_r_max from the wettest sample, eps_r_min from
+    # the driest) and over-sizes the global grid slightly — it is always at least
+    # as safe as the true per-sample worst case, which is exactly what one global
+    # grid for all samples requires.
+    smallest_feature = float("inf")   # min 2*radius  -> tightens dx
+    largest_extent = float("-inf")    # max 2*radius  -> enlarges domain_x
+    deepest_bottom = float("-inf")    # max depth+radius -> enlarges depth_z
+    have_target = False
     for s in samples:
         dlayers: List[DerivedLayer] = []
         for layer in s.layers:
@@ -138,6 +153,12 @@ def derive_samples(
             )
             eps_max = max(eps_max, eps_wet)
             eps_min = min(eps_min, eps_dry)
+        if s.target is not None:
+            have_target = True
+            diameter = 2.0 * s.target.radius_m            # cylinder disc: same extent in x and y
+            smallest_feature = min(smallest_feature, diameter)
+            largest_extent = max(largest_extent, diameter)
+            deepest_bottom = max(deepest_bottom, s.target.depth_m + s.target.radius_m)
         derived.append(DerivedSample(sample_id=s.sample_id, layers=dlayers))
 
     aggregate = GlobalEpsAggregate(
@@ -146,6 +167,9 @@ def derive_samples(
         num_samples=len(samples),
         frequency_hz=freq,
         nbins=nbins,
+        smallest_feature_global_m=smallest_feature if have_target else None,
+        largest_extent_global_m=largest_extent if have_target else None,
+        deepest_target_bottom_global_m=deepest_bottom if have_target else None,
     )
     return derived, aggregate
 

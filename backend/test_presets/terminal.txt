@@ -1,0 +1,6 @@
+{
+
+"Layer 1 — name: topsoil; thickness 0.1–0.3 m; sand 20–45%; clay 5–20%; volumetric water content (theta_v) 0.10–0.25; bulk density 1.3–1.6 g/cm3; particle density 2.60–2.70 g/cm3."}
+Layer 2 — name: clay_subsoil; thickness 0.3–0.6 m; sand 15–35%; clay 10–20%; volumetric water content (theta_v) 0.15–0.30; bulk density 1.4–1.7 g/cm3; particle density 2.60–2.70 g/cm3.
+waveform_kind=ricker, waveform_name=ricker_900mhz, waveform_center_freq_hz=900000000.0, waveform_amplitude=1.0
+Antenna — kind: hertzian_dipole; axis: x; Tx–Rx offset 0.1 m.

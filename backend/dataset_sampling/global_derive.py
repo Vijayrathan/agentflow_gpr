@@ -16,6 +16,7 @@ Free space (eps=1) is folded into eps_min here (air sets the largest lambda).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ from backend.validation_tools_new import (
     WANG_FHIGH_OVER_FP,
     WANG_FCENTRE_OVER_FP,
     PEPLINSKI_FREQ_HZ,
+    PML_GAP_CELLS,
 )
 
 PEPLINSKI_FMIN_HZ, PEPLINSKI_FMAX_HZ = PEPLINSKI_FREQ_HZ
@@ -66,9 +68,19 @@ def derive_global(
     adv: Optional[ExtractedAdvancedParams],
     eps_r_max_over_samples: float,
     eps_r_min_over_samples: float,
+    smallest_feature_global_m: Optional[float] = None,
+    largest_extent_global_m: Optional[float] = None,
+    deepest_target_bottom_global_m: Optional[float] = None,
 ) -> GlobalDerived:
     """Size the single global grid/domain/depth/time window from the aggregated
-    eps_r corners. eps_r_max/min come from the STAGE 6 derive across all samples."""
+    eps_r corners and the buried-target corners.
+
+    eps_r_max/min come from the STAGE 6 derive across all samples. The target
+    corners (size/extent/deepest bottom) also come from that same pass and are
+    size-only: they tighten Δx, widen domain_x, and deepen depth_z so the global
+    grid fits the worst-case per-sample target while staying identical for every
+    sample. `clearance = (pml_cells + PML_GAP_CELLS)*Δx` is the object/source PML
+    gap and is DISTINCT from the domain `pad = (pml_cells + buffer_cells)*Δx`."""
     # 7a. peak frequency (what #waveform actually takes).
     if cfg.center_freq_is_peak:
         f_peak = wf.waveform_center_freq_hz
@@ -95,32 +107,67 @@ def derive_global(
     eps_max = eps_r_max_over_samples
     eps_min = min(eps_r_min_over_samples, 1.0)   # air sets the largest lambda
 
-    # 7e. global Δx from lambda_min (finest grid). Tighten for the smallest target.
+    # 7e. global Δx from lambda_min (finest grid). Tighten for the smallest target
+    #     — both fixed adv objects AND the per-sample buried-target corner.
     lambda_min = C0 / (f_high * (eps_max ** 0.5))
     dx = lambda_min / cfg.cells_per_wavelength
-    smallest_feat = _smallest_feature_m(adv)
-    if smallest_feat is not None:
-        dx = min(dx, smallest_feat / 10.0)       # >=10 cells across smallest feature
+    feats = [f for f in (_smallest_feature_m(adv), smallest_feature_global_m) if f is not None]
+    if feats:
+        dx = min(dx, min(feats) / 10.0)          # >=10 cells across smallest feature
+    # Δx is now FINAL. clearance (object/source PML gap) is distinct from `pad`.
+    clearance = (cfg.pml_cells + PML_GAP_CELLS) * dx
+    pad = (cfg.pml_cells + cfg.buffer_cells) * dx
 
     # 7f. lambda_max + surface dimension (1.5*lambda_max).
     lambda_max = C0 / (f_min * (eps_min ** 0.5))
     surface_xy = 1.5 * lambda_max
 
-    # 7g. GLOBAL depth: deepest possible stack OR range-resolution floor.
+    # 7g. GLOBAL depth: deepest stack OR range-resolution floor OR deep enough that
+    #     the deepest+largest buried target still clears the BOTTOM PML gap.
+    #     target bottom = ground_y - deepest_bottom, ground_y = pad + depth_z;
+    #     require target_bottom >= clearance. The bottom `pad` already supplies
+    #     (pml+buffer), so add only the shortfall to the (pml+15) clearance, i.e.
+    #     max(0, clearance - pad)  (0 when buffer already covers the gap).
     max_stack = sum(L.thickness_m_max for L in layers.layers)
     range_res = C0 / (2.0 * bandwidth * (eps_max ** 0.5))   # slowest medium
     depth_z = max(max_stack, range_res)
+    if deepest_target_bottom_global_m is not None:
+        target_depth_floor = deepest_target_bottom_global_m + max(0.0, clearance - pad)
+        depth_z = max(depth_z, target_depth_floor)
 
     # 7h. antenna height: collected if given, else derived >= lambda_max/2.
     source_height = (
         ant.source_height_m if ant.source_height_m is not None else (lambda_max / 2.0)
     )
 
-    # 7i. domain. y is the vertical (air gap + soil + buffers + PML).
-    pad = (cfg.pml_cells + cfg.buffer_cells) * dx
-    domain_y = pad + source_height + depth_z + pad
+    # 7i. domain. y is the vertical: bottom pad | soil | air gap | TOP gap.
+    #     The top gap must clear the antenna (a source) from the top PML by the
+    #     (pml+15) gap, so it is `clearance`, not the (pml+buffer) `pad` — the
+    #     antenna would otherwise sit only buffer(10) cells from the top PML.
+    ground_y = pad + depth_z                       # ground surface (pre-snap, fixed)
+    domain_y = pad + depth_z + source_height + max(pad, clearance)
     target_footprint = _target_footprint_x_m(adv)
-    domain_x = max(surface_xy, (target_footprint or 0.0) + ant.tx_rx_offset_m + 2 * pad)
+    # x margins use `clearance` (not `pad`) so the static Tx/Rx clear the side PMLs
+    # by the (pml+15) gap.
+    domain_x = max(
+        surface_xy,
+        (target_footprint or 0.0) + ant.tx_rx_offset_m + 2 * clearance,
+    )
+    # widen x so the widest buried target fits horizontally with PML+gap clearance
+    if largest_extent_global_m is not None:
+        domain_x = max(domain_x, largest_extent_global_m + 2 * clearance)
+
+    # snap domains UP to whole cells so every sample shares one integer Yee grid;
+    # snapping extends the TOP only (bottom face at y=0 and ground_y stay fixed).
+    domain_x = math.ceil(domain_x / dx) * dx
+    domain_y = math.ceil(domain_y / dx) * dx
+
+    # static Tx/Rx (derived ONCE; identical for every sample), after the snap.
+    x_mid = domain_x / 2.0
+    tx_x = x_mid - ant.tx_rx_offset_m / 2.0
+    rx_x = x_mid + ant.tx_rx_offset_m / 2.0
+    tx_y = ground_y + source_height
+    rx_y = tx_y if (ant.rx_same_height is None or ant.rx_same_height) else tx_y
 
     # 7j. CFL time step (gprMax sets at the limit; uniform Δ).
     n_dim = 2.0 if cfg.dimensionality == "2D" else 3.0
@@ -139,6 +186,7 @@ def derive_global(
         surface_xy_m=surface_xy, source_height_m=source_height, depth_z_m=depth_z,
         domain_x_m=domain_x, domain_y_m=domain_y, dt_s=dt, time_window_s=time_window,
         peplinski_gate_ok=gate_ok,
+        ground_y_m=ground_y, tx_x_m=tx_x, rx_x_m=rx_x, tx_y_m=tx_y, rx_y_m=rx_y,
     )
 
 
@@ -159,6 +207,19 @@ def write_global(
     return str(path)
 
 
+def read_global(
+    output_dir: str,
+    filename: str = "global_derive.json",
+) -> GlobalDerived:
+    """Load the global derive written by write_global."""
+    path = Path(output_dir)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent.parent / path
+    path = path / filename
+    with open(path, encoding="utf-8") as f:
+        return GlobalDerived.model_validate(json.load(f))
+
+
 def derive_and_write_global(
     cfg: DatasetConfig,
     wf: ExtractedWaveform,
@@ -169,6 +230,9 @@ def derive_and_write_global(
     eps_r_min_over_samples: float,
     output_dir: str,
     filename: str = "global_derive.json",
+    smallest_feature_global_m: Optional[float] = None,
+    largest_extent_global_m: Optional[float] = None,
+    deepest_target_bottom_global_m: Optional[float] = None,
 ):
     """Derive the global grid/domain/depth/time window and persist it.
 
@@ -177,6 +241,9 @@ def derive_and_write_global(
     grid = derive_global(
         cfg, wf, ant, layers, adv,
         eps_r_max_over_samples, eps_r_min_over_samples,
+        smallest_feature_global_m=smallest_feature_global_m,
+        largest_extent_global_m=largest_extent_global_m,
+        deepest_target_bottom_global_m=deepest_target_bottom_global_m,
     )
     path = write_global(grid, output_dir, filename=filename)
     return grid, path

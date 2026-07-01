@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage
 from parameters_global_state import start_parameter_server, BASE_URL
 from extraction_agents.dataset_config_extraction import agent as dataset_config_agent
 from extraction_agents.layer_extraction import agent as layer_agent
+from extraction_agents.target_extraction import agent as target_agent
 from extraction_agents.waveform_extraction import agent as waveform_agent
 from extraction_agents.antenna_extraction import agent as antenna_agent
 from extraction_agents.advanced_params_extraction import agent as advanced_agent
@@ -23,22 +24,23 @@ sys.path.insert(0, str(Path(__file__).parent / "dataset_sampling"))
 from dataset_sampling.layer_sampler import sample_and_write, read_samples
 from dataset_sampling.sample_validation import validate_waveform_antenna
 from dataset_sampling.peplinski_derive import derive_and_write, read_aggregate
-from dataset_sampling.global_derive import derive_and_write_global
+from dataset_sampling.global_derive import derive_and_write_global, read_global
+from dataset_sampling.global_validation import validate_global
+from dataset_sampling.target_placement import run_placement
 
 from schema import (
     DatasetConfig,
     ExtractedLayers,
+    ExtractedTargetRanges,
     ExtractedWaveform,
     ExtractedAntenna,
     ExtractedAdvancedParams,
 )
 
-# NOTE: the downstream sampler/generator/simulation modules
-# (dataset_sampling.dataset_generation_agent, resolvers.merge_extractions,
-# dataset_generator.generate_dataset, simulate.run_batch_simulation) still
-# target the OLD extract schema and would fail to import. They are imported
-# lazily inside the (currently disabled) generation/simulation stages so the
-# extraction loop above keeps working after the schema migration.
+# NOTE: emission of the N gprMax .in files (STAGE 9) is not yet wired — the old
+# combined-schema generator was removed in the cleanup. _run_dataset_generation()
+# is a disabled stub until the new writer (built against the staged manifests)
+# lands. Everything up to and including global validation + target placement runs.
 
 # Ordered pipeline: (agent, section_name, display_name, init_message)
 PIPELINE = [
@@ -55,6 +57,13 @@ PIPELINE = [
         "Layer Extraction",
         "I need to set up the soil layers for a gprMax simulation. "
         "Please begin the layer parameter extraction process.",
+    ),
+    (
+        target_agent,
+        "target_ranges",
+        "Buried-Target Range Extraction",
+        "I need to configure the buried-target geometry ranges for a gprMax "
+        "simulation batch. Please begin the target range extraction process.",
     ),
     (
         waveform_agent,
@@ -103,40 +112,19 @@ def _posted(result: dict) -> bool:
 
 
 
-def _fetch_all_sections():
-    """Fetch all 5 sections from the parameter server and parse into schemas."""
-    resp = httpx.get(f"{BASE_URL}/state", timeout=10)
-    resp.raise_for_status()
-    state = resp.json()
-
-    section_map = {
-        "dataset_config": DatasetConfig,
-        "layers": ExtractedLayers,
-        "waveform": ExtractedWaveform,
-        "antenna": ExtractedAntenna,
-        "advanced_params": ExtractedAdvancedParams,
-    }
-    parsed = {}
-    for section, cls in section_map.items():
-        data = state.get(section)
-        if data is None:
-            raise RuntimeError(f"Section '{section}' has no data — extraction incomplete.")
-        parsed[section] = cls.model_validate(data)
-
-    return parsed
-
-
 def _run_layer_sampling():
-    """Draw num_samples concrete layer sets from the extracted ranges.
+    """Draw num_samples concrete layer sets (and optional buried target) per sample.
 
-    Runs right after the layer-extraction stage. num_samples comes from the
+    Runs right after the target-range mini-stage. num_samples comes from the
     dataset_config section; the layer ranges come from the layers section. Sand,
     clay, thickness and densities are drawn per sample; silt is derived and
-    theta_v is passed through as its (min, max) band. The draws are written to a
-    JSON manifest in the dataset output directory for the downstream stages.
+    theta_v is passed through as its (min, max) band. If a `target_ranges`
+    cylinder was collected, a buried target is drawn per sample too (grid-
+    independent; placement validated downstream). The draws are written to a JSON
+    manifest in the dataset output directory for the downstream stages.
     """
     print(f"\n{'='*60}")
-    print("  Layer Sampling")
+    print("  Layer + Target Sampling")
     print(f"{'='*60}\n")
 
     resp = httpx.get(f"{BASE_URL}/state", timeout=10)
@@ -151,15 +139,21 @@ def _run_layer_sampling():
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     layers = ExtractedLayers.model_validate(state["layers"])
 
+    target_range = None
+    if state.get("target_ranges") is not None:
+        target_range = ExtractedTargetRanges.model_validate(state["target_ranges"]).cylinder
+
     print(
         f"Sampling {dataset_cfg.num_samples} parameter set(s) over "
-        f"{len(layers.layers)} layer range(s)..."
+        f"{len(layers.layers)} layer range(s)"
+        f"{' + a buried cylinder target' if target_range is not None else ''}..."
     )
     samples, path, warnings = sample_and_write(
         extracted=layers,
         num_samples=dataset_cfg.num_samples,
         output_dir=dataset_cfg.output_dir,
         seed=42,
+        target_range=target_range,
     )
     print(f"  Wrote {len(samples)} sampled parameter set(s) to:\n    {path}")
     if warnings:
@@ -279,6 +273,9 @@ def _run_global_derive():
         dataset_cfg, waveform, antenna, layers, advanced,
         aggregate.eps_r_max, aggregate.eps_r_min,
         dataset_cfg.output_dir,
+        smallest_feature_global_m=aggregate.smallest_feature_global_m,
+        largest_extent_global_m=aggregate.largest_extent_global_m,
+        deepest_target_bottom_global_m=aggregate.deepest_target_bottom_global_m,
     )
 
     print(
@@ -288,72 +285,110 @@ def _run_global_derive():
     print(f"  dx           = {grid.dx_m*1e3:.3f} mm")
     print(f"  domain (x,y) = {grid.domain_x_m:.3f} x {grid.domain_y_m:.3f} m")
     print(f"  depth        = {grid.depth_z_m:.3f} m")
+    print(f"  ground / Tx  = ground_y={grid.ground_y_m:.3f} m  Tx=({grid.tx_x_m:.3f}, {grid.tx_y_m:.3f})  Rx=({grid.rx_x_m:.3f}, {grid.rx_y_m:.3f})")
     print(f"  dt           = {grid.dt_s*1e12:.3f} ps")
     print(f"  time window  = {grid.time_window_s*1e9:.2f} ns")
     print(f"  Wrote global derive to:\n    {path}\n")
 
 
-def _run_dataset_generation():
-    """Orchestrate dataset generation after all extractions are complete.
+def _run_global_validation() -> bool:
+    """Validate the single global grid (TIER 3) right after the global derive.
 
-    NOTE (schema migration): the extraction layer now uses the 5-section
-    collect schema (dataset_config / layers / waveform / antenna /
-    advanced_params). The downstream sampler/generator below
-    (`resolvers.merge_extractions`, `dataset_generator.generate_dataset`,
-    `dataset_generation_agent`) still expects the OLD combined
-    antenna_waveform + model_config schema and old layer fields. Wiring the
-    sampler/derive stages to the new schema is a separate task — until then the
-    generation stage is disabled so the extraction loop remains usable.
+    Runs the cascade-gated TIER 3 battery (grid fundamentals / placement /
+    feasibility) plus the static Tx/Rx + source-height checks. Returns True when
+    there are no errors (safe to proceed), False otherwise.
     """
     print(f"\n{'='*60}")
-    print("  Dataset Generation Setup")
+    print("  Global Validation (TIER 3)")
     print(f"{'='*60}\n")
 
-    
+    resp = httpx.get(f"{BASE_URL}/state", timeout=10)
+    resp.raise_for_status()
+    state = resp.json()
 
-    
-    print("\nFetching extracted parameters from server...")
-    sections = _fetch_all_sections()
-
-    layers_result = sections["layers"]
-    antenna_wf_result = sections["antenna_waveform"]
-    model_result = sections["model_config"]
-    advanced_result = sections["advanced_params"]
-
-
-
-    # Merge and validate
-    gpr_template, resolved_ranges, missing = merge_extractions(
-        layers_result, antenna_wf_result, model_result, advanced_result,
+    dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
+    waveform = ExtractedWaveform.model_validate(state["waveform"])
+    antenna = ExtractedAntenna.model_validate(state["antenna"])
+    layers = ExtractedLayers.model_validate(state["layers"])
+    advanced = (
+        ExtractedAdvancedParams.model_validate(state["advanced_params"])
+        if state.get("advanced_params") is not None
+        else None
     )
+    grid = read_global(dataset_cfg.output_dir)
 
-    if missing:
-        print("\nCannot generate dataset — missing fields:")
-        for m in missing:
-            print(f"  {m}")
-        return
+    report = validate_global(grid, dataset_cfg, waveform, antenna, layers, advanced)
 
-    print(f"\nGenerating { model_result.num_samples} samples as '{dataset_name}'...")
-    result = generate_dataset(
-        resolved_layer_ranges=resolved_ranges,
-        gpr_schema_template=gpr_template,
-        num_samples= model_result.num_samples,
-        dataset_name=dataset_name,
-        seed=42,
-    )
+    if report.warnings:
+        print("  Warnings:")
+        for w in report.warnings:
+            print(f"    - {w}")
+    if report.skipped:
+        print("  Skipped:")
+        for s in report.skipped:
+            print(f"    - {s}")
+    if report.errors:
+        print("\n  Errors:")
+        for e in report.errors:
+            print(f"    - {e}")
+        print("\n>> Global validation FAILED.\n")
+        return False
+
+    print("\n>> Global validation passed.\n")
+    return True
+
+
+def _run_target_placement():
+    """Validate each sample's buried target against the FIXED global grid.
+
+    Re-draws a target's geometry (radius shrink + reposition) when it lands in the
+    PML/clearance zone or is not fully buried; drops the sample (reducing N) when
+    it cannot be placed. No-op when no buried target was collected.
+    """
+    resp = httpx.get(f"{BASE_URL}/state", timeout=10)
+    resp.raise_for_status()
+    state = resp.json()
+
+    target_range = None
+    if state.get("target_ranges") is not None:
+        target_range = ExtractedTargetRanges.model_validate(state["target_ranges"]).cylinder
+    if target_range is None:
+        return  # no buried target -> nothing to place
 
     print(f"\n{'='*60}")
-    print(f"  Dataset Generation: {result.status.upper()}")
-    print(f"{'='*60}")
-    print(f"  Generated: {result.num_generated}/{result.num_requested}")
-    print(f"  Failed:    {result.num_failed}")
-    print(f"  Output:    {result.output_dir}")
-    print(f"  Manifest:  {result.manifest_csv_path}")
-    if result.errors:
-        print(f"\n  Errors:")
-        for err in result.errors:
-            print(f"    - {err}")
+    print("  Per-Sample Target Placement")
+    print(f"{'='*60}\n")
+
+    dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
+    grid = read_global(dataset_cfg.output_dir)
+
+    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_range, seed=1234)
+
+    print(
+        f"Placed targets: {result.n_unchanged} kept as-is, {result.n_redrawn} re-drawn, "
+        f"{len(result.dropped)} dropped."
+    )
+    if result.dropped:
+        print("  Dropped samples (dataset N reduced):")
+        for d in result.dropped:
+            print(f"    - sample {d['sample_id']}: {d['reason']}")
     print()
+
+
+def _run_dataset_generation():
+    """Dataset generation / emission (DISABLED — pending the new emitter).
+
+    The staged pipeline now persists per-sample manifests (sampled_layers.json,
+    derived_layers.json, global_derive.json). Emitting the N gprMax `.in` files on
+    the single global grid (STAGE 9) against those manifests is a separate task;
+    the old combined-schema generator was removed in the cleanup. This stage is a
+    no-op so the extraction + derive + validation loop stays runnable.
+    """
+    print(f"\n{'='*60}")
+    print("  Dataset Generation / Emission")
+    print(f"{'='*60}\n")
+    print("Emission is disabled pending the new .in writer built against the "
+          "staged manifests (sampled_layers / derived_layers / global_derive).\n")
 
 
 
@@ -424,11 +459,11 @@ def run_pipeline():
 
         print(f"\n>> {display_name} complete — {section} saved.\n")
 
-        # Sampling runs immediately after the layer section: draw num_samples
-        # concrete parameter sets over the layer ranges before the remaining
-        # extraction stages (waveform/antenna/advanced) and the downstream
-        # derive/emit process run.
-        if section == "layers":
+        # Sampling runs after the target-range mini-stage (which follows layers):
+        # by now both the layer ranges and the optional buried-target ranges are
+        # collected, so draw num_samples concrete soil+target sets before the
+        # remaining extraction stages and the downstream derive/emit process.
+        if section == "target_ranges":
             _run_layer_sampling()
         elif section == "antenna":
             # Waveform + antenna are now collected and the N samples are drawn:
@@ -450,6 +485,17 @@ def run_pipeline():
     # All params are collected and per-sample eps_r is derived: size the single
     # global grid / domain / depth / time window shared by every sample.
     _run_global_derive()
+
+    # ── Global Validation Stage (TIER 3) ──
+    if not _run_global_validation():
+        print("Halting pipeline: global validation failed. "
+              "Fix the inputs and re-run.")
+        return
+
+    # ── Per-Sample Target Placement Stage ──
+    # Grid-dependent, per-sample: validate each drawn target against the fixed
+    # domain; re-draw into the valid envelope or drop (reducing N).
+    _run_target_placement()
 
     # ── Dataset Generation Stage ──
     # Disabled pending downstream sampler/generator migration to the new
