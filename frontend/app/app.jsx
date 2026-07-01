@@ -1,0 +1,434 @@
+/* ============================================================
+   NL2Sim — application root
+   ============================================================ */
+const { useState, useEffect, useRef, useCallback } = React;
+
+function ViewToggle({ on, icon, label, onClick }) {
+  return (
+    <button
+      className={"tbtn" + (on ? " on" : "")}
+      title={label}
+      onClick={onClick}
+    >
+      <Icon name={icon} className="ic" />
+    </button>
+  );
+}
+
+function App() {
+  const [model, setModel] = useState(makeInitialModel);
+  const modelRef = useRef(model);
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
+
+  const [selected, setSelected] = useState(null);
+  const [activeModel, setActiveModel] = useState("permnet");
+  const [dataset, setDataset] = useState(12480);
+
+  const [chatOpen, setChatOpen] = useState(true);
+  const [railCollapsed, setRailCollapsed] = useState(false);
+
+  const [dockTab, setDockTab] = useState("inspector");
+  const [dockCollapsed, setDockCollapsed] = useState(false);
+
+  const [view, setView] = useState({
+    ruler: true,
+    targets: true,
+    antenna: true,
+  });
+  const [zoom, setZoom] = useState(1);
+
+  const [solving, setSolving] = useState(false);
+  const [solved, setSolved] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [scanFrac, setScanFrac] = useState(0.12);
+
+  const [modal, setModal] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const rafRef = useRef(0);
+
+  const toast = useCallback((msg, kind = "info") => {
+    const id = uid("t");
+    setToasts((t) => [...t, { id, msg, kind }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);
+  }, []);
+
+  // selecting an item opens inspector
+  const onSelect = useCallback((sel) => {
+    setSelected(sel);
+    if (sel) {
+      setDockTab("inspector");
+      setDockCollapsed(false);
+    }
+  }, []);
+
+  // invalidate solved B-scan when model changes
+  useEffect(() => {
+    setSolved(false);
+    setProgress(0);
+  }, [
+    model.layers,
+    model.targets,
+    model.domain,
+    model.acquisition.frequency,
+    model.acquisition.waveform,
+  ]);
+
+  const runForward = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    setSolved(false);
+    setSolving(true);
+    setProgress(0);
+    setDockTab("radar");
+    setDockCollapsed(false);
+    const t0 = performance.now();
+    const dur = 1700;
+    const tick = (now) => {
+      const p = Math.min(1, (now - t0) / dur);
+      setProgress(p);
+      setScanFrac(0.06 + p * 0.88);
+      if (p < 1) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        setSolving(false);
+        setSolved(true);
+        setDataset((d) => d + 1);
+        toast("Forward model complete · <b>+1</b> labelled sample", "ok");
+      }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, [toast]);
+
+  const addDataset = useCallback(
+    (n) => {
+      let i = 0;
+      const target = n;
+      const start = performance.now();
+      const tick = (now) => {
+        const p = Math.min(1, (now - start) / 900);
+        setDataset((d) => {
+          return d;
+        });
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      // animate counter
+      const base = dataset;
+      const begin = performance.now();
+      const step = (now) => {
+        const p = Math.min(1, (now - begin) / 1000);
+        setDataset(Math.round(base + target * p));
+        if (p < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+      setTimeout(
+        () =>
+          toast(
+            "Synthesised <b>" + n.toLocaleString() + "</b> labelled variations",
+            "ok",
+          ),
+        950,
+      );
+    },
+    [dataset, toast],
+  );
+
+  const onLoadPreset = useCallback((key) => {
+    const cur = modelRef.current;
+    if (key === "utility") setModel(makeInitialModel());
+    else if (key === "rebar") setModel(scenarioRebar().patch(cur));
+    else if (key === "mine") setModel(scenarioMine().patch(cur));
+    setSelected(null);
+  }, []);
+
+  // legend data
+  const usedMats = [
+    ...new Set(
+      model.layers.filter((l) => l.visible !== false).map((l) => l.material),
+    ),
+  ];
+  const usedTargets = [
+    ...new Set(
+      model.targets.filter((t) => t.visible !== false).map((t) => t.type),
+    ),
+  ];
+
+  const Z = (v) => Math.round(v * 100);
+
+  return (
+    <div className="app">
+      <MenuBar
+        model={model}
+        setModel={setModel}
+        activeModel={activeModel}
+        setActiveModel={setActiveModel}
+        dataset={dataset}
+        chatOpen={chatOpen}
+        setChatOpen={setChatOpen}
+        toast={toast}
+        openModal={setModal}
+        onManual={() => {
+          setDockTab("acq");
+          setDockCollapsed(false);
+        }}
+        onLoadPreset={onLoadPreset}
+      />
+
+      <div className="body">
+        <div className="viz">
+          {/* viz toolbar */}
+          <div className="viztoolbar">
+            <button
+              className="tbtn"
+              title={railCollapsed ? "Show model tree" : "Hide model tree"}
+              onClick={() => setRailCollapsed((c) => !c)}
+            >
+              <Icon name="panel" className="ic" />
+            </button>
+            <div className="crumb">
+              <b>{model.project}</b>
+              <span className="sl">/</span>Subsurface model
+              <span className="sl">·</span>cross-section
+            </div>
+            <div className="spacer"></div>
+
+            <div className="tgroup">
+              <ViewToggle
+                on={view.ruler}
+                icon="ruler"
+                label="Rulers"
+                onClick={() => setView((v) => ({ ...v, ruler: !v.ruler }))}
+              />
+              <ViewToggle
+                on={view.targets}
+                icon="target"
+                label="Targets"
+                onClick={() => setView((v) => ({ ...v, targets: !v.targets }))}
+              />
+              <ViewToggle
+                on={view.antenna}
+                icon="radar"
+                label="Antenna &amp; scan path"
+                onClick={() => setView((v) => ({ ...v, antenna: !v.antenna }))}
+              />
+            </div>
+            <div className="tgroup">
+              <button
+                className="tbtn"
+                title="Zoom out"
+                onClick={() => setZoom((z) => clamp(z / 1.2, 0.6, 3))}
+              >
+                <Icon name="zoomout" className="ic" />
+              </button>
+              <span className="zoomread">{Z(zoom)}%</span>
+              <button
+                className="tbtn"
+                title="Zoom in"
+                onClick={() => setZoom((z) => clamp(z * 1.2, 0.6, 3))}
+              >
+                <Icon name="zoomin" className="ic" />
+              </button>
+              <button className="tbtn" title="Fit" onClick={() => setZoom(1)}>
+                <Icon name="fit" className="ic" />
+              </button>
+            </div>
+
+            <div className="dataset-chip" title="Labelled samples in dataset">
+              <Icon name="database" size={14} style={{ opacity: 0.55 }} />
+              <span className="n">{dataset.toLocaleString()}</span>
+              <button className="add" onClick={() => addDataset(250)}>
+                <Icon name="plus" size={11} />
+                250
+              </button>
+            </div>
+
+            <button className="runbtn" onClick={runForward} disabled={solving}>
+              <Icon name="play" className="ic" />
+              {solving ? "Solving…" : "Run forward model"}
+            </button>
+          </div>
+
+          {/* viz body */}
+          <div className="vizbody">
+            <ModelTree
+              model={model}
+              setModel={setModel}
+              selected={selected}
+              onSelect={onSelect}
+              collapsed={railCollapsed}
+              toast={toast}
+            />
+
+            <div className="stage">
+              <div className="stage-canvas">
+                {solving && (
+                  <div className="solving-bar">
+                    <i style={{ width: progress * 100 + "%" }}></i>
+                  </div>
+                )}
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    transform: `scale(${zoom})`,
+                    transformOrigin: "center center",
+                    transition: "transform .15s",
+                  }}
+                >
+                  <SubsurfaceView
+                    model={model}
+                    selected={selected}
+                    onSelect={onSelect}
+                    view={view}
+                    scanFrac={scanFrac}
+                    solving={solving}
+                  />
+                </div>
+
+                {/* HUD */}
+                <div className="hud">
+                  <div className="pill">
+                    <span className="k">domain</span>
+                    <b>
+                      {fmt(model.domain.width)}×{fmt(model.domain.depth)} m
+                    </b>
+                  </div>
+                  <div className="pill">
+                    <span className="k">modelled</span>
+                    <b>{fmt(layersDepth(model))} m</b>
+                    <span className="k">
+                      {model.layers.length}L · {model.targets.length}T
+                    </span>
+                  </div>
+                  <div className="pill">
+                    <span className="k">f</span>
+                    <b>{model.acquisition.frequency} GHz</b>
+                    <span className="k">
+                      {
+                        ANTENNAS.find(
+                          (a) => a.id === model.acquisition.antenna,
+                        )?.label.split(" ")[0]
+                      }
+                    </span>
+                  </div>
+                </div>
+
+                {/* legend */}
+                {(usedMats.length > 0 || usedTargets.length > 0) && (
+                  <div className="legend">
+                    <div className="lh">Materials</div>
+                    {usedMats.map((k) => (
+                      <div className="lrow" key={k}>
+                        <span
+                          className="ls"
+                          style={{ background: MATERIALS[k].color }}
+                        ></span>
+                        <span className="lname">
+                          {MATERIALS[k].label.split(" / ")[0]}
+                        </span>
+                        <span className="leps mono">
+                          εr {MATERIALS[k].epsilon}
+                        </span>
+                      </div>
+                    ))}
+                    {usedTargets.length > 0 && (
+                      <div className="lh" style={{ marginTop: 8 }}>
+                        Targets
+                      </div>
+                    )}
+                    {usedTargets.map((k) => (
+                      <div className="lrow" key={k}>
+                        <span
+                          className="ls"
+                          style={{
+                            background:
+                              TARGET_TYPES[k].kind === "pec"
+                                ? "#8a9099"
+                                : TARGET_TYPES[k].color,
+                            borderRadius: "50%",
+                          }}
+                        ></span>
+                        <span className="lname">{TARGET_TYPES[k].label}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <Dock
+                model={model}
+                setModel={setModel}
+                selected={selected}
+                onSelect={onSelect}
+                tab={dockTab}
+                setTab={setDockTab}
+                solved={solved}
+                progress={progress}
+                collapsed={dockCollapsed}
+                setCollapsed={setDockCollapsed}
+                height={252}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* chat */}
+        <ChatPane
+          model={model}
+          modelRef={modelRef}
+          setModel={setModel}
+          onRun={runForward}
+          dataset={dataset}
+          addDataset={addDataset}
+          activeModel={activeModel}
+          collapsed={!chatOpen}
+          setCollapsed={(v) =>
+            setChatOpen(typeof v === "function" ? !v(!chatOpen) : !v)
+          }
+          toast={toast}
+        />
+      </div>
+
+      {/* reopen chat tab when collapsed */}
+      {!chatOpen && (
+        <button
+          onClick={() => setChatOpen(true)}
+          title="Open assistant"
+          style={{
+            position: "fixed",
+            right: 18,
+            bottom: 18,
+            zIndex: 50,
+            height: 44,
+            padding: "0 16px",
+            borderRadius: 24,
+            border: "1px solid var(--accent-2)",
+            background: "var(--accent)",
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            gap: 9,
+            fontWeight: 600,
+            fontSize: 13,
+            boxShadow: "var(--shadow-lg)",
+          }}
+        >
+          <Icon name="sparkles" size={16} />
+          Ask the assistant
+        </button>
+      )}
+
+      {modal && (
+        <ExportModal
+          kind={modal}
+          model={model}
+          onClose={() => setModal(null)}
+          toast={toast}
+        />
+      )}
+      <Toasts items={toasts} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);

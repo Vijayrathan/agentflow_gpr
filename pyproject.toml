@@ -20,6 +20,7 @@ dependencies = [
     "openai>=2.24.0",
     "psycopg2-binary>=2.9.11",
     "pydantic>=2.12.5",
+    "pytest>=9.1.1",
     "qdrant-client>=1.17.0",
     "sqlmodel>=0.0.37",
     "terminaltables>=3.1.10",

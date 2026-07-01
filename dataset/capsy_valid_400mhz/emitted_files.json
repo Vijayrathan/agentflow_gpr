@@ -1,0 +1,74 @@
+{
+  "output_dir": "/Users/vijay/Documents/langchain_agents/dataset/capsy_valid_400mhz",
+  "in_dir": "/Users/vijay/Documents/langchain_agents/dataset/capsy_valid_400mhz/in_files",
+  "n_written": 3,
+  "grid": {
+    "dx_m": 0.004634133522156653,
+    "domain_x_m": 1.334630454381116,
+    "domain_y_m": 1.404142457213466,
+    "ground_y_m": 0.842682670443133,
+    "f_peak_hz": 700000000.0,
+    "time_window_s": 3.23184400980544e-08,
+    "pml_cells": 10
+  },
+  "files": [
+    {
+      "sample_id": 1,
+      "filename": "soil_sample_1.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/capsy_valid_400mhz/in_files/soil_sample_1.in",
+      "layers": [
+        {
+          "name": "upper_sandy_loam",
+          "thickness_m": 0.2641456107629292,
+          "y_top_m": 0.8434123010325109,
+          "y_bottom_m": 0.5792666902695817
+        },
+        {
+          "name": "lower_silty_loam",
+          "thickness_m": 0.5792666902695817,
+          "y_top_m": 0.5792666902695817,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 2,
+      "filename": "soil_sample_2.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/capsy_valid_400mhz/in_files/soil_sample_2.in",
+      "layers": [
+        {
+          "name": "upper_sandy_loam",
+          "thickness_m": 0.2224384090635193,
+          "y_top_m": 0.8434123010325109,
+          "y_bottom_m": 0.6209738919689916
+        },
+        {
+          "name": "lower_silty_loam",
+          "thickness_m": 0.6209738919689916,
+          "y_top_m": 0.6209738919689916,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 3,
+      "filename": "soil_sample_3.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/capsy_valid_400mhz/in_files/soil_sample_3.in",
+      "layers": [
+        {
+          "name": "upper_sandy_loam",
+          "thickness_m": 0.28268214485155585,
+          "y_top_m": 0.8434123010325109,
+          "y_bottom_m": 0.560730156180955
+        },
+        {
+          "name": "lower_silty_loam",
+          "thickness_m": 0.560730156180955,
+          "y_top_m": 0.560730156180955,
+          "y_bottom_m": 0.0
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

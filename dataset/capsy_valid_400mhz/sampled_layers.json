@@ -1,0 +1,90 @@
+{
+  "num_samples": 3,
+  "warnings": [],
+  "samples": [
+    {
+      "sample_id": 1,
+      "layers": [
+        {
+          "name": "upper_sandy_loam",
+          "thickness_m": 0.263943,
+          "sand_pct": 35.250108,
+          "clay_pct": 11.375147,
+          "silt_pct": 53.374746,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.383482,
+          "particle_density_gcm3": 2.686824
+        },
+        {
+          "name": "lower_silty_loam",
+          "thickness_m": 0.401505,
+          "sand_pct": 33.921796,
+          "clay_pct": 15.434694,
+          "silt_pct": 50.64351,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.22,
+          "bulk_density_gcm3": 1.513288,
+          "particle_density_gcm3": 2.65149
+        }
+      ],
+      "target": null
+    },
+    {
+      "sample_id": 2,
+      "layers": [
+        {
+          "name": "upper_sandy_loam",
+          "thickness_m": 0.221864,
+          "sand_pct": 40.053553,
+          "clay_pct": 10.13268,
+          "silt_pct": 49.813767,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.379826,
+          "particle_density_gcm3": 2.682494
+        },
+        {
+          "name": "lower_silty_loam",
+          "thickness_m": 0.381741,
+          "sand_pct": 27.204406,
+          "clay_pct": 17.946328,
+          "silt_pct": 54.849265,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.22,
+          "bulk_density_gcm3": 1.571415,
+          "particle_density_gcm3": 2.650325
+        }
+      ],
+      "target": null
+    },
+    {
+      "sample_id": 3,
+      "layers": [
+        {
+          "name": "upper_sandy_loam",
+          "thickness_m": 0.280582,
+          "sand_pct": 41.981394,
+          "clay_pct": 11.701253,
+          "silt_pct": 46.317353,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.373322,
+          "particle_density_gcm3": 2.697861
+        },
+        {
+          "name": "lower_silty_loam",
+          "thickness_m": 0.350489,
+          "sand_pct": 25.927458,
+          "clay_pct": 15.483582,
+          "silt_pct": 58.58896,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.22,
+          "bulk_density_gcm3": 1.577124,
+          "particle_density_gcm3": 2.680186
+        }
+      ],
+      "target": null
+    }
+  ]
+}
