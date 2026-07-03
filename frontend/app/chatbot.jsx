@@ -1,9 +1,9 @@
 /* ============================================================
-   NL2Sim — AI assistant pane
+   NL2Sim — backend-connected AI assistant pane
    ============================================================ */
 
 function mdToHtml(s) {
-  return s
+  return String(s || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -12,44 +12,50 @@ function mdToHtml(s) {
     .replace(/\n/g, "<br/>");
 }
 
-function nextChips(kind, model) {
-  const hasTargets = model.targets.length > 0;
-  if (kind === "welcome")
+function nextChips(kind) {
+  if (kind === "choice")
     return [
-      { t: "Buried utility survey", ic: "layers" },
-      { t: "Landmine detection", ic: "target" },
-      { t: "Rebar in concrete", ic: "grid" },
-      { t: "Soil moisture study", ic: "wave" },
+      { t: "dataset_config", ic: "grid" },
+      { t: "layers", ic: "layers" },
+      { t: "waveform", ic: "wave" },
+      { t: "antenna", ic: "radar" },
+      { t: "advanced_params", ic: "target" },
     ];
-  if (kind === "run")
+  if (kind === "starter")
     return [
-      { t: "Generate 500 variations", ic: "database" },
-      { t: "Why is there a hyperbola?", ic: "info" },
-      { t: "Make the soil wet", ic: "wave" },
+      { t: "Use defaults", ic: "check" },
+      { t: "Skip target", ic: "target" },
+      { t: "Continue", ic: "play" },
     ];
-  if (kind === "dataset")
-    return [
-      { t: "Set 900 MHz", ic: "bolt" },
-      { t: "Add a metal pipe at 0.3 m", ic: "target" },
-      { t: "Run forward model", ic: "play" },
-    ];
-  // default contextual
-  const c = [];
-  if (!hasTargets) c.push({ t: "Bury a PVC pipe at 0.4 m", ic: "target" });
-  else c.push({ t: "Add a wet clay layer 0.4 m thick", ic: "layers" });
-  c.push({ t: "Run forward model", ic: "play" });
-  c.push({ t: "Generate 500 variations", ic: "database" });
-  c.push({ t: "Explain the permittivity", ic: "info" });
-  return c;
+  return [];
+}
+
+function getSessionId() {
+  const key = "nl2sim_chat_session_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id =
+      window.crypto && crypto.randomUUID
+        ? crypto.randomUUID()
+        : "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
+function getWsUrl(sessionId) {
+  if (window.NL2SIM_WS_URL) return window.NL2SIM_WS_URL + "/" + sessionId;
+  const isFile = window.location.protocol === "file:";
+  const isStaticDevServer =
+    window.location.hostname === "127.0.0.1" &&
+    ["5173", "8001", "8080"].includes(window.location.port);
+  const host =
+    isFile || isStaticDevServer ? "127.0.0.1:8000" : window.location.host;
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${host}/ws/${sessionId}`;
 }
 
 function ChatPane({
-  model,
-  modelRef,
-  setModel,
-  onRun,
-  dataset,
-  addDataset,
   activeModel,
   collapsed,
   setCollapsed,
@@ -59,29 +65,131 @@ function ChatPane({
     {
       id: uid("m"),
       role: "bot",
-      html: mdToHtml(
-        "Hi — I'm the **NL2Sim** assistant. Describe a ground-penetrating-radar scene in plain language and I'll build the subsurface model, wire up the gprMax parameters, and turn it into labelled training data.\n\nWhat would you like to simulate?",
-      ),
+      html: mdToHtml("Connecting to the **NL2Sim** LangGraph pipeline..."),
     },
   ]);
-  const [chips, setChips] = React.useState(nextChips("welcome", model));
+  const [chips, setChips] = React.useState([]);
   const [typing, setTyping] = React.useState(false);
   const [draft, setDraft] = React.useState("");
+  const [status, setStatus] = React.useState("connecting");
+  const [busy, setBusy] = React.useState(false);
+  const [sending, setSending] = React.useState(false);
   const scrollRef = React.useRef(null);
   const taRef = React.useRef(null);
+  const wsRef = React.useRef(null);
 
   React.useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, typing, chips]);
 
+  React.useEffect(() => {
+    const sessionId = getSessionId();
+    const ws = new WebSocket(getWsUrl(sessionId));
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setStatus("connected");
+      setChips(nextChips("starter"));
+    };
+    ws.onclose = () => {
+      setStatus("disconnected");
+      setTyping(false);
+      setBusy(false);
+      setSending(false);
+      pushBot(mdToHtml("Connection closed. Restart the API server and reload the page."));
+    };
+    ws.onerror = () => {
+      setStatus("error");
+      setTyping(false);
+      setSending(false);
+    };
+    ws.onmessage = (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      handleServerEvent(msg);
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, []);
+
   function pushBot(html, card) {
     setMessages((m) => [...m, { id: uid("m"), role: "bot", html, card }]);
+  }
+
+  function pushStatus(text) {
+    setMessages((m) => [
+      ...m,
+      { id: uid("m"), role: "bot", html: mdToHtml(text), status: true },
+    ]);
+  }
+
+  function handleServerEvent(msg) {
+    if (msg.type === "pipeline_busy") {
+      setBusy(Boolean(msg.busy));
+      return;
+    }
+
+    setSending(false);
+    setTyping(false);
+
+    if (msg.type === "agent_message") {
+      pushBot(mdToHtml(msg.content));
+      setChips([]);
+      return;
+    }
+    if (msg.type === "stage_change") {
+      pushStatus("**Stage:** " + (msg.stage_name || "Pipeline step"));
+      setChips([]);
+      return;
+    }
+    if (msg.type === "progress") {
+      pushStatus(msg.content || "Step complete.");
+      return;
+    }
+    if (msg.type === "validation_failed") {
+      const errors = (msg.errors || []).map((e) => "- " + e).join("\n");
+      pushBot(mdToHtml("**Validation failed:** " + (msg.stage_name || "") + (errors ? "\n" + errors : "")));
+      return;
+    }
+    if (msg.type === "choice_required") {
+      pushBot(mdToHtml(msg.content));
+      setChips(
+        (msg.choices || []).map((c) => ({
+          t: c,
+          ic: c === "layers" ? "layers" : c === "waveform" ? "wave" : "grid",
+        })),
+      );
+      return;
+    }
+    if (msg.type === "dataset_ready") {
+      pushBot(mdToHtml(msg.content || "Dataset created."));
+      setChips([]);
+      if (toast) toast("Dataset created and stored", "ok");
+      return;
+    }
+    if (msg.type === "error") {
+      pushBot(mdToHtml("**Backend error:** " + (msg.message || "Unknown error")));
+      return;
+    }
   }
 
   function handle(text) {
     const clean = text.trim();
     if (!clean) return;
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      pushBot(mdToHtml("The backend WebSocket is not connected."));
+      return;
+    }
+
     setMessages((m) => [
       ...m,
       { id: uid("m"), role: "user", html: mdToHtml(clean) },
@@ -89,34 +197,18 @@ function ChatPane({
     setChips([]);
     setDraft("");
     setTyping(true);
-    const cur = modelRef.current;
-    const res = parseCommand(clean, cur);
-    const delay = 620 + Math.random() * 420;
-    setTimeout(() => {
-      setTyping(false);
-      if (res.patch) setModel(res.patch);
-      if (res.run) onRun();
-      if (res.datasetAdd) addDataset(res.datasetAdd);
-      let html,
-        card = res.actions;
-      if (res.answer) {
-        html = mdToHtml(localAnswer(clean, cur));
-      } else {
-        html = mdToHtml(res.reply);
-      }
-      pushBot(html, card);
-      setTimeout(
-        () =>
-          setChips(
-            nextChips(
-              res.kind === "scenario" ? "default" : res.kind || "default",
-              modelRef.current,
-            ),
-          ),
-        60,
-      );
-    }, delay);
+    setSending(true);
+    ws.send(JSON.stringify({ type: "user_message", content: clean }));
   }
+
+  const connected = status === "connected";
+  const inputDisabled = !connected || busy || sending;
+  const statusText =
+    status === "connected"
+      ? busy
+        ? "running pipeline step"
+        : "connected"
+      : status;
 
   return (
     <section className={"chat" + (collapsed ? " collapsed" : "")}>
@@ -127,7 +219,8 @@ function ChatPane({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="ct">Simulation Assistant</div>
           <div className="cs">
-            <span className="dot"></span>building{" "}
+            <span className="dot"></span>
+            {statusText}{" "}
             <b style={{ color: "var(--ink-2)", fontWeight: 600 }}>
               &nbsp;{ML_MODELS.find((m) => m.id === activeModel)?.label}
             </b>
@@ -160,26 +253,6 @@ function ChatPane({
             </div>
             <div className="bubble">
               <div dangerouslySetInnerHTML={{ __html: m.html }} />
-              {m.card && m.card.length > 0 && (
-                <div className="act-card">
-                  <div className="ah">
-                    <Icon name="check" size={12} />
-                    Applied to model
-                  </div>
-                  {m.card.map((a, i) => (
-                    <div className="ar" key={i}>
-                      {a.sw && (
-                        <span
-                          className="sw"
-                          style={{ background: a.sw }}
-                        ></span>
-                      )}
-                      <span>{a.label}</span>
-                      <span className="v">{a.v}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         ))}
@@ -197,7 +270,7 @@ function ChatPane({
             </div>
           </div>
         )}
-        {chips.length > 0 && !typing && (
+        {chips.length > 0 && !typing && !busy && (
           <div className="chips">
             {chips.map((c, i) => (
               <button key={i} className="chip" onClick={() => handle(c.t)}>
@@ -214,8 +287,13 @@ function ChatPane({
           <textarea
             ref={taRef}
             rows={1}
-            placeholder="Describe a scene, ask a question, or tweak a parameter…"
+            placeholder={
+              connected
+                ? "Reply to the LangGraph agent..."
+                : "Waiting for backend connection..."
+            }
             value={draft}
+            disabled={inputDisabled}
             onChange={(e) => {
               setDraft(e.target.value);
               e.target.style.height = "auto";
@@ -232,7 +310,7 @@ function ChatPane({
           />
           <button
             className="send"
-            disabled={!draft.trim()}
+            disabled={inputDisabled || !draft.trim()}
             onClick={() => {
               handle(draft);
               if (taRef.current) taRef.current.style.height = "auto";
@@ -242,7 +320,7 @@ function ChatPane({
           </button>
         </div>
         <div className="chat-hint">
-          natural language → gprMax scenario · press ↵ to send
+          LangGraph agent pipeline · press ↵ to send
         </div>
       </div>
     </section>

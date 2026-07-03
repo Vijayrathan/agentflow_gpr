@@ -1,0 +1,207 @@
+{
+  "output_dir": "/Users/vijay/Documents/langchain_agents/dataset",
+  "in_dir": "/Users/vijay/Documents/langchain_agents/dataset/in_files",
+  "n_written": 10,
+  "grid": {
+    "dx_m": 0.003682517171133895,
+    "domain_x_m": 1.336753733121604,
+    "domain_y_m": 1.2115481493030515,
+    "ground_y_m": 0.6736503434226779,
+    "f_peak_hz": 700000000.0,
+    "time_window_s": 2.98732486120352e-08,
+    "pml_cells": 10
+  },
+  "files": [
+    {
+      "sample_id": 1,
+      "filename": "soil_sample_1.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_1.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.21726851309689982,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.456632129220603
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.456632129220603,
+          "y_top_m": 0.456632129220603,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 2,
+      "filename": "soil_sample_2.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_2.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.19149089289896254,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.48240974941854026
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.48240974941854026,
+          "y_top_m": 0.48240974941854026,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 3,
+      "filename": "soil_sample_3.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_3.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.22831606461030152,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.4455845777072013
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.4455845777072013,
+          "y_top_m": 0.4455845777072013,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 4,
+      "filename": "soil_sample_4.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_4.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.22831606461030152,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.4455845777072013
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.4455845777072013,
+          "y_top_m": 0.4455845777072013,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 5,
+      "filename": "soil_sample_5.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_5.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.2209510302680337,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.4529496120494691
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.4529496120494691,
+          "y_top_m": 0.4529496120494691,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 6,
+      "filename": "soil_sample_6.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_6.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.20253844441236424,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.47136219790513856
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.47136219790513856,
+          "y_top_m": 0.47136219790513856,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 7,
+      "filename": "soil_sample_7.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_7.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.23936361612370316,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.43453702619379964
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.43453702619379964,
+          "y_top_m": 0.43453702619379964,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 8,
+      "filename": "soil_sample_8.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_8.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.19149089289896254,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.48240974941854026
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.48240974941854026,
+          "y_top_m": 0.48240974941854026,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 9,
+      "filename": "soil_sample_9.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_9.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.21358599592576594,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.46031464639173686
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.46031464639173686,
+          "y_top_m": 0.46031464639173686,
+          "y_bottom_m": 0.0
+        }
+      ]
+    },
+    {
+      "sample_id": 10,
+      "filename": "soil_sample_10.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_10.in",
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.18780837572782866,
+          "y_top_m": 0.6739006423175028,
+          "y_bottom_m": 0.48609226658967414
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.48609226658967414,
+          "y_top_m": 0.48609226658967414,
+          "y_bottom_m": 0.0
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

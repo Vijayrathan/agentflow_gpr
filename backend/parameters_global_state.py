@@ -10,6 +10,7 @@ Provides:
 Sections:
   dataset_config  -> DatasetConfig
   layers          -> ExtractedLayers
+  target_ranges   -> ExtractedTargetRanges
   waveform        -> ExtractedWaveform
   antenna         -> ExtractedAntenna
   advanced_params -> ExtractedAdvancedParams
@@ -36,11 +37,12 @@ from langchain_core.tools import tool
 from schema import (
     DatasetConfig,
     ExtractedLayers,
+    ExtractedTargetRanges,
     ExtractedWaveform,
     ExtractedAntenna,
     ExtractedAdvancedParams,
 )
-from db.db import upsert_extraction_section, batch_insert_simulations, bulk_update_signals
+from db.db import batch_insert_simulations, bulk_update_signals
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,7 @@ BASE_URL = f"http://{API_HOST}:{API_PORT}"
 SECTION_SCHEMAS = {
     "dataset_config": DatasetConfig,
     "layers": ExtractedLayers,
+    "target_ranges": ExtractedTargetRanges,
     "waveform": ExtractedWaveform,
     "antenna": ExtractedAntenna,
     "advanced_params": ExtractedAdvancedParams,
@@ -198,7 +201,7 @@ def post_simulation_signals(payload: dict):
 
 @app.get("/state")
 def get_full_state():
-    """Return all four sections."""
+    """Return all sections."""
     return _store
 
 
@@ -217,24 +220,13 @@ def get_section(section: str):
 def post_section(section: str, payload: dict):
     """Create or fully replace a section's data. Validates against the schema.
 
-    Also persists to the extraction_sessions DB table if an active session exists.
+    This endpoint is intentionally in-memory for the current staged pipeline.
+    The frontend flow writes to SQL once, after dataset generation completes.
     """
     _validate_section(section)
     schema_cls = SECTION_SCHEMAS[section]
     validated = schema_cls.model_validate(payload)
     _store[section] = validated.model_dump()
-
-    # Persist to DB incrementally
-    if _active_session_id and _active_user_id:
-        try:
-            upsert_extraction_section(
-                session_id=_active_session_id,
-                user_id=_active_user_id,
-                section=section,
-                data=_store[section],
-            )
-        except Exception:
-            logger.exception("Failed to persist section '%s' to DB", section)
 
     return {"status": "ok", "section": section, "data": _store[section]}
 
@@ -255,18 +247,6 @@ def patch_section(section: str, updates: dict):
     schema_cls = SECTION_SCHEMAS[section]
     validated = schema_cls.model_validate(merged)
     _store[section] = validated.model_dump()
-
-    # Persist updated section to DB
-    if _active_session_id and _active_user_id:
-        try:
-            upsert_extraction_section(
-                session_id=_active_session_id,
-                user_id=_active_user_id,
-                section=section,
-                data=_store[section],
-            )
-        except Exception:
-            logger.exception("Failed to persist section '%s' to DB", section)
 
     return {"status": "ok", "section": section, "data": _store[section]}
 
@@ -315,7 +295,7 @@ def start_parameter_server() -> None:
 
 @tool
 def post_parameters(
-    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'waveform', 'antenna', or 'advanced_params'"],
+    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
     payload: Annotated[str, "JSON string of the parameters to store for this section"],
 ) -> str:
     """Store (create or replace) the extracted parameters for a given section.
@@ -330,6 +310,7 @@ def post_parameters(
 _SECTION_AGENT_NAMES = {
     "dataset_config": "Dataset Config Agent",
     "layers": "Layer Extraction Agent",
+    "target_ranges": "Buried Target Range Agent",
     "waveform": "Waveform Agent",
     "antenna": "Antenna Agent",
     "advanced_params": "Advanced Parameters Agent",
@@ -338,7 +319,7 @@ _SECTION_AGENT_NAMES = {
 
 @tool
 def get_parameters(
-    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'waveform', 'antenna', or 'advanced_params'"],
+    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
 ) -> str:
     """Retrieve the currently stored parameters for a given section.
 
@@ -364,7 +345,7 @@ def get_parameters(
 
 @tool
 def patch_parameters(
-    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'waveform', 'antenna', or 'advanced_params'"],
+    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
     updates: Annotated[str, "JSON string of the fields to update (partial update, merged with existing data)"],
 ) -> str:
     """Partially update the stored parameters for a given section.
@@ -408,7 +389,7 @@ def patch_parameters(
 
 @tool
 def get_all_parameters() -> str:
-    """Retrieve the full state across all four sections."""
+    """Retrieve the full state across all sections."""
     resp = httpx.get(f"{BASE_URL}/state", timeout=10)
     return resp.text
 
@@ -429,4 +410,3 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nShutting down.")
-
