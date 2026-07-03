@@ -44,6 +44,29 @@ function App() {
   const [progress, setProgress] = useState(0);
   const [scanFrac, setScanFrac] = useState(0.12);
 
+  // live scene streamed by the backend agent (model_update events);
+  // vizTab: "overview" = range midpoints + uncertainty bands,
+  //         "sample"   = one concrete realization (after sampling ran)
+  const [scene, setScene] = useState(null);
+  const [vizTab, setVizTab] = useState("overview");
+  const [sampleIdx, setSampleIdx] = useState(0);
+  const onModelUpdate = useCallback((s) => setScene(s), []);
+  const sampleItems = scene?.samples?.items || [];
+
+  useEffect(() => {
+    if (!scene) return;
+    const n = scene.samples?.items?.length || 0;
+    let tab = vizTab;
+    if (tab === "sample" && n === 0) {
+      // re-sampling invalidated the realizations — fall back to ranges
+      tab = "overview";
+      setVizTab("overview");
+    }
+    const idx = clamp(sampleIdx, 0, Math.max(0, n - 1));
+    if (idx !== sampleIdx) setSampleIdx(idx);
+    setModel(sceneToModel(scene, tab, idx));
+  }, [scene, vizTab, sampleIdx]);
+
   const [modal, setModal] = useState(null);
   const [toasts, setToasts] = useState([]);
   const rafRef = useRef(0);
@@ -135,11 +158,15 @@ function App() {
 
   const onLoadPreset = useCallback((key) => {
     const cur = modelRef.current;
-    if (key === "utility") setModel(makeInitialModel());
+    if (key === "utility") setModel(makeUtilityModel());
     else if (key === "rebar") setModel(scenarioRebar().patch(cur));
     else if (key === "mine") setModel(scenarioMine().patch(cur));
     setSelected(null);
   }, []);
+
+  // overview-tab caveats: assumptions that hold until derived truth exists
+  const caveats =
+    vizTab === "overview" && scene ? overviewCaveats(scene) : [];
 
   // legend data
   const usedMats = [
@@ -285,6 +312,64 @@ function App() {
                   />
                 </div>
 
+                {/* view tabs: ranges overview vs one sampled realization */}
+                <div className="viewtabs">
+                  <button
+                    className={"vt" + (vizTab === "overview" ? " on" : "")}
+                    onClick={() => setVizTab("overview")}
+                  >
+                    Overview
+                  </button>
+                  <button
+                    className={"vt" + (vizTab === "sample" ? " on" : "")}
+                    disabled={sampleItems.length === 0}
+                    title={
+                      sampleItems.length === 0
+                        ? "Available once layer sampling has run"
+                        : "Inspect one sampled realization"
+                    }
+                    onClick={() => setVizTab("sample")}
+                  >
+                    Samples
+                  </button>
+                  {vizTab === "sample" && sampleItems.length > 0 && (
+                    <select
+                      className="vsel"
+                      value={sampleIdx}
+                      onChange={(e) => setSampleIdx(Number(e.target.value))}
+                    >
+                      {sampleItems.map((it, i) => (
+                        <option key={it.sample_id} value={i}>
+                          sample {it.sample_id}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {vizTab === "sample" && scene?.samples?.truncated && (
+                    <span
+                      title="Realizations shown / total drawn"
+                      style={{ color: "var(--muted)", padding: "0 6px" }}
+                    >
+                      {scene.samples.included}/{scene.samples.total}
+                    </span>
+                  )}
+                </div>
+
+                {/* overview disclaimers — mental model, not ground truth */}
+                {caveats.length > 0 && (
+                  <div className="caveats">
+                    <div className="ch">
+                      <Icon name="info" size={12} />
+                      Overview is a mental model
+                    </div>
+                    {caveats.map((c, i) => (
+                      <div className="crow" key={i}>
+                        {c}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 {/* HUD */}
                 <div className="hud">
                   <div className="pill">
@@ -377,6 +462,7 @@ function App() {
           model={model}
           modelRef={modelRef}
           setModel={setModel}
+          onModelUpdate={onModelUpdate}
           onRun={runForward}
           dataset={dataset}
           addDataset={addDataset}

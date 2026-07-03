@@ -287,10 +287,29 @@ const ML_MODELS = [
 const WAVEFORMS = ["ricker", "gaussian", "gaussiandot", "sine"];
 
 /* ============================================================
-   initial scenario — a buried utility survey
+   initial model — blank canvas; the agent conversation builds the
+   scene. The old demo scenario lives on as the "utility" preset.
    coordinates in metres; depth grows downward from surface (0)
    ============================================================ */
 function makeInitialModel() {
+  return {
+    project: "untitled_dataset",
+    domain: { width: 1.2, depth: 1.0, dx: 0.002 },
+    acquisition: {
+      antenna: "custom",
+      frequency: 1.0,
+      waveform: "ricker",
+      timeWindow: 12,
+      traceStep: 0.01,
+      txrxSep: 0.05,
+      surveyMode: "B-scan",
+    },
+    layers: [],
+    targets: [],
+  };
+}
+
+function makeUtilityModel() {
   return {
     project: "utility_survey_01",
     domain: { width: 1.4, depth: 0.9, dx: 0.002 },
@@ -655,7 +674,7 @@ function scenarioUtility() {
       { sw: TARGET_TYPES.pvcpipe.color, label: "PVC water main", v: "0.40 m" },
       { sw: TARGET_TYPES.metalpipe.color, label: "Power conduit", v: "0.28 m" },
     ],
-    patch: () => makeInitialModel(),
+    patch: () => makeUtilityModel(),
   };
 }
 function scenarioMine() {
@@ -844,6 +863,197 @@ function localAnswer(text, model) {
   return 'I can build and tweak GPR scenarios, explain the physics, or mass-produce labelled training data. Try: "add a wet clay layer 0.4 m thick", "bury a metal pipe at 0.3 m", "set 900 MHz", or "generate 500 variations".';
 }
 
+/* ============================================================
+   backend scene -> viz model mapping (model_update WebSocket event)
+   ============================================================ */
+
+/* Pick a MATERIALS key (color/pattern only — physics stays backend-side)
+   from a layer's texture + moisture, falling back to nearest catalog εr. */
+function materialKeyForLayer({ sandPct, clayPct, thetaV, epsilon }) {
+  const wet = thetaV != null && thetaV >= 0.2;
+  if (sandPct != null && clayPct != null) {
+    const siltPct = 100 - sandPct - clayPct;
+    if (clayPct >= 35 || (clayPct >= sandPct && clayPct >= siltPct))
+      return wet ? "wetclay" : "dryclay";
+    if (sandPct >= 50 || (sandPct >= clayPct && sandPct >= siltPct))
+      return wet ? "wetsand" : "drysand";
+    if (siltPct >= 50) return "silt";
+    return "topsoil";
+  }
+  if (epsilon != null) {
+    let best = "topsoil";
+    let bestD = Infinity;
+    for (const k of MAT_KEYS) {
+      const d = Math.abs(MATERIALS[k].epsilon - epsilon);
+      if (d < bestD) {
+        bestD = d;
+        best = k;
+      }
+    }
+    return best;
+  }
+  return "topsoil";
+}
+
+function sceneTargetToModel(id, name, material, x, depth, radius) {
+  return {
+    id,
+    name: name || "Target",
+    type: material === "pec" ? "metalpipe" : "pvcpipe",
+    x: x ?? 0,
+    depth: depth ?? 0,
+    diameter: 2 * (radius ?? 0.05),
+    visible: true,
+  };
+}
+
+/* Map the backend `scene` payload to the viz model shape.
+   vizTab: "overview" (range midpoints + thickness uncertainty bands)
+         | "sample"   (one concrete realization from scene.samples)   */
+function sceneToModel(scene, vizTab, sampleIdx) {
+  const base = makeInitialModel();
+  if (!scene) return base;
+
+  const grid = scene.grid;
+  const domain = grid
+    ? {
+        width: round(grid.domain_x_m, 3),
+        depth: round(grid.depth_z_m, 3),
+        dx: grid.dx_m,
+      }
+    : {
+        width: round(scene.domain?.width_m ?? base.domain.width, 3),
+        depth: round(scene.domain?.depth_m ?? base.domain.depth, 3),
+        dx: scene.domain?.dx_m ?? base.domain.dx,
+      };
+
+  const acq = scene.acquisition || {};
+  const acquisition = {
+    ...base.acquisition,
+    frequency: acq.frequency_ghz ?? base.acquisition.frequency,
+    waveform: acq.waveform ?? base.acquisition.waveform,
+    txrxSep: acq.txrx_sep_m ?? base.acquisition.txrxSep,
+    timeWindow: acq.time_window_ns ?? base.acquisition.timeWindow,
+  };
+
+  let layers = [];
+  let targets = [];
+  const items = scene.samples?.items || [];
+
+  if (vizTab === "sample" && items.length > 0) {
+    const item = items[clamp(sampleIdx || 0, 0, items.length - 1)];
+    layers = item.layers.map((l, i) => ({
+      id: "ly_" + i,
+      name: l.name || "Layer " + (i + 1),
+      material: materialKeyForLayer({
+        sandPct: l.sand_pct,
+        clayPct: l.clay_pct,
+        thetaV: l.theta_v_mid,
+        epsilon: l.eps_mid,
+      }),
+      thickness: round(l.thickness_m, 3),
+      epsilon: l.eps_mid != null ? round(l.eps_mid, 1) : null,
+      sigma: null,
+      visible: true,
+    }));
+    if (item.target)
+      targets = [
+        sceneTargetToModel(
+          "tg_0",
+          item.target.name,
+          item.target.material,
+          item.target.x_m,
+          item.target.depth_m,
+          item.target.radius_m,
+        ),
+      ];
+  } else if (scene.ranges) {
+    layers = (scene.ranges.layers || []).map((l, i) => ({
+      id: "ly_" + i,
+      name: l.name || "Layer " + (i + 1),
+      material: materialKeyForLayer({
+        sandPct: l.sand_pct_mid,
+        clayPct: l.clay_pct_mid,
+        thetaV: l.theta_v_mid,
+        epsilon: l.eps_mid,
+      }),
+      thickness: round(l.thickness_mid_m, 3),
+      thicknessMin: l.thickness_min_m,
+      thicknessMax: l.thickness_max_m,
+      epsilon: l.eps_mid != null ? round(l.eps_mid, 1) : null,
+      sigma: null,
+      visible: true,
+    }));
+    const rt = scene.ranges.target;
+    if (rt)
+      targets = [
+        sceneTargetToModel(
+          "tg_0",
+          rt.name,
+          rt.material,
+          rt.x_mid_m,
+          rt.depth_mid_m,
+          rt.radius_mid_m,
+        ),
+      ];
+  }
+
+  return {
+    project: scene.project || base.project,
+    domain,
+    acquisition,
+    layers,
+    targets,
+  };
+}
+
+/* Caveats shown beside the canvas on the Overview tab: the overview is a
+   mental model built from range midpoints and placeholders. Each caveat
+   lists an assumption that holds ONLY until the pipeline derives the real
+   value — items drop out as the truth becomes available. */
+function overviewCaveats(scene) {
+  if (!scene) return [];
+  const out = [];
+  const layers = scene.ranges?.layers || [];
+  const target = scene.ranges?.target;
+  const nSamples = scene.samples?.items?.length || 0;
+  const epsProvisional = layers.some((l) => l.eps_provisional);
+
+  if (scene.domain?.provisional)
+    out.push(
+      "Domain size is a placeholder (~1.2× the layer stack) — the real grid is derived later from the wavelength budget.",
+    );
+  if (layers.length > 0) {
+    out.push(
+      "Layer thicknesses are range midpoints; the shaded bands show the min–max spread each sample is drawn from.",
+    );
+    out.push(
+      epsProvisional
+        ? "εr is a preview at midpoint composition, evaluated at a placeholder 0.9 GHz until the waveform frequency is set."
+        : "εr is a preview at midpoint composition — each sample gets its own derived εr.",
+    );
+    out.push(
+      "σ is not previewed at all — gprMax derives conductivity at model-build time.",
+    );
+    out.push(
+      "Layer colors are a display classification from texture, not a physical material assignment.",
+    );
+  }
+  if (target)
+    out.push(
+      "Target is drawn at the midpoint of its ranges; the actual position and size are drawn per sample.",
+    );
+  if (!scene.acquisition?.frequency_ghz)
+    out.push(
+      "Frequency and antenna values are defaults until the waveform and antenna stages complete.",
+    );
+  if (nSamples > 0)
+    out.push(
+      `${scene.samples.total} concrete realization(s) exist — the Samples tab is the ground truth.`,
+    );
+  return out;
+}
+
 Object.assign(window, {
   uid,
   clamp,
@@ -859,7 +1069,11 @@ Object.assign(window, {
   ML_MODELS,
   WAVEFORMS,
   makeInitialModel,
+  makeUtilityModel,
   layersDepth,
   parseCommand,
   localAnswer,
+  materialKeyForLayer,
+  sceneToModel,
+  overviewCaveats,
 });

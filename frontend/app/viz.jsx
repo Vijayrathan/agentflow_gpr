@@ -180,6 +180,22 @@ function SubsurfaceView({
   }
   const filled = acc;
 
+  // thickness-uncertainty bands (ranges overview): boundary k's spread is the
+  // cumulative min vs max of all layers above it, so uncertainty compounds
+  // downward by construction. Absent thicknessMin/Max (sample view) => none.
+  let accMin = 0,
+    accMax = 0;
+  const bands = [];
+  for (const l of model.layers) {
+    accMin += l.thicknessMin ?? l.thickness;
+    accMax += l.thicknessMax ?? l.thickness;
+    if (l.thicknessMin != null && accMax - accMin > 1e-6)
+      bands.push({
+        from: Math.min(accMin, dom.depth),
+        to: Math.min(accMax, dom.depth),
+      });
+  }
+
   const stepX = niceStep(dom.width),
     stepY = niceStep(dom.depth);
   const xticks = [];
@@ -388,7 +404,8 @@ function SubsurfaceView({
                 fontSize="9"
                 fill="var(--ink-3)"
               >
-                εr {l.epsilon} · σ {l.sigma}
+                εr {l.epsilon ?? "—"}
+                {l.sigma != null ? ` · σ ${l.sigma}` : ""}
               </text>
             </g>
           </g>
@@ -421,10 +438,46 @@ function SubsurfaceView({
             fontSize="10"
             fill="var(--ink-3)"
           >
-            half-space (background medium)
+            {model.layers.length === 0
+              ? "no layers yet — describe the subsurface in chat"
+              : "half-space (background medium)"}
           </text>
         </g>
       )}
+
+      {/* thickness-uncertainty bands around layer boundaries */}
+      {bands.map((b, i) => (
+        <g key={"band" + i} pointerEvents="none">
+          <rect
+            x={oX}
+            y={my(b.from)}
+            width={plotW}
+            height={(b.to - b.from) * scale}
+            fill="var(--accent)"
+            opacity="0.10"
+          />
+          <line
+            x1={oX}
+            y1={my(b.from)}
+            x2={oX + plotW}
+            y2={my(b.from)}
+            stroke="var(--accent)"
+            strokeWidth="1"
+            strokeDasharray="4 4"
+            opacity="0.55"
+          />
+          <line
+            x1={oX}
+            y1={my(b.to)}
+            x2={oX + plotW}
+            y2={my(b.to)}
+            stroke="var(--accent)"
+            strokeWidth="1"
+            strokeDasharray="4 4"
+            opacity="0.55"
+          />
+        </g>
+      ))}
 
       {/* plot frame */}
       <rect

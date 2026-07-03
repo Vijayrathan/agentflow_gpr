@@ -67,6 +67,7 @@ from single_agent_prompts import (  # noqa: E402
     global_remediation_message,
     sample_remediation_message,
 )
+from viz_projection import build_scene  # noqa: E402
 from db.db import ExtractionSession, batch_insert_simulations, get_session  # noqa: E402
 from schema import (  # noqa: E402
     DatasetConfig,
@@ -113,6 +114,13 @@ class ChatSession:
     active_purpose: str = "collect"
     active_section: Optional[str] = None
     remediation_snapshot: Optional[dict[str, Any]] = None
+    # Which pipeline products are current for THIS session — gates what the
+    # scene projection may read from disk (never a stale manifest).
+    viz_flags: dict[str, bool] = field(default_factory=lambda: {
+        "sampled": False, "derived": False, "grid": False,
+        "placed": False, "emitted": False,
+    })
+    last_scene: Optional[dict[str, Any]] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -181,6 +189,10 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
                     ),
                 })
                 await _start_stage(ws, state, "dataset_config")
+
+            # Reconnect/reload: repopulate the canvas from the last scene.
+            if state.last_scene:
+                await ws.send_json({"type": "model_update", "scene": state.last_scene})
 
         while True:
             raw = await ws.receive_text()
@@ -263,9 +275,50 @@ async def _start_stage(ws: WebSocket, chat: ChatSession, section: str) -> None:
     await _invoke_and_handle(ws, chat, SECTION_KICKOFF[section])
 
 
+async def _send_model_update(
+    ws: WebSocket, chat: ChatSession, *, stage: Optional[str] = None
+) -> None:
+    """Project the current store/manifests into a scene and push it to the
+    canvas. Display-only: any failure is logged and swallowed so the viz can
+    never break the chat loop. Identical scenes are deduplicated."""
+    try:
+        out_dir: Optional[str] = None
+        cfg_dict = chat.agent_session.store.get("dataset_config")
+        if cfg_dict:
+            cfg = DatasetConfig.model_validate(cfg_dict)
+            out_dir = str(_resolve_dataset_path(cfg.output_dir))
+        scene = await asyncio.to_thread(
+            build_scene, chat.agent_session.store, chat.viz_flags, out_dir, stage
+        )
+    except Exception:
+        logger.exception("viz projection failed for session %s", chat.session_id)
+        return
+    if scene is None or scene == chat.last_scene:
+        return
+    chat.last_scene = scene
+    await ws.send_json({"type": "model_update", "scene": scene})
+
+
+# Deterministic node -> viz flag updates. layer_sampling RESETS the downstream
+# flags: a re-sample (staleness / global remediation) invalidates every later
+# manifest until its node runs again.
+_VIZ_FLAG_UPDATES: list[tuple[Any, dict[str, bool]]] = [
+    (layer_sampling_node, {"sampled": True, "derived": False, "grid": False,
+                           "placed": False, "emitted": False}),
+    (peplinski_derive_node, {"derived": True}),
+    (global_derive_node, {"grid": True}),
+    (target_placement_node, {"placed": True}),
+    (dataset_generation_node, {"emitted": True}),
+]
+
+
 async def _handle_agent_result(ws: WebSocket, chat: ChatSession, result: dict) -> None:
     for text in chat.agent_session.new_ai_texts(result):
         await ws.send_json({"type": "agent_message", "content": text})
+
+    await _send_model_update(
+        ws, chat, stage=chat.active_section or chat.active_purpose
+    )
 
     if chat.active_purpose == "collect":
         await _check_collect_done(ws, chat)
@@ -460,6 +513,11 @@ async def _run_deterministic(
         output = _clean_stage_output(output)
         if output:
             await ws.send_json({"type": "agent_message", "content": output})
+        for node, flag_updates in _VIZ_FLAG_UPDATES:
+            if fn is node:
+                chat.viz_flags.update(flag_updates)
+                break
+        await _send_model_update(ws, chat, stage=stage_name)
     finally:
         chat.busy = False
         await ws.send_json({"type": "pipeline_busy", "busy": False})

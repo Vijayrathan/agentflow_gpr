@@ -60,6 +60,7 @@ function ChatPane({
   collapsed,
   setCollapsed,
   toast,
+  onModelUpdate,
 }) {
   const [messages, setMessages] = React.useState([
     {
@@ -77,6 +78,10 @@ function ChatPane({
   const scrollRef = React.useRef(null);
   const taRef = React.useRef(null);
   const wsRef = React.useRef(null);
+  // ws.onmessage is bound once at mount and would capture the first render's
+  // handleServerEvent; route the callback through a ref so it stays current.
+  const onModelUpdateRef = React.useRef(onModelUpdate);
+  onModelUpdateRef.current = onModelUpdate;
 
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -133,6 +138,11 @@ function ChatPane({
   function handleServerEvent(msg) {
     if (msg.type === "pipeline_busy") {
       setBusy(Boolean(msg.busy));
+      return;
+    }
+    if (msg.type === "model_update") {
+      // Mid-turn canvas update — must not clear the typing indicator.
+      if (onModelUpdateRef.current) onModelUpdateRef.current(msg.scene);
       return;
     }
 

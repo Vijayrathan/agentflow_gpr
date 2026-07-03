@@ -742,6 +742,93 @@
         color: var(--muted);
       }
 
+      .stage .viewtabs {
+        position: absolute;
+        left: 14px;
+        top: 12px;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(4px);
+        border: 1px solid var(--line-2);
+        border-radius: 7px;
+        padding: 3px;
+        box-shadow: var(--shadow-sm);
+        font-size: 11px;
+        z-index: 5;
+      }
+      .viewtabs .vt {
+        border: 0;
+        background: transparent;
+        padding: 4px 10px;
+        border-radius: 5px;
+        cursor: pointer;
+        color: var(--muted);
+        font: inherit;
+      }
+      .viewtabs .vt.on {
+        background: rgba(37, 99, 235, 0.12);
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .viewtabs .vt:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .viewtabs .vsel {
+        font: inherit;
+        font-size: 11px;
+        border: 1px solid var(--line-2);
+        border-radius: 5px;
+        padding: 2px 4px;
+        background: #fff;
+        color: var(--ink-2);
+        max-width: 150px;
+      }
+
+      .stage .caveats {
+        position: absolute;
+        left: 14px;
+        top: 52px;
+        max-width: 236px;
+        max-height: 55%;
+        overflow-y: auto;
+        background: rgba(255, 251, 240, 0.94);
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(217, 164, 65, 0.45);
+        border-left: 3px solid #d9a441;
+        border-radius: 8px;
+        padding: 9px 11px;
+        box-shadow: var(--shadow-sm);
+        font-size: 10.5px;
+        color: var(--ink-2);
+        z-index: 4;
+      }
+      .caveats .ch {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #9a7118;
+        margin-bottom: 6px;
+      }
+      .caveats .ch .feather {
+        stroke: #9a7118;
+      }
+      .caveats .crow {
+        margin: 5px 0;
+        line-height: 1.45;
+      }
+      .caveats .crow::before {
+        content: "· ";
+        color: #d9a441;
+        font-weight: 700;
+      }
+
       .solving-bar {
         position: absolute;
         left: 0;
