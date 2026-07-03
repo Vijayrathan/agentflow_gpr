@@ -164,9 +164,12 @@ function App() {
     setSelected(null);
   }, []);
 
-  // overview-tab caveats: assumptions that hold until derived truth exists
+  // overview-tab caveats: assumptions that hold until derived truth exists.
+  // Collapsed to a chip by default so the panel never sits over the plot
+  // (the SVG fills the full canvas width when the dock is collapsed).
   const caveats =
     vizTab === "overview" && scene ? overviewCaveats(scene) : [];
+  const [caveatsOpen, setCaveatsOpen] = useState(false);
 
   // legend data
   const usedMats = [
@@ -356,12 +359,31 @@ function App() {
                 </div>
 
                 {/* overview disclaimers — mental model, not ground truth */}
-                {caveats.length > 0 && (
+                {caveats.length > 0 && !caveatsOpen && (
+                  <button
+                    className="caveats-chip"
+                    onClick={() => setCaveatsOpen(true)}
+                    title="This view is a mental model — click to see its assumptions"
+                  >
+                    <Icon name="info" size={12} />
+                    assumptions ({caveats.length})
+                  </button>
+                )}
+                {caveats.length > 0 && caveatsOpen && (
                   <div className="caveats">
-                    <div className="ch">
+                    <button
+                      className="ch"
+                      onClick={() => setCaveatsOpen(false)}
+                      title="Collapse"
+                    >
                       <Icon name="info" size={12} />
                       Overview is a mental model
-                    </div>
+                      <Icon
+                        name="x"
+                        size={11}
+                        style={{ marginLeft: "auto", flex: "none" }}
+                      />
+                    </button>
                     {caveats.map((c, i) => (
                       <div className="crow" key={i}>
                         {c}
@@ -451,7 +473,7 @@ function App() {
                 progress={progress}
                 collapsed={dockCollapsed}
                 setCollapsed={setDockCollapsed}
-                height={252}
+                height="clamp(170px, 30vh, 300px)"
               />
             </div>
           </div>

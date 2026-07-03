@@ -486,7 +486,7 @@
         min-height: 0;
       }
       .rail {
-        width: 236px;
+        width: clamp(190px, 18vw, 260px);
         flex: none;
         background: var(--panel);
         border-right: 1px solid var(--line);
@@ -787,12 +787,35 @@
         max-width: 150px;
       }
 
+      .stage .caveats-chip {
+        position: absolute;
+        left: 14px;
+        top: 52px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        background: rgba(255, 251, 240, 0.94);
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(217, 164, 65, 0.45);
+        border-left: 3px solid #d9a441;
+        border-radius: 7px;
+        padding: 4px 9px;
+        box-shadow: var(--shadow-sm);
+        font-size: 10px;
+        font-weight: 600;
+        color: #9a7118;
+        cursor: pointer;
+        z-index: 4;
+      }
+      .caveats-chip .feather {
+        stroke: #9a7118;
+      }
       .stage .caveats {
         position: absolute;
         left: 14px;
         top: 52px;
-        max-width: 236px;
-        max-height: 55%;
+        max-width: min(236px, 24vw);
+        max-height: min(55%, 340px);
         overflow-y: auto;
         background: rgba(255, 251, 240, 0.94);
         backdrop-filter: blur(4px);
@@ -809,6 +832,12 @@
         display: flex;
         align-items: center;
         gap: 5px;
+        width: 100%;
+        border: none;
+        background: none;
+        padding: 0;
+        text-align: left;
+        cursor: pointer;
         font-size: 9.5px;
         font-weight: 700;
         letter-spacing: 0.05em;
@@ -1126,8 +1155,9 @@
 
       /* ============ CHAT PANE ============ */
       .chat {
-        width: 392px;
+        width: clamp(300px, 28vw, 420px);
         flex: none;
+        position: relative;
         background: var(--panel);
         border-left: 1px solid var(--line-2);
         display: flex;
@@ -1137,10 +1167,42 @@
           width 0.22s,
           margin 0.22s;
       }
+      /* bound the user-resized inline width; scoped to :not(.collapsed) so
+         the collapse-to-zero animation keeps working */
+      .chat:not(.collapsed) {
+        min-width: 280px;
+        max-width: min(680px, 72vw);
+      }
+      .chat.resizing {
+        transition: none;
+      }
       .chat.collapsed {
         width: 0;
         border-left: none;
         overflow: hidden;
+      }
+      .chat-resizer {
+        position: absolute;
+        left: -4px;
+        top: 0;
+        bottom: 0;
+        width: 8px;
+        cursor: col-resize;
+        z-index: 12;
+        touch-action: none;
+      }
+      .chat-resizer:hover,
+      .chat-resizer.active {
+        background: linear-gradient(
+          90deg,
+          transparent 2px,
+          rgba(37, 99, 235, 0.35) 3px,
+          rgba(37, 99, 235, 0.35) 5px,
+          transparent 6px
+        );
+      }
+      .chat.collapsed .chat-resizer {
+        display: none;
       }
       .chat-head {
         flex: none;

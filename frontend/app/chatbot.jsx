@@ -78,6 +78,43 @@ function ChatPane({
   const scrollRef = React.useRef(null);
   const taRef = React.useRef(null);
   const wsRef = React.useRef(null);
+  const paneRef = React.useRef(null);
+
+  // user-resizable pane width; null = CSS default (clamp on .chat).
+  // CSS min/max-width still bound the inline value, so it stays responsive
+  // when the window shrinks.
+  const [chatW, setChatW] = React.useState(() => {
+    const v = parseInt(localStorage.getItem("nl2sim_chat_w") || "", 10);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  });
+  const [resizing, setResizing] = React.useState(false);
+
+  React.useEffect(() => {
+    if (chatW != null) localStorage.setItem("nl2sim_chat_w", String(chatW));
+    else localStorage.removeItem("nl2sim_chat_w");
+  }, [chatW]);
+
+  function startResize(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = paneRef.current ? paneRef.current.offsetWidth : 392;
+    setResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev) => {
+      const max = Math.round(window.innerWidth * 0.72);
+      setChatW(clamp(startW + (startX - ev.clientX), 280, max));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setResizing(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
   // ws.onmessage is bound once at mount and would capture the first render's
   // handleServerEvent; route the callback through a ref so it stays current.
   const onModelUpdateRef = React.useRef(onModelUpdate);
@@ -227,7 +264,19 @@ function ChatPane({
       : status;
 
   return (
-    <section className={"chat" + (collapsed ? " collapsed" : "")}>
+    <section
+      ref={paneRef}
+      className={
+        "chat" + (collapsed ? " collapsed" : "") + (resizing ? " resizing" : "")
+      }
+      style={!collapsed && chatW != null ? { width: chatW } : undefined}
+    >
+      <div
+        className={"chat-resizer" + (resizing ? " active" : "")}
+        onPointerDown={startResize}
+        onDoubleClick={() => setChatW(null)}
+        title="Drag to resize · double-click to reset"
+      />
       <div className="chat-head">
         <div className="chat-av">
           <Icon name="sparkles" size={17} style={{ color: "#fff" }} />
