@@ -203,6 +203,12 @@ function ChatPane({
 
   const connected = status === "connected";
   const inputDisabled = !connected || busy || sending;
+
+  // The textarea is disabled while the pipeline works, which drops focus.
+  // Re-focus whenever it becomes editable again so the user can keep typing.
+  React.useEffect(() => {
+    if (!inputDisabled && taRef.current) taRef.current.focus();
+  }, [inputDisabled]);
   const statusText =
     status === "connected"
       ? busy

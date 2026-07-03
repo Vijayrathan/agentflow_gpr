@@ -3,201 +3,261 @@
   "in_dir": "/Users/vijay/Documents/langchain_agents/dataset/in_files",
   "n_written": 10,
   "grid": {
-    "dx_m": 0.003682517171133895,
-    "domain_x_m": 1.336753733121604,
-    "domain_y_m": 1.2115481493030515,
-    "ground_y_m": 0.6736503434226779,
+    "dx_m": 0.003667034616650782,
+    "domain_x_m": 1.3348006004608848,
+    "domain_y_m": 1.6905029582760105,
+    "ground_y_m": 1.1533406923330156,
     "f_peak_hz": 700000000.0,
-    "time_window_s": 2.98732486120352e-08,
+    "time_window_s": 4.3818989435847305e-08,
     "pml_cells": 10
   },
   "files": [
     {
       "sample_id": 1,
-      "filename": "soil_sample_1.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_1.in",
+      "filename": "sail_1.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_1.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.21726851309689982,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.456632129220603
+          "thickness_m": 0.22002207699904686,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9350938272459495
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.456632129220603,
-          "y_top_m": 0.456632129220603,
+          "thickness_m": 0.33370015011522125,
+          "y_top_m": 0.9350938272459495,
+          "y_bottom_m": 0.6013936771307282
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.6013936771307282,
+          "y_top_m": 0.6013936771307282,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 2,
-      "filename": "soil_sample_2.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_2.in",
+      "filename": "sail_2.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_2.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.19149089289896254,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.48240974941854026
+          "thickness_m": 0.21268800776574537,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.942427896479251
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.48240974941854026,
-          "y_top_m": 0.48240974941854026,
+          "thickness_m": 0.3447012539651735,
+          "y_top_m": 0.942427896479251,
+          "y_bottom_m": 0.5977266425140775
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.5977266425140775,
+          "y_top_m": 0.5977266425140775,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 3,
-      "filename": "soil_sample_3.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_3.in",
+      "filename": "sail_3.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_3.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.22831606461030152,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.4455845777072013
+          "thickness_m": 0.22735614623234845,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9277597580126479
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.4455845777072013,
-          "y_top_m": 0.4455845777072013,
+          "thickness_m": 0.3226990462652688,
+          "y_top_m": 0.9277597580126479,
+          "y_bottom_m": 0.6050607117473791
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.6050607117473791,
+          "y_top_m": 0.6050607117473791,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 4,
-      "filename": "soil_sample_4.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_4.in",
+      "filename": "sail_4.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_4.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.22831606461030152,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.4455845777072013
+          "thickness_m": 0.19435283468249143,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9607630695625049
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.4455845777072013,
-          "y_top_m": 0.4455845777072013,
+          "thickness_m": 0.3080309077986657,
+          "y_top_m": 0.9607630695625049,
+          "y_bottom_m": 0.6527321617638392
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.6527321617638392,
+          "y_top_m": 0.6527321617638392,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 5,
-      "filename": "soil_sample_5.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_5.in",
+      "filename": "sail_5.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_5.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.2209510302680337,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.4529496120494691
+          "thickness_m": 0.2383572500823008,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9167586541626955
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.4529496120494691,
-          "y_top_m": 0.4529496120494691,
+          "thickness_m": 0.34103421934852274,
+          "y_top_m": 0.9167586541626955,
+          "y_bottom_m": 0.5757244348141728
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.5757244348141728,
+          "y_top_m": 0.5757244348141728,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 6,
-      "filename": "soil_sample_6.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_6.in",
+      "filename": "sail_6.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_6.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.20253844441236424,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.47136219790513856
+          "thickness_m": 0.20535393853244377,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9497619657125526
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.47136219790513856,
-          "y_top_m": 0.47136219790513856,
+          "thickness_m": 0.32636608088191965,
+          "y_top_m": 0.9497619657125526,
+          "y_bottom_m": 0.6233958848306329
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.6233958848306329,
+          "y_top_m": 0.6233958848306329,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 7,
-      "filename": "soil_sample_7.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_7.in",
+      "filename": "sail_7.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_7.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.23936361612370316,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.43453702619379964
+          "thickness_m": 0.18701876544918983,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9680971387958065
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.43453702619379964,
-          "y_top_m": 0.43453702619379964,
+          "thickness_m": 0.31169794241531645,
+          "y_top_m": 0.9680971387958065,
+          "y_bottom_m": 0.65639919638049
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.65639919638049,
+          "y_top_m": 0.65639919638049,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 8,
-      "filename": "soil_sample_8.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_8.in",
+      "filename": "sail_8.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_8.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.19149089289896254,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.48240974941854026
+          "thickness_m": 0.22002207699904686,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9350938272459495
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.48240974941854026,
-          "y_top_m": 0.48240974941854026,
+          "thickness_m": 0.34836828858182434,
+          "y_top_m": 0.9350938272459495,
+          "y_bottom_m": 0.5867255386641251
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.5867255386641251,
+          "y_top_m": 0.5867255386641251,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 9,
-      "filename": "soil_sample_9.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_9.in",
+      "filename": "sail_9.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_9.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.21358599592576594,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.46031464639173686
+          "thickness_m": 0.22735614623234845,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9277597580126479
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.46031464639173686,
-          "y_top_m": 0.46031464639173686,
+          "thickness_m": 0.30436387318201497,
+          "y_top_m": 0.9277597580126479,
+          "y_bottom_m": 0.6233958848306329
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.6233958848306329,
+          "y_top_m": 0.6233958848306329,
           "y_bottom_m": 0.0
         }
       ]
     },
     {
       "sample_id": 10,
-      "filename": "soil_sample_10.in",
-      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/soil_sample_10.in",
+      "filename": "sail_10.in",
+      "path": "/Users/vijay/Documents/langchain_agents/dataset/in_files/sail_10.in",
       "layers": [
         {
           "name": "top_sandy_loam",
-          "thickness_m": 0.18780837572782866,
-          "y_top_m": 0.6739006423175028,
-          "y_bottom_m": 0.48609226658967414
+          "thickness_m": 0.2090209731490945,
+          "y_top_m": 1.1551159042449963,
+          "y_bottom_m": 0.9460949310959018
         },
         {
           "name": "middle_silt_loam",
-          "thickness_m": 0.48609226658967414,
-          "y_top_m": 0.48609226658967414,
+          "thickness_m": 0.31903201164861805,
+          "y_top_m": 0.9460949310959018,
+          "y_bottom_m": 0.6270629194472838
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.6270629194472838,
+          "y_top_m": 0.6270629194472838,
           "y_bottom_m": 0.0
         }
       ]

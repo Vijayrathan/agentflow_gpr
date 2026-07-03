@@ -50,26 +50,64 @@ This is the single most important design constraint. Violating it is never accep
 
 | File | Role |
 |------|------|
-| `api.py` | FastAPI server; WebSocket endpoint (`/ws/{sessionId}`) bridges frontend to LangGraph pipeline |
-| `agentflow_langgraph.py` | 10-stage LangGraph pipeline definition — connects extraction agents to deterministic stages |
-| `parameters_global_state.py` | In-memory parameter server (FastAPI on port 8100); agents POST/GET/PATCH sections here |
+| `api.py` | FastAPI server; WebSocket endpoint (`/ws/{sessionId}`) bridges frontend to the **single-agent** pipeline (one isolated `SingleAgentSession` per chat) |
+| `agentflow_single_agent.py` | **ACTIVE** extraction pipeline: ONE deep agent on ONE thread collects all six sections; also the CLI entry (`python backend/agentflow_single_agent.py`) |
+| `single_agent_prompts.py` | Slim system prompt + per-section `SECTION_KICKOFF` injection messages + remediation message builders for the single agent |
+| `agentflow_langgraph.py` | LEGACY multi-agent LangGraph pipeline (6 agents + parameter server). No longer imported by `api.py`; kept as CLI reference |
+| `parameters_global_state.py` | In-memory parameter server (port 8100) — LEGACY path only; the single-agent pipeline does not use it |
 | `schema.py` | All Pydantic models: `DatasetConfig`, `ExtractedLayers`, `ExtractedWaveform`, `ExtractedAntenna`, `ExtractedAdvancedParams`, `GlobalDerived`, etc. |
 | `rag.py` | RAG retrieval: Qdrant vector DB + BAAI/bge-m3 embeddings + Docling parsing |
 | `physics_modelling.py` | Peplinski ε computation via gprMax-native routines |
 | `validation_tools_new.py` | Tiered validation (Tier 0–4) for physics constraints |
 
-### Extraction Agents (`backend/extraction_agents/`)
+### Single-Agent Extraction (ACTIVE — `backend/agentflow_single_agent.py`)
 
-Six agents, each using `deepagents.create_deep_agent()` with GPT-4 mini + a RAG sub-agent:
+One `deepagents.create_deep_agent()` (gpt-4.1-mini + the shared RAG sub-agent) collects
+all six sections on a single conversation thread. Key mechanics:
 
-- `dataset_config_extraction.py` — num_samples, naming, grid/boundary policy
-- `layer_extraction.py` — soil layer ranges (sand %, clay %, thickness, densities, moisture)
-- `target_extraction.py` — buried target geometry ranges (cylinder only for now)
-- `waveform_extraction.py` — waveform type, amplitude, center frequency
-- `antenna_extraction.py` — antenna axis, Tx-Rx offset, resistance
-- `advanced_params_extraction.py` — PML, fractal, snapshots
+- **`SingleAgentSession`** bundles the section store, the two tools bound to it
+  (closures via `_make_section_tools`), the lazily built agent, and the thread id.
+  The CLI drives a module-level `_DEFAULT_SESSION`; `api.py` creates one per
+  WebSocket session — never share stores across sessions.
+- **Tools**: `save_section(section, payload)` (validate + FULL replace; invalid ⇒
+  rejected with error, nothing stored; schema-valid but missing essentials ⇒
+  `stored_incomplete`) and `get_section`. No PATCH — editing = re-saving the full section.
+- **Stage completion** is store-based (`stage_done`: schema-valid + `_section_is_complete`),
+  NOT tool-call scraping. The orchestrator advances the moment the store section
+  is complete — this drives the prompt rules below.
+- **Prompting**: slim system prompt; each stage injects `SECTION_KICKOFF[section]`
+  (field groups, physics constraints, JSON schema) as an internal orchestrator
+  message. Remediation errors are injected into the SAME conversation; changed
+  sections are detected by store-snapshot diffing.
+- **Staleness re-sampling**: the agent may edit any section at any time. `layers`,
+  `dataset_config`, AND `target_ranges` are `RESAMPLE_SECTIONS` (sampling inputs);
+  if they change after `layer_sampling` ran, samples are re-drawn before the derive
+  chain (snapshot comparison via `_samples_stale`).
+- Key-free tests: `backend/tests/test_single_agent_store.py` (agent is lazy; module
+  imports and graph compiles without `OPENAI_API_KEY`).
 
-Agents communicate through the parameter server (port 8100) via three tools: `post_parameters`, `get_parameters`, `patch_parameters`.
+**Prompt-authoring rules** (regressions seen in live transcripts — keep these invariants
+when editing `single_agent_prompts.py`):
+
+- Kickoff messages are internal: they must open with the `[Orchestrator instruction …]`
+  marker and never instruct the agent to announce the stage — the frontend's
+  `stage_change` event already displays it (avoid double announcements / banner echo).
+- No "Batch N" labels in field lists — the model parrots them to the user. Grouping is
+  internal pacing guidance only.
+- Because the pipeline advances immediately when a save completes a section, the save
+  must be the LAST act of a stage: optional fields are raised BEFORE saving; a completed
+  stage's reply ends with a short summary, never a question; "keep rest at defaults" ⇒
+  save immediately, don't interrogate remaining fields.
+- After a remediation re-save: confirm in one line and stop (re-validation is automatic).
+
+### Extraction Agents (`backend/extraction_agents/`) — LEGACY
+
+Six per-section agents (dataset_config, layers, target, waveform, antenna,
+advanced_params), each `create_deep_agent()` + RAG sub-agent, communicating via the
+port-8100 parameter server tools (`post_parameters`, `get_parameters`,
+`patch_parameters`). Only used by the legacy `agentflow_langgraph.py` / `agentflow.py`
+paths; the per-section prompt guidance in `prompt_library.py` is the source the
+single-agent kickoffs were adapted from.
 
 ### Deterministic Pipeline (`backend/dataset_sampling/`)
 
@@ -109,17 +147,28 @@ Full gprMax source as a local directory (not a submodule). Used directly for:
 
 DVC + Google Drive for large dataset files. Qdrant vector DB stored at `db/qdrant_storage/`.
 
-## LangGraph Pipeline Flow
+## Pipeline Flow
 
 ```
 START → dataset_config → layers → target_ranges → layer_sampling
   → waveform → antenna → sample_validation [GATE: loops on fail]
-  → advanced_params → peplinski_derive → global_derive
+  → advanced_params [→ layer_sampling if sampling inputs went stale]
+  → peplinski_derive → global_derive
   → global_validation [GATE: loops on fail to remediation]
   → target_placement → dataset_generation → END
 ```
 
-On validation failure, the graph routes to a remediation node that re-engages the relevant agent, then loops back to validate. No direct agent-to-agent communication — all state flows through `PipelineState` (TypedDict).
+On validation failure, the errors are injected into the single agent's ongoing
+conversation; it agrees the fix with the user and re-saves the offending section, then
+the gate re-runs. A global-remediation edit to a `RESAMPLE_SECTIONS` member routes back
+through `layer_sampling` first. All state flows through `PipelineState` (TypedDict) /
+`ChatSession.state`; after every completed agent turn the WHOLE store is synced into
+state, so cross-section edits land immediately.
+
+**Frontend WebSocket protocol** (`api.py` → `chatbot.jsx`): `agent_message`,
+`stage_change`, `progress`, `validation_failed`, `pipeline_busy`, `dataset_ready`,
+`error`. `choice_required` is no longer emitted (the agent negotiates the fix in
+conversation); the frontend handler remains for compatibility.
 
 ## Physics Constraints
 

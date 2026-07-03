@@ -79,7 +79,7 @@ For layer 1:
 - What is the layer name? (optional, you can skip)
 - What is the thickness range in meters? Please provide minimum and maximum thickness.
 
-You: Please define all two layers now:
+You: Please define all 3 layers now:
 Layer 1 name=top_sandy_loam; thickness_m_min=0.18; thickness_m_max=0.24; sand_pct_min=45; sand_pct_max=50; clay_pct_min=5; clay_pct_max=10; theta_v_min=0.08; theta_v_max=0.18; bulk_density_gcm3_min=1.35; bulk_density_gcm3_max=1.55; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
 Layer 2 name=middle_silt_loam; thickness_m_min=0.28; thickness_m_max=0.36; sand_pct_min=25; sand_pct_max=35; clay_pct_min=10; clay_pct_max=16; theta_v_min=0.12; theta_v_max=0.24; bulk_density_gcm3_min=1.30; bulk_density_gcm3_max=1.50; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
 Layer 3 name=lower_clay_loam; thickness_m_min=0.38; thickness_m_max=0.48; sand_pct_min=15; sand_pct_max=25; clay_pct_min=16; clay_pct_max=20; theta_v_min=0.16; theta_v_max=0.28; bulk_density_gcm3_min=1.25; bulk_density_gcm3_max=1.45; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.

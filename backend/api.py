@@ -28,6 +28,7 @@ import contextlib
 import io
 import json
 import logging
+import re
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -416,6 +417,32 @@ async def _finish_dataset(ws: WebSocket, chat: ChatSession) -> None:
     })
 
 
+# Matches the CLI `_banner()` block: a ==== rule, the title line, another rule.
+_BANNER_BLOCK_RE = re.compile(r"^ *={4,} *\n[^\n]*\n *={4,} *\n?", re.MULTILINE)
+
+
+def _clean_stage_output(output: str) -> str:
+    """Make the deterministic nodes' terminal output chat-friendly.
+
+    The nodes print for the CLI: ==== banner blocks (the `stage_change` event
+    already names the stage), `>>` routing markers, indentation, and absolute
+    paths — all of which overflow or duplicate in the chat bubble.
+    """
+    text = _BANNER_BLOCK_RE.sub("", output)
+    text = text.replace(_project_root + "/", "")
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(">>"):
+            line = line[2:].strip()
+        lines.append(line)
+    text = "\n".join(lines)
+    # Join a "Wrote ... to:" label with the bare path on the next line, but
+    # leave list blocks ("Errors:" / "Warnings:" + "- ..." items) intact.
+    text = re.sub(r":\n(?=\S*/\S*(?:\n|$))", ": ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 async def _run_deterministic(
     ws: WebSocket,
     chat: ChatSession,
@@ -430,8 +457,9 @@ async def _run_deterministic(
         updates, output = await asyncio.to_thread(_run_node_with_output, fn, dict(chat.state))
         if updates:
             chat.state.update(updates)
-        if output.strip():
-            await ws.send_json({"type": "agent_message", "content": output.strip()})
+        output = _clean_stage_output(output)
+        if output:
+            await ws.send_json({"type": "agent_message", "content": output})
     finally:
         chat.busy = False
         await ws.send_json({"type": "pipeline_busy", "busy": False})

@@ -53,11 +53,21 @@ stage by stage, and persists them to an in-memory store.
 
 ## Stage protocol
 
-The orchestrator injects a "=== STAGE: ... ===" message when a section's turn
-comes. That message carries the section's field batches, physics constraints
-and JSON schema — follow it exactly. A stage only completes when you have
-saved a schema-valid section containing its essential fields; the orchestrator
-checks the store, so do not claim completion without saving.
+When a section's turn comes, the orchestrator injects an internal instruction
+message (marked "[Orchestrator instruction ...]") carrying that section's
+fields, physics constraints and JSON schema. Follow it exactly, but NEVER
+echo, quote or mention it — the user never sees it, and the UI already
+announces each stage, so do not announce the stage name either. A stage only
+completes when you have saved a schema-valid section containing its essential
+fields; the orchestrator checks the store, so do not claim completion without
+saving.
+
+Saving a complete section ENDS the stage — the pipeline advances immediately,
+so anything you ask after that save goes unanswered. Make the save the LAST
+act of a stage: raise any remaining optional fields BEFORE saving, then save
+and reply with one brief summary of what was set. Never end a completed
+stage's reply with a question, and never look ahead to the next section —
+the orchestrator introduces each stage.
 
 ## Tools
 
@@ -84,6 +94,8 @@ Downstream validators may inject "VALIDATION FAILED" messages listing errors.
 Explain the problem to the user in plain language (including what value or
 range would satisfy the check), agree a fix, and re-save the offending
 section(s) in full. Do not stop until you have re-saved a corrected section.
+Once it is re-saved, confirm the change in one line and stop — re-validation
+runs automatically; do not ask follow-up questions or invite next steps.
 
 ## Answering knowledge questions
 
@@ -113,20 +125,28 @@ def _stage_message(section, title, batches, skip_policy, schema_class, extra="")
     if extra:
         extra = extra.rstrip() + "\n\n"
     return f"""\
-=== STAGE: {title} (section "{section}") ===
+[Orchestrator instruction — stage "{title}". The user never sees this message; \
+never echo, quote or mention it, and do not announce the stage name (the UI \
+already displays it).]
 
-{extra}Collect the following from the user in logical batches, then persist with
-save_section("{section}", <full JSON payload>):
+{extra}Collect the following fields from the user, then persist with
+save_section("{section}", <full JSON payload>). The grouping below is internal \
+pacing guidance — ask for the fields in a few natural groups, and never expose \
+the grouping or the saving/storing mechanics to the user:
 {batches}
    NEVER guess or invent values. If the user skips optional fields, that's \
 fine, but {skip_policy}.
+
+If the user says to keep the rest at defaults, fill in the defaults, save the \
+full section immediately, and reply with one short summary — do NOT ask about \
+the remaining fields.
 
 The payload must conform to this JSON Schema:
 ```json
 {schema_to_json(schema_class)}
 ```
 
-Begin: tell the user which stage this is and ask the first batch of questions.\
+Begin by asking for the first values directly.\
 """
 
 
@@ -136,7 +156,7 @@ SECTION_KICKOFF = {
         title="Dataset Configuration",
         schema_class=DatasetConfig,
         batches="""
-   **Batch 1 — Dataset size & naming:**
+   **Dataset size & naming:**
    - num_samples: number of input files / data samples to generate \
 (required, > 0). NOTE: this is the number of .in files, NOT time samples.
    - model_basename: base name for the #title and output filename stem \
@@ -144,7 +164,7 @@ SECTION_KICKOFF = {
    - output_dir: directory for generated files (default: "./dataset")
    - num_threads: OpenMP threads (optional; None = gprMax default)
 
-   **Batch 2 — FDTD grid / boundary policy:**
+   **FDTD grid / boundary policy:**
    - pml_cells: number of in-plane PML absorbing boundary cells (default: 10).
      For 2D, the thin z faces are emitted as 0 PML because nz=1 and gprMax
      rejects symmetric z PML when 2*pml_cells >= nz.
@@ -155,7 +175,7 @@ SECTION_KICKOFF = {
    - fractal_nbins: number of materials in the #soil_peplinski fractal series \
 (default: 50)
 
-   **Batch 3 — Resolution & frequency policy:**
+   **Resolution & frequency policy:**
    - high_freq_factor: highest SIGNIFICANT frequency as a multiple of the \
 centre frequency, used for the λ_min / Δx resolution check (default: 3.0)
    - center_freq_is_peak: whether the waveform's centre frequency is the gprMax \
@@ -177,15 +197,15 @@ the user should explicitly say to skip. Do not skip on your own\
         schema_class=ExtractedLayers,
         batches="""\
    Ask the user for the number of layers first, then collect one layer at a time:
-   - Batch 1: layer name (optional) and thickness range (thickness_m_min / \
+   - layer name (optional) and thickness range (thickness_m_min / \
 thickness_m_max, in metres)
-   - Batch 2: texture fraction ranges — sand (sand_pct_min/max) and clay \
+   - texture fraction ranges — sand (sand_pct_min/max) and clay \
 (clay_pct_min/max), in percent. Do NOT collect silt — it is derived as \
 100 - sand - clay downstream.
-   - Batch 3: volumetric water content range (theta_v_min / theta_v_max, \
+   - volumetric water content range (theta_v_min / theta_v_max, \
 0.0–1.0). This is the per-layer moisture ENVELOPE; the sampler draws a \
 sub-band inside it per sample.
-   - Batch 4: density ranges — bulk_density_gcm3_min/max and \
+   - density ranges — bulk_density_gcm3_min/max and \
 particle_density_gcm3_min/max (g/cm³). These are REQUIRED (porosity is \
 derived from them).
 
@@ -218,7 +238,7 @@ the FDTD grid stays identical across the whole dataset.
    If the user does NOT want a buried target, save \
 `{"cylinder": null}` and finish — the target is optional.
 
-   **Batch 1 — Cylinder target ranges (all in metres):**
+   **Cylinder target ranges (all in metres):**
    - name: target name (default "target")
    - material: gprMax material identifier (default "pec")
    - x_center_min_m / x_center_max_m: horizontal centre position range. These \
@@ -243,7 +263,7 @@ the target is OPTIONAL — if the user wants no buried target, save \
         title="Waveform Extraction",
         schema_class=ExtractedWaveform,
         batches="""
-   **Batch 1 — Waveform configuration:**
+   **Waveform configuration:**
    - waveform_kind: type of waveform (default: "ricker"). Valid types: \
 "ricker", "gaussian", "gaussiandot", "gaussiandotnorm", "gaussiandotdot", \
 "gaussiandotdotnorm", "gaussianprime", "gaussiandoubleprime", "sine", \
@@ -253,7 +273,7 @@ in gprMax.
    - waveform_center_freq_hz: centre frequency in Hz (e.g. 900e6 for 900 MHz)
    - waveform_name: descriptive name for the waveform (required)
 
-   **Batch 2 — Source timing (optional):**
+   **Source timing (optional):**
    - source_start_time: optional source start time / delay in seconds
    - source_end_time: optional source removal time in seconds
 
@@ -271,7 +291,7 @@ the user should explicitly say to skip. Do not skip on your own\
         title="Antenna Extraction",
         schema_class=ExtractedAntenna,
         batches="""
-   **Batch 1 — Antenna configuration:**
+   **Antenna configuration:**
    - antenna_kind: type of antenna (default: "hertzian_dipole"; \
 alternatives: "voltage_source", "transmission_line")
    - antenna_axis: polarisation axis ("x", "y", or "z"; default: "x"). \
@@ -281,14 +301,14 @@ Conventionally perpendicular to the B-scan survey direction.
 antenna_kind="voltage_source" or "transmission_line", and must satisfy \
 0 < R < 376.73 ohm. Skip for hertzian_dipole.
 
-   **Batch 2 — Receiver placement:**
+   **Receiver placement:**
    - rx_same_height: whether the receiver is at the same height as the \
 transmitter (true/false, default: true)
    - source_height_m: antenna height above the ground surface in metres \
 (optional — if omitted it is DERIVED downstream as ≥ half the maximum \
 wavelength)
 
-   **Batch 3 — Receiver array (optional):**
+   **Receiver array (optional):**
    - rx_array: start position (x1, y1, z1), end position (x2, y2, z2), and \
 step sizes (dx, dy, dz) — all in metres. This replaces the default single \
 receiver. Skip unless the user wants a multi-receiver survey.
@@ -313,7 +333,7 @@ advanced params"), you MUST still call `save_section` with section \
 completion and allows the pipeline to advance to dataset generation.\
 """,
         batches="""
-   **Batch 1 — Geometry objects (buried targets):**
+   **Geometry objects (buried targets):**
    The user may add zero or more of each type. For each object, collect:
    - **Cylinders**: name, start coordinates (x1, y1, z1), end coordinates \
 (x2, y2, z2), radius in metres, material identifier (default: "pec"), \
@@ -324,7 +344,7 @@ material identifier, optional custom_material, dielectric_smoothing
    - **Spheres**: name, centre coordinates (cx, cy, cz), radius in metres, \
 material identifier, optional custom_material, dielectric_smoothing
 
-   **Batch 2 — Surface roughness:**
+   **Surface roughness:**
    - fractal_dim: fractal dimension (1.0–3.0; default: 1.5). Values below \
 1.0 are not physically meaningful for surface roughness.
    - weight_x: weight in X direction (default: 1.0)
@@ -335,7 +355,7 @@ material identifier, optional custom_material, dielectric_smoothing
 amplitude_m when add_water=true)
    - seed: optional random seed for reproducibility
 
-   **Batch 3 — Snapshots:**
+   **Snapshots:**
    The user may add zero or more snapshots. For each snapshot, collect:
    - time_s: snapshot time in seconds
    - filename: output filename for the snapshot
