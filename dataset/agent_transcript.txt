@@ -1,0 +1,284 @@
+Connecting to the NL2Sim LangGraph pipeline...
+
+Connected to the single-agent dataset pipeline.
+
+Stage: Dataset Configuration
+
+=== STAGE: Dataset Configuration (section "dataset_config") ===
+
+Let's begin with Batch 1 — Dataset size & naming.
+
+Please provide:
+- Number of input files / data samples to generate (num_samples, required, > 0)
+- Model basename for titles and output filename stems (default: "soil_sample")
+- Output directory for generated files (default: "./dataset")
+- Number of OpenMP threads to use (num_threads, optional, None means gprMax default)
+
+What values would you like for these?
+
+YOU:
+
+10, keep rest all at default
+
+Batch 1 saved with num_samples=10 and other fields as default.
+
+Now Batch 2 — FDTD grid and boundary policy.
+
+Please provide (or say "skip" to keep defaults):
+- pml_cells (default: 10)
+- buffer_cells (default: 10)
+- cells_per_wavelength (default: 10)
+- dimensionality ("2D" or "3D", default: "2D")
+- fractal_nbins (default: 50)
+
+What values would you like?
+
+Dataset Configuration complete.
+
+Stage: Layer Extraction
+
+=== STAGE: Layer Extraction (section "layers") ===
+
+First, how many soil layers would you like to define for this dataset?
+
+YOU:
+
+2
+
+For layer 1, please provide:
+- Layer name (optional, you can skip by saying "skip")
+- Thickness range in metres: minimum thickness (thickness_m_min) and maximum thickness (thickness_m_max)
+Please provide the thickness range for layer 1 in meters (thickness_m_min and thickness_m_max).
+
+YOU:
+
+Please define all two layers now:
+Layer 1 name=top_sandy_loam; thickness_m_min=0.18; thickness_m_max=0.24; sand_pct_min=45; sand_pct_max=50; clay_pct_min=5; clay_pct_max=10; theta_v_min=0.08; theta_v_max=0.18; bulk_density_gcm3_min=1.35; bulk_density_gcm3_max=1.55; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
+Layer 2 name=middle_silt_loam; thickness_m_min=0.28; thickness_m_max=0.36; sand_pct_min=25; sand_pct_max=35; clay_pct_min=10; clay_pct_max=16; theta_v_min=0.12; theta_v_max=0.24; bulk_density_gcm3_min=1.30; bulk_density_gcm3_max=1.50; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
+
+Two layers saved:
+
+Layer 1 "top_sandy_loam": thickness 0.18–0.24 m, sand 45–50%, clay 5–10%, moisture 0.08–0.18, bulk density 1.35–1.55 g/cm³, particle density 2.64–2.68 g/cm³.
+
+Layer 2 "middle_silt_loam": thickness 0.28–0.36 m, sand 25–35%, clay 10–16%, moisture 0.12–0.24, bulk density 1.30–1.50 g/cm³, particle density 2.64–2.68 g/cm³.
+
+Next, do you want to define any buried targets like cylinders? If no buried target, say "no buried target" and I will skip the target_ranges section.
+
+Layer Extraction complete.
+
+Stage: Buried-Target Range Extraction
+
+=== STAGE: Buried-Target Range Extraction (section "target_ranges") ===
+
+Do you want to define a buried cylinder target? If yes, please provide the following:
+- Target name (default "target")
+- Material (default "pec")
+- Horizontal centre position range x_center_min_m and x_center_max_m (metres)
+- Depth range depth_min_m and depth_max_m below ground surface (metres)
+- Radius range radius_min_m and radius_max_m (metres, radius_min_m > 0)
+
+If no buried target, please say "no buried target".
+
+YOU:
+
+skip
+
+No buried target defined. The target_ranges section is saved as empty (null).
+
+Next, we proceed to the waveform parameters. Please provide:
+- waveform kind/type
+- amplitude
+- centre frequency
+- source timing details
+
+Or say "skip" if you want to keep defaults or do not want to specify now.
+
+Buried-Target Range Extraction complete.
+
+Stage: Layer + Target Sampling
+
+============================================================
+Layer + Target Sampling
+============================================================
+
+Sampling 10 parameter set(s) over 2 layer range(s)...
+Wrote 10 sampled parameter set(s) to:
+/Users/vijay/Documents/langchain_agents/dataset/sampled_layers.json
+
+Stage: Waveform Extraction
+
+=== STAGE: Waveform Extraction (section "waveform") ===
+
+Let's start with Batch 1 — Waveform configuration.
+
+Please provide:
+- Waveform kind/type (default "ricker", choose from "ricker", "gaussian", "gaussiandot", "gaussiandotnorm", "gaussiandotdot", "gaussiandotdotnorm", "gaussianprime", "gaussiandoubleprime", "sine", "contsine")
+- Waveform amplitude (default 1.0)
+- Waveform centre frequency in Hz (required)
+- Waveform descriptive name (required)
+
+What values would you like?
+
+YOU:
+
+- waveform_kind: ricker
+- waveform_amplitude: 1.0
+- waveform_center_freq_hz: 400000000
+- waveform_name: ricker_400mhz_peak
+
+Waveform configuration saved with kind "ricker", amplitude 1.0, centre frequency 400000000 Hz, and name "ricker_400mhz_peak".
+
+Do you want to specify source start time and end time (optional), or skip?
+
+Waveform Extraction complete.
+
+Stage: Antenna Extraction
+
+=== STAGE: Antenna Extraction (section "antenna") ===
+
+Batch 1 — Antenna configuration:
+
+Please provide values for:
+- Antenna kind (default "hertzian_dipole", alternatives: "voltage_source", "transmission_line")
+- Antenna axis polarization ("x", "y", or "z", default "x")
+- Transmitter-receiver offset in metres (tx_rx_offset_m, required)
+- Internal resistance in ohms (required if antenna_kind is "voltage_source" or "transmission_line", skip otherwise)
+
+What values would you like?
+
+YOU:
+
+antenna_kind=hertzian_dipole; antenna_axis=x; tx_rx_offset_m=0.12; resistance=null
+
+Antenna configuration saved: hertzian_dipole kind, x-axis, Tx-Rx offset 0.12 m, no resistance specified.
+
+Next, Batch 2 — Receiver placement:
+
+Would you like the receiver at the same height as the transmitter? (default: true)
+
+Also, please specify antenna height above ground surface in metres or say "skip".
+
+Antenna Extraction complete.
+
+Stage: Sample Validation
+
+============================================================
+Sample Validation
+============================================================
+
+Validated waveform and antenna for 10 sample(s).
+
+Errors:
+- [waveform] Peplinski gate FAIL: derived band [193,655] MHz outside [300,1300] MHz (peak=400 MHz)
+
+>> Sample validation FAILED — routing to remediation.
+
+Validation failed: Sample Validation
+- [waveform] Peplinski gate FAIL: derived band [193,655] MHz outside [300,1300] MHz (peak=400 MHz)
+
+The validation failed because your chosen waveform center frequency of 400 MHz results in a derived frequency band approximately 193 to 655 MHz, which is outside the valid range for the Peplinski soil model (300 to 1300 MHz). The Peplinski model requires the band frequencies to stay within 300 MHz on the low side and 1300 MHz on the high side.
+
+To fix this, please choose a waveform centre frequency between about 300 MHz and 1300 MHz. For example, 300 MHz, 500 MHz, 900 MHz (common GPR frequencies), or something within this range.
+
+Would you like to select a new waveform center frequency within 300 to 1300 MHz? If so, please specify the desired frequency in Hz.
+
+YOU:
+
+Use waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=700000000; waveform_name=ricker_700mhz_peak; source_start_time=null; source_end_time=null. Please post the full corrected waveform section.
+
+The waveform section has been updated with:
+- waveform_kind: ricker
+- waveform_amplitude: 1.0
+- waveform_center_freq_hz: 700000000
+- waveform_name: ricker_700mhz_peak
+- source_start_time: null
+- source_end_time: null
+
+This frequency should satisfy the Peplinski band constraints (300–1300 MHz).
+
+Would you like to proceed with antenna receiver placement (next batch) or change anything else?
+
+Updated waveform — re-validating.
+
+Stage: Sample Validation
+
+============================================================
+Sample Validation
+============================================================
+
+Validated waveform and antenna for 10 sample(s).
+
+>> Sample validation passed.
+
+Stage: Advanced Parameters Extraction
+
+=== STAGE: Advanced Parameters Extraction (section "advanced_params") ===
+
+These are advanced optional settings you can configure:
+
+1. Geometry objects (buried targets): add cylinders, boxes, or spheres
+2. Surface roughness: fractal dimension, weights, amplitude, water layer, seed
+3. Snapshots: specify output snapshot times and spatial details
+
+Which sections would you like to configure? You can choose any combination or say "skip" or "none" to skip all.
+
+YOU:
+
+skip
+
+No advanced parameters configured. The advanced_params section has been saved as an empty JSON object. All stages are now complete and the pipeline can proceed to dataset generation.
+
+Advanced Parameters Extraction complete.
+
+Stage: Peplinski Derive
+
+============================================================
+Peplinski Derive (eps_r)
+============================================================
+
+Derived in-band eps_r for 10 sample(s) at 700.0 MHz (50 bins).
+Global eps_r: min=5.931 (driest) max=15.028 (wettest)
+Wrote derived values to:
+/Users/vijay/Documents/langchain_agents/dataset/derived_layers.json
+
+Stage: Global Derive
+
+============================================================
+Global Derive (grid / domain / depth / time window)
+============================================================
+
+Sized one global grid from eps_r [1.000, 15.028]:
+dx = 3.683 mm
+domain (x,y) = 1.337 x 1.212 m
+depth = 0.600 m
+ground / Tx = ground_y=0.674 m Tx=(0.608, 1.118) Rx=(0.728, 1.118)
+dt = 8.686 ps
+time window = 29.87 ns
+Wrote global derive to:
+/Users/vijay/Documents/langchain_agents/dataset/global_derive.json
+
+Stage: Global Validation
+
+============================================================
+Global Validation (TIER 3)
+============================================================
+
+Warnings:
+- [cfl_and_iterations] dt=7.092e-12 s, iterations=4,213 for window 2.987e-08 s
+
+>> Global validation passed.
+
+Stage: Per-Sample Target Placement
+
+Stage: Dataset Generation
+
+============================================================
+Dataset Generation / Emission
+============================================================
+
+Emitted 10 gprMax .in file(s) to:
+/Users/vijay/Documents/langchain_agents/dataset/in_files
+
+Dataset created and stored. Wrote 10 simulation row(s) for generated input files.
+
+Connection closed. Restart the API server and reload the page.

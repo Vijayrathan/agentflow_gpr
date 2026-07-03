@@ -1,9 +1,24 @@
 """
-FastAPI bridge from the frontend chatbot to the staged LangGraph pipeline.
+FastAPI bridge from the frontend chatbot to the SINGLE-AGENT pipeline.
 
-The LangGraph workflow itself remains in `agentflow_langgraph.py`. This module
-replaces the old terminal-facing orchestration with a WebSocket session
-controller and persists the final generated dataset in one DB write pass.
+The collection workflow lives in `agentflow_single_agent.py`: ONE deep agent
+on ONE conversation thread collects every parameter section, with the
+section-specific instructions injected as stage kickoff messages. This module
+drives that flow over a WebSocket session (one isolated `SingleAgentSession`
+per chat), runs the deterministic derive/validate stages between agent stages,
+and persists the final generated dataset in one DB write pass.
+
+Differences from the retired multi-agent bridge (agentflow_langgraph-based):
+- No parameter server (port 8100) — the agent's tools write to the session's
+  in-process store, which is synced into the pipeline state after each stage.
+- Stage completion is read from the store (`stage_done`), not scraped from
+  `post_parameters` tool calls.
+- Remediation happens in the SAME conversation: validation errors are injected
+  as messages and the agent agrees the fix with the user. The global-validation
+  "which section?" choice menu is gone — no more `choice_required` round-trip.
+- Cross-section edits are allowed at any time; if `layers` / `dataset_config`
+  / `target_ranges` change after sampling ran, the samples are re-drawn before
+  the derive chain (staleness check on the sampling snapshot).
 """
 
 from __future__ import annotations
@@ -19,10 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 # Ensure imports work both under `uvicorn backend.api:app` and direct execution.
@@ -34,17 +47,12 @@ for _p in (_backend_dir, _project_root, _ds_dir, _gprmax_root):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from agentflow_langgraph import (  # noqa: E402
+from agentflow_single_agent import (  # noqa: E402
     RESAMPLE_SECTIONS,
-    SECTION_AGENTS,
-    _captured_section,
-    _remediation_message,
-    _sections_from_tags,
-)
-
-# The graph file builds these nodes dynamically, so import the reusable pieces
-# and deterministic nodes explicitly.
-from agentflow_langgraph import (  # noqa: E402
+    SECTION_DISPLAY,
+    SingleAgentSession,
+    _changed_sections,
+    _samples_stale,
     dataset_generation_node,
     global_derive_node,
     global_validation_node,
@@ -53,8 +61,12 @@ from agentflow_langgraph import (  # noqa: E402
     sample_validation_node,
     target_placement_node,
 )
+from single_agent_prompts import (  # noqa: E402
+    SECTION_KICKOFF,
+    global_remediation_message,
+    sample_remediation_message,
+)
 from db.db import ExtractionSession, batch_insert_simulations, get_session  # noqa: E402
-from parameters_global_state import BASE_URL, start_parameter_server  # noqa: E402
 from schema import (  # noqa: E402
     DatasetConfig,
     ExtractedAdvancedParams,
@@ -68,51 +80,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
-
-
-INIT_MESSAGES = {
-    "dataset_config": (
-        "I need to configure the dataset/run parameters for a gprMax "
-        "simulation batch. Please begin the dataset configuration process."
-    ),
-    "layers": (
-        "I need to set up the soil layers for a gprMax simulation. "
-        "Please begin the layer parameter extraction process."
-    ),
-    "target_ranges": (
-        "I need to configure the buried-target geometry ranges for a "
-        "gprMax simulation batch. Please begin the target range extraction process."
-    ),
-    "waveform": (
-        "I need to configure the waveform for a gprMax simulation. "
-        "Please begin the waveform parameter extraction process."
-    ),
-    "antenna": (
-        "I need to configure the antenna for a gprMax simulation. "
-        "Please begin the antenna parameter extraction process."
-    ),
-    "advanced_params": (
-        "I need to configure the advanced/optional parameters for a gprMax "
-        "simulation. Please begin the advanced parameters extraction process."
-    ),
-}
-
-DISPLAY_NAMES = {
-    "dataset_config": "Dataset Configuration",
-    "layers": "Layer Extraction",
-    "target_ranges": "Buried-Target Range Extraction",
-    "waveform": "Waveform Extraction",
-    "antenna": "Antenna Extraction",
-    "advanced_params": "Advanced Parameters Extraction",
-}
-
-GLOBAL_REMEDIATION_CHOICES = [
-    "dataset_config",
-    "antenna",
-    "waveform",
-    "layers",
-    "advanced_params",
-]
 
 
 class FinalizeDatasetPayload(BaseModel):
@@ -132,21 +99,19 @@ class FinalizeDatasetPayload(BaseModel):
 class ChatSession:
     session_id: str
     user_id: str
+    # ONE agent + ONE thread + its own section store for the whole chat.
+    agent_session: SingleAgentSession = field(default_factory=SingleAgentSession)
     state: dict[str, Any] = field(default_factory=lambda: {"halted": False})
     started: bool = False
     complete: bool = False
     busy: bool = False
-    phase: str = "idle"
-    active_section: Optional[str] = None
-    active_agent: Any = None
-    active_display: Optional[str] = None
-    active_config: Optional[dict[str, Any]] = None
-    active_seen: int = 0
+    phase: str = "idle"  # idle | agent | deterministic | routing | halted | complete
+    # What the current agent turn is for. "collect" waits for `active_section`
+    # to be complete in the store; the remediation purposes wait for the agent
+    # to change (and complete) at least one section vs `remediation_snapshot`.
     active_purpose: str = "collect"
-    sample_remediation_queue: list[str] = field(default_factory=list)
-    sample_remediation_errors: list[str] = field(default_factory=list)
-    global_remediation_errors: list[str] = field(default_factory=list)
-    global_choice_section: Optional[str] = None
+    active_section: Optional[str] = None
+    remediation_snapshot: Optional[dict[str, Any]] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -161,12 +126,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    start_parameter_server()
-    logger.info("Parameter state server started on %s", BASE_URL)
 
 
 @app.get("/health")
@@ -187,21 +146,18 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
     try:
         async with state.lock:
             if not state.started:
-                await _reset_parameter_state()
                 state.started = True
                 await ws.send_json({
                     "type": "agent_message",
-                    "content": "Connected to the staged LangGraph dataset pipeline.",
+                    "content": "Connected to the single-agent dataset pipeline.",
                 })
-                await _start_agent(ws, state, "dataset_config", INIT_MESSAGES["dataset_config"])
+                await _start_stage(ws, state, "dataset_config")
             elif state.complete:
                 await ws.send_json({
                     "type": "agent_message",
                     "content": "This dataset pipeline session is already complete.",
                 })
-            elif state.phase == "global_choice":
-                await _send_global_choice(ws)
-            elif state.phase == "agent" and state.active_agent is not None:
+            elif state.phase == "agent":
                 await ws.send_json({
                     "type": "agent_message",
                     "content": "Reconnected. Continue with the current pipeline question.",
@@ -215,7 +171,6 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
                 replacement = _new_chat_session(session_id)
                 sessions[session_id] = replacement
                 state = replacement
-                await _reset_parameter_state()
                 state.started = True
                 await ws.send_json({
                     "type": "agent_message",
@@ -224,7 +179,7 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
                         "so I started a fresh dataset pipeline."
                     ),
                 })
-                await _start_agent(ws, state, "dataset_config", INIT_MESSAGES["dataset_config"])
+                await _start_stage(ws, state, "dataset_config")
 
         while True:
             raw = await ws.receive_text()
@@ -248,14 +203,6 @@ def _new_chat_session(session_id: str) -> ChatSession:
     return ChatSession(session_id=session_id, user_id=session_id)
 
 
-async def _reset_parameter_state() -> None:
-    """Clear the agents' in-memory tool state before a new chat session."""
-    try:
-        await asyncio.to_thread(httpx.delete, f"{BASE_URL}/state", timeout=5)
-    except Exception:
-        logger.warning("Could not reset parameter server state", exc_info=True)
-
-
 async def _handle_user_text(ws: WebSocket, chat: ChatSession, text: str) -> None:
     if chat.complete:
         await ws.send_json({
@@ -269,125 +216,129 @@ async def _handle_user_text(ws: WebSocket, chat: ChatSession, text: str) -> None
             "content": "A pipeline step is still running. Please wait for it to finish.",
         })
         return
-    if chat.phase == "global_choice":
-        await _handle_global_choice(ws, chat, text)
-        return
-    if chat.phase != "agent" or chat.active_agent is None:
+    if chat.phase != "agent":
         await ws.send_json({
             "type": "agent_message",
             "content": "The pipeline is not waiting for a chat reply right now.",
         })
         return
+    if text.lower() in {"quit", "exit"}:
+        chat.phase = "halted"
+        chat.state["halted"] = True
+        chat.state["halt_reason"] = f"user exited during {chat.active_purpose}"
+        await ws.send_json({"type": "agent_message", "content": "Pipeline halted."})
+        return
 
     chat.busy = True
     try:
-        result = await _invoke_agent(chat.active_agent, text, chat.active_config)
+        result = await asyncio.to_thread(chat.agent_session.invoke, text)
         await _handle_agent_result(ws, chat, result)
     finally:
         chat.busy = False
 
 
-async def _start_agent(
-    ws: WebSocket,
-    chat: ChatSession,
-    section: str,
-    init_message: str,
-    purpose: str = "collect",
-) -> None:
-    agent, display = SECTION_AGENTS[section]
+async def _invoke_and_handle(ws: WebSocket, chat: ChatSession, message: str) -> None:
+    """Send `message` into the ONE ongoing conversation and process the turn."""
+    chat.busy = True
+    try:
+        result = await asyncio.to_thread(chat.agent_session.invoke, message)
+        await _handle_agent_result(ws, chat, result)
+    finally:
+        chat.busy = False
+
+
+async def _start_stage(ws: WebSocket, chat: ChatSession, section: str) -> None:
+    """Kick off a collection stage by injecting its section-specific
+    instructions (batches, constraints, JSON schema) into the conversation."""
     chat.phase = "agent"
+    chat.active_purpose = "collect"
     chat.active_section = section
-    chat.active_agent = agent
-    chat.active_display = display
-    chat.active_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    chat.active_seen = 0
-    chat.active_purpose = purpose
 
     await ws.send_json({
         "type": "stage_change",
-        "stage_name": display,
+        "stage_name": SECTION_DISPLAY[section],
         "section": section,
     })
-
-    chat.busy = True
-    try:
-        result = await _invoke_agent(agent, init_message, chat.active_config)
-        await _handle_agent_result(ws, chat, result)
-    finally:
-        chat.busy = False
-
-
-async def _invoke_agent(agent: Any, content: str, config: dict[str, Any] | None) -> dict:
-    return await asyncio.to_thread(
-        agent.invoke,
-        {"messages": [HumanMessage(content=content)]},
-        config,
-    )
+    await _invoke_and_handle(ws, chat, SECTION_KICKOFF[section])
 
 
 async def _handle_agent_result(ws: WebSocket, chat: ChatSession, result: dict) -> None:
-    ai_texts, new_seen = _extract_ai_texts(result, chat.active_seen)
-    chat.active_seen = new_seen
-    for text in ai_texts:
+    for text in chat.agent_session.new_ai_texts(result):
         await ws.send_json({"type": "agent_message", "content": text})
 
-    section = chat.active_section
-    if section is None:
-        return
-    captured = _captured_section(result, section)
-    if captured is None:
-        return
+    if chat.active_purpose == "collect":
+        await _check_collect_done(ws, chat)
+    else:
+        await _check_remediation_done(ws, chat)
 
-    chat.state[section] = captured
+
+async def _check_collect_done(ws: WebSocket, chat: ChatSession) -> None:
+    section = chat.active_section
+    if section is None or not chat.agent_session.stage_done(section):
+        return  # keep collecting — wait for the next user message
+
+    _sync_sections(chat)
     await ws.send_json({
         "type": "progress",
-        "content": f"{chat.active_display or section} complete.",
+        "content": f"{SECTION_DISPLAY[section]} complete.",
         "section": section,
     })
-
-    purpose = chat.active_purpose
     chat.active_section = None
-    chat.active_agent = None
     chat.phase = "routing"
+    await _advance_after_collect(ws, chat, section)
+
+
+async def _check_remediation_done(ws: WebSocket, chat: ChatSession) -> None:
+    """Remediation completes when the agent changed >= 1 section vs the
+    snapshot taken at gate failure, and every changed section is complete."""
+    changed = _changed_sections(
+        chat.remediation_snapshot or {}, chat.agent_session.snapshot()
+    )
+    if not changed or not all(chat.agent_session.stage_done(s) for s in changed):
+        return  # keep discussing — wait for the next user message
+
+    _sync_sections(chat)
+    purpose = chat.active_purpose
+    chat.remediation_snapshot = None
+    chat.phase = "routing"
+    await ws.send_json({
+        "type": "progress",
+        "content": f"Updated {', '.join(sorted(changed))} — re-validating.",
+    })
 
     if purpose == "sample_remediation":
-        await _advance_sample_remediation(ws, chat)
-    elif purpose == "global_remediation":
-        await _advance_global_remediation(ws, chat, section)
+        await _run_sample_validation_gate(ws, chat)
     else:
-        await _advance_after_collect(ws, chat, section)
+        chat.state["resample_after_global"] = bool(changed & RESAMPLE_SECTIONS)
+        await _run_derive_chain(ws, chat)
 
 
-def _extract_ai_texts(result: dict, seen: int) -> tuple[list[str], int]:
-    messages = result.get("messages", [])
-    texts = [
-        msg.content
-        for msg in messages[seen:]
-        if type(msg).__name__ == "AIMessage" and getattr(msg, "content", None)
-    ]
-    return texts, len(messages)
+def _sync_sections(chat: ChatSession) -> None:
+    """Copy the WHOLE store into the pipeline state, so cross-section edits
+    made during any stage land in state as soon as that turn completes."""
+    chat.state.update(chat.agent_session.state_sync())
 
 
 async def _advance_after_collect(ws: WebSocket, chat: ChatSession, section: str) -> None:
     if section == "dataset_config":
-        await _start_agent(ws, chat, "layers", INIT_MESSAGES["layers"])
+        await _start_stage(ws, chat, "layers")
     elif section == "layers":
-        await _start_agent(ws, chat, "target_ranges", INIT_MESSAGES["target_ranges"])
+        await _start_stage(ws, chat, "target_ranges")
     elif section == "target_ranges":
         await _run_deterministic(ws, chat, "Layer + Target Sampling", layer_sampling_node)
-        await _start_agent(ws, chat, "waveform", INIT_MESSAGES["waveform"])
+        await _start_stage(ws, chat, "waveform")
     elif section == "waveform":
-        await _start_agent(ws, chat, "antenna", INIT_MESSAGES["antenna"])
+        await _start_stage(ws, chat, "antenna")
     elif section == "antenna":
         await _run_sample_validation_gate(ws, chat)
     elif section == "advanced_params":
-        await _run_derive_and_global_gate(ws, chat)
+        await _run_derive_chain(ws, chat)
 
 
 async def _run_sample_validation_gate(ws: WebSocket, chat: ChatSession) -> None:
     await _run_deterministic(ws, chat, "Sample Validation", sample_validation_node)
     if chat.state.get("sample_validation_passed"):
-        await _start_agent(ws, chat, "advanced_params", INIT_MESSAGES["advanced_params"])
+        await _start_stage(ws, chat, "advanced_params")
         return
 
     errors = chat.state.get("sample_validation_errors") or []
@@ -396,32 +347,35 @@ async def _run_sample_validation_gate(ws: WebSocket, chat: ChatSession) -> None:
         "stage_name": "Sample Validation",
         "errors": errors,
     })
-    sections = _sections_from_tags(errors, {"dataset_config", "waveform", "antenna"}) or ["waveform"]
-    chat.sample_remediation_queue = list(sections)
-    chat.sample_remediation_errors = list(errors)
     chat.state["sample_validation_passed"] = None
     chat.state["sample_validation_errors"] = None
-    await _start_next_sample_remediation(ws, chat)
-
-
-async def _start_next_sample_remediation(ws: WebSocket, chat: ChatSession) -> None:
-    if not chat.sample_remediation_queue:
-        await _run_sample_validation_gate(ws, chat)
-        return
-    section = chat.sample_remediation_queue.pop(0)
-    msg = _remediation_message(
-        section,
-        chat.sample_remediation_errors,
-        chat.state.get(section),
+    await _start_remediation(
+        ws, chat, "sample_remediation",
+        sample_remediation_message(errors, chat.agent_session.store),
     )
-    await _start_agent(ws, chat, section, msg, purpose="sample_remediation")
 
 
-async def _advance_sample_remediation(ws: WebSocket, chat: ChatSession) -> None:
-    await _start_next_sample_remediation(ws, chat)
+async def _start_remediation(
+    ws: WebSocket,
+    chat: ChatSession,
+    purpose: str,
+    message: str,
+) -> None:
+    """Inject the validation errors into the SAME conversation. The agent —
+    which owns every section — explains the problem and agrees the fix with
+    the user; no orchestrator-side section choice is needed."""
+    chat.phase = "agent"
+    chat.active_purpose = purpose
+    chat.active_section = None
+    chat.remediation_snapshot = chat.agent_session.snapshot()
+    await _invoke_and_handle(ws, chat, message)
 
 
-async def _run_derive_and_global_gate(ws: WebSocket, chat: ChatSession) -> None:
+async def _run_derive_chain(ws: WebSocket, chat: ChatSession) -> None:
+    """Re-sample if needed, then derive the grid and run the global gate."""
+    if chat.state.pop("resample_after_global", None) or _samples_stale(chat.state):
+        await _run_deterministic(ws, chat, "Layer + Target Sampling", layer_sampling_node)
+
     await _run_deterministic(ws, chat, "Peplinski Derive", peplinski_derive_node)
     await _run_deterministic(ws, chat, "Global Derive", global_derive_node)
     await _run_deterministic(ws, chat, "Global Validation", global_validation_node)
@@ -431,60 +385,17 @@ async def _run_derive_and_global_gate(ws: WebSocket, chat: ChatSession) -> None:
         return
 
     errors = chat.state.get("global_validation_errors") or []
-    chat.global_remediation_errors = list(errors)
-    chat.phase = "global_choice"
     await ws.send_json({
         "type": "validation_failed",
         "stage_name": "Global Validation",
         "errors": errors,
     })
-    await _send_global_choice(ws)
-
-
-async def _send_global_choice(ws: WebSocket) -> None:
-    await ws.send_json({
-        "type": "choice_required",
-        "content": (
-            "Global validation failed. Which section should be adjusted? "
-            + ", ".join(GLOBAL_REMEDIATION_CHOICES)
-        ),
-        "choices": GLOBAL_REMEDIATION_CHOICES,
-    })
-
-
-async def _handle_global_choice(ws: WebSocket, chat: ChatSession, text: str) -> None:
-    choice = text.strip().lower().replace(" ", "_")
-    if choice in {"quit", "exit"}:
-        chat.phase = "halted"
-        chat.state["halted"] = True
-        chat.state["halt_reason"] = "user exited during global remediation"
-        await ws.send_json({"type": "agent_message", "content": "Pipeline halted."})
-        return
-    if choice not in GLOBAL_REMEDIATION_CHOICES:
-        await ws.send_json({
-            "type": "agent_message",
-            "content": "Please choose one of: " + ", ".join(GLOBAL_REMEDIATION_CHOICES),
-        })
-        return
-
-    chat.global_choice_section = choice
-    msg = _remediation_message(choice, chat.global_remediation_errors, chat.state.get(choice))
-    await _start_agent(ws, chat, choice, msg, purpose="global_remediation")
-
-
-async def _advance_global_remediation(
-    ws: WebSocket,
-    chat: ChatSession,
-    section: str,
-) -> None:
-    resample = section in RESAMPLE_SECTIONS
     chat.state["global_validation_passed"] = None
     chat.state["global_validation_errors"] = None
-    chat.state["resample_after_global"] = resample
-
-    if resample:
-        await _run_deterministic(ws, chat, "Layer + Target Sampling", layer_sampling_node)
-    await _run_derive_and_global_gate(ws, chat)
+    await _start_remediation(
+        ws, chat, "global_remediation",
+        global_remediation_message(errors, chat.agent_session.store),
+    )
 
 
 async def _finish_dataset(ws: WebSocket, chat: ChatSession) -> None:

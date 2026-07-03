@@ -34,8 +34,9 @@ Quirks (intended):
   a single confirm turn, without user input.
 - Full history + schema-bearing kickoff messages grow the context over long
   sessions; that memory-handling trade-off is the point of the experiment.
-- The module-global store means one run per process (same property as the
-  FastAPI `_store`).
+- Store/agent/thread live together in a `SingleAgentSession`: the CLI drives a
+  module-level default session (one run per process), while `backend/api.py`
+  creates an isolated session per WebSocket chat.
 
 Graph
 -----
@@ -181,23 +182,13 @@ class PipelineState(TypedDict, total=False):
 
 # ---------------------------------------------------------------------------
 # In-memory section store + agent tools (replaces the port-8100 server)
+#   The store, the two tools bound to it, the deep agent and its conversation
+#   thread live together in a SingleAgentSession, so each chat session (CLI
+#   run, WebSocket session) gets its own isolated conversation + parameters.
 # ---------------------------------------------------------------------------
-
-_STORE: dict[str, Optional[dict]] = {s: None for s in SECTION_SCHEMA}
-
-
-def _store_snapshot() -> dict[str, Optional[dict]]:
-    return copy.deepcopy(_STORE)
-
 
 def _changed_sections(before: dict, after: dict) -> set:
     return {s for s in SECTION_SCHEMA if before.get(s) != after.get(s)}
-
-
-def _state_sync() -> dict:
-    """The whole store as a PipelineState update, so cross-section edits made
-    during any stage land in state as soon as that node returns."""
-    return {s: copy.deepcopy(_STORE[s]) for s in SECTION_SCHEMA}
 
 
 def _section_is_complete(section: str, model) -> bool:
@@ -228,121 +219,178 @@ def _section_is_complete(section: str, model) -> bool:
     return True
 
 
-@tool
-def save_section(
-    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
-    payload: Annotated[str, "JSON string of the FULL section conforming to its schema (create or fully replace)"],
-) -> str:
-    """Validate and store the complete parameter set for a section.
+def _make_section_tools(store: dict):
+    """Build the save/get tools as closures over `store`, so every session's
+    agent reads and writes its own parameters."""
 
-    This creates or FULLY REPLACES the section — editing means re-saving the
-    whole payload. Invalid payloads are rejected (nothing is stored) and the
-    validation error is returned so it can be fixed with the user.
-    """
-    if section not in SECTION_SCHEMA:
-        return json.dumps({
-            "error": f"Invalid section '{section}'. Must be one of {sorted(SECTION_SCHEMA)}"
-        })
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": "invalid_json", "detail": str(e)})
-    try:
-        model = SECTION_SCHEMA[section].model_validate(data)
-    except (ValueError, TypeError) as e:
-        return json.dumps({"error": "validation_failed", "detail": str(e)})
+    @tool
+    def save_section(
+        section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
+        payload: Annotated[str, "JSON string of the FULL section conforming to its schema (create or fully replace)"],
+    ) -> str:
+        """Validate and store the complete parameter set for a section.
 
-    _STORE[section] = model.model_dump()
-    if not _section_is_complete(section, model):
-        return json.dumps({
-            "status": "stored_incomplete",
-            "section": section,
-            "message": (
-                "The payload is schema-valid and was stored, but essential "
-                "fields are still missing — the stage will not complete until "
-                "they are provided. Keep collecting."
-            ),
-        })
-    return json.dumps({"status": "ok", "section": section, "data": _STORE[section]})
+        This creates or FULLY REPLACES the section — editing means re-saving the
+        whole payload. Invalid payloads are rejected (nothing is stored) and the
+        validation error is returned so it can be fixed with the user.
+        """
+        if section not in SECTION_SCHEMA:
+            return json.dumps({
+                "error": f"Invalid section '{section}'. Must be one of {sorted(SECTION_SCHEMA)}"
+            })
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as e:
+            return json.dumps({"error": "invalid_json", "detail": str(e)})
+        try:
+            model = SECTION_SCHEMA[section].model_validate(data)
+        except (ValueError, TypeError) as e:
+            return json.dumps({"error": "validation_failed", "detail": str(e)})
+
+        store[section] = model.model_dump()
+        if not _section_is_complete(section, model):
+            return json.dumps({
+                "status": "stored_incomplete",
+                "section": section,
+                "message": (
+                    "The payload is schema-valid and was stored, but essential "
+                    "fields are still missing — the stage will not complete until "
+                    "they are provided. Keep collecting."
+                ),
+            })
+        return json.dumps({"status": "ok", "section": section, "data": store[section]})
+
+    @tool
+    def get_section(
+        section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
+    ) -> str:
+        """Retrieve the currently stored parameters for a section."""
+        if section not in SECTION_SCHEMA:
+            return json.dumps({
+                "error": f"Invalid section '{section}'. Must be one of {sorted(SECTION_SCHEMA)}"
+            })
+        if store[section] is None:
+            return json.dumps({
+                "error": "section_not_populated",
+                "section": section,
+                "message": (
+                    f"Section '{section}' has not been saved yet. Collect it when "
+                    "its stage comes (or now, if the user asks)."
+                ),
+            })
+        return json.dumps(store[section])
+
+    return save_section, get_section
 
 
-@tool
-def get_section(
-    section: Annotated[str, "Section name: 'dataset_config', 'layers', 'target_ranges', 'waveform', 'antenna', or 'advanced_params'"],
-) -> str:
-    """Retrieve the currently stored parameters for a section."""
-    if section not in SECTION_SCHEMA:
-        return json.dumps({
-            "error": f"Invalid section '{section}'. Must be one of {sorted(SECTION_SCHEMA)}"
-        })
-    if _STORE[section] is None:
-        return json.dumps({
-            "error": "section_not_populated",
-            "section": section,
-            "message": (
-                f"Section '{section}' has not been saved yet. Collect it when "
-                "its stage comes (or now, if the user asks)."
-            ),
-        })
-    return json.dumps(_STORE[section])
+class SingleAgentSession:
+    """One collection conversation: a section store, the two tools bound to it,
+    ONE deep agent and ONE thread shared by every stage and both remediation
+    flows. The CLI uses a module-level default session; the WebSocket API
+    (`backend/api.py`) creates one per chat session."""
+
+    def __init__(self):
+        self.store: dict[str, Optional[dict]] = {s: None for s in SECTION_SCHEMA}
+        self.thread_config = {"configurable": {"thread_id": f"single-agent-{uuid.uuid4()}"}}
+        # Messages accumulate on the one thread for the whole run; consumers
+        # track what they have already relayed via this counter.
+        self.seen = 0
+        self._agent = None
+        self.save_section, self.get_section = _make_section_tools(self.store)
+
+    def agent(self):
+        """Build the agent on first use so the module imports (and the graph
+        compiles) without an OPENAI_API_KEY or the heavy RAG dependencies."""
+        if self._agent is None:
+            from deepagents import create_deep_agent
+            from langchain_openai import ChatOpenAI
+            from langgraph.checkpoint.memory import InMemorySaver
+            from backend.rag import rag_search
+            from backend.prompt_library import RAG_SUBAGENT_PROMPT
+
+            rag_subagent = {
+                "name": "knowledge-agent",
+                "description": (
+                    "Geophysics knowledge expert. Answers questions about soil properties, "
+                    "dielectric models (Peplinski, Topp, etc.), GPR parameters, FDTD grids, "
+                    "waveforms, antennas, PML boundaries, and dataset/batch generation. "
+                    "Searches the knowledge base first; falls back to domain expertise if needed."
+                ),
+                "system_prompt": RAG_SUBAGENT_PROMPT,
+                "tools": [rag_search],
+            }
+
+            self._agent = create_deep_agent(
+                model=ChatOpenAI(model="gpt-4.1-mini", api_key=os.getenv("OPENAI_API_KEY")),
+                subagents=[rag_subagent],
+                system_prompt=SINGLE_AGENT_SYSTEM_PROMPT,
+                checkpointer=InMemorySaver(),
+                tools=[self.save_section, self.get_section],
+            )
+        return self._agent
+
+    def invoke(self, text: str) -> dict:
+        return self.agent().invoke(
+            {"messages": [HumanMessage(content=text)]}, config=self.thread_config
+        )
+
+    def new_ai_texts(self, result: dict) -> list:
+        """The AI messages produced since the last call (advances `seen`)."""
+        messages = result.get("messages", [])
+        texts = [
+            msg.content
+            for msg in messages[self.seen:]
+            if type(msg).__name__ == "AIMessage" and getattr(msg, "content", None)
+        ]
+        self.seen = len(messages)
+        return texts
+
+    def snapshot(self) -> dict:
+        return copy.deepcopy(self.store)
+
+    def state_sync(self) -> dict:
+        """The whole store as a PipelineState update, so cross-section edits
+        made during any stage land in state as soon as the node returns."""
+        return {s: copy.deepcopy(self.store[s]) for s in SECTION_SCHEMA}
+
+    def stage_done(self, section: str) -> bool:
+        """Stage-completion signal: the section is in the store, schema-valid,
+        and carries its essential content. Replaces the tool-call scraping
+        (`_captured_section`) of the multi-agent pipeline."""
+        data = self.store.get(section)
+        if data is None:
+            return False
+        try:
+            model = SECTION_SCHEMA[section].model_validate(data)
+        except (ValueError, TypeError):
+            return False
+        return _section_is_complete(section, model)
+
+
+# ---------------------------------------------------------------------------
+# Module-level default session (CLI entry point + tests). The graph nodes
+# below drive this one; backend/api.py builds its own SingleAgentSession per
+# WebSocket session instead.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SESSION = SingleAgentSession()
+
+# Aliases kept for the CLI graph nodes and the unit tests.
+_STORE = _DEFAULT_SESSION.store
+save_section = _DEFAULT_SESSION.save_section
+get_section = _DEFAULT_SESSION.get_section
+
+
+def _store_snapshot() -> dict:
+    return _DEFAULT_SESSION.snapshot()
+
+
+def _state_sync() -> dict:
+    return _DEFAULT_SESSION.state_sync()
 
 
 def _stage_done(section: str) -> bool:
-    """Stage-completion signal: the section is in the store, schema-valid, and
-    carries its essential content. Replaces the tool-call scraping
-    (`_captured_section`) of the multi-agent pipeline."""
-    data = _STORE.get(section)
-    if data is None:
-        return False
-    try:
-        model = SECTION_SCHEMA[section].model_validate(data)
-    except (ValueError, TypeError):
-        return False
-    return _section_is_complete(section, model)
-
-
-# ---------------------------------------------------------------------------
-# The single agent (ONE instance, ONE thread for the whole run)
-# ---------------------------------------------------------------------------
-
-_agent = None
-
-# One thread for the entire run: collection AND remediation share the same
-# conversation, so the agent retains everything it has discussed and collected.
-_THREAD_CONFIG = {"configurable": {"thread_id": f"single-agent-{uuid.uuid4()}"}}
-
-
-def _get_agent():
-    """Build the agent on first use so the module imports (and the graph
-    compiles) without an OPENAI_API_KEY or the heavy RAG dependencies."""
-    global _agent
-    if _agent is None:
-        from deepagents import create_deep_agent
-        from langchain_openai import ChatOpenAI
-        from langgraph.checkpoint.memory import InMemorySaver
-        from backend.rag import rag_search
-        from backend.prompt_library import RAG_SUBAGENT_PROMPT
-
-        rag_subagent = {
-            "name": "knowledge-agent",
-            "description": (
-                "Geophysics knowledge expert. Answers questions about soil properties, "
-                "dielectric models (Peplinski, Topp, etc.), GPR parameters, FDTD grids, "
-                "waveforms, antennas, PML boundaries, and dataset/batch generation. "
-                "Searches the knowledge base first; falls back to domain expertise if needed."
-            ),
-            "system_prompt": RAG_SUBAGENT_PROMPT,
-            "tools": [rag_search],
-        }
-
-        _agent = create_deep_agent(
-            model=ChatOpenAI(model="gpt-4.1-mini", api_key=os.getenv("OPENAI_API_KEY")),
-            subagents=[rag_subagent],
-            system_prompt=SINGLE_AGENT_SYSTEM_PROMPT,
-            checkpointer=InMemorySaver(),
-            tools=[save_section, get_section],
-        )
-    return _agent
+    return _DEFAULT_SESSION.stage_done(section)
 
 
 def _banner(title: str) -> None:
@@ -364,16 +412,10 @@ def _print_response(result: dict, seen: int = 0) -> int:
 
 
 # The thread persists across all stages, so `result["messages"]` accumulates
-# for the whole run — a per-stage seen=0 reset would reprint the history.
-_SEEN = 0
-
-
+# for the whole run — the session's `seen` counter stops history reprinting.
 def _invoke_agent(text: str) -> dict:
-    global _SEEN
-    result = _get_agent().invoke(
-        {"messages": [HumanMessage(content=text)]}, config=_THREAD_CONFIG
-    )
-    _SEEN = _print_response(result, _SEEN)
+    result = _DEFAULT_SESSION.invoke(text)
+    _DEFAULT_SESSION.seen = _print_response(result, _DEFAULT_SESSION.seen)
     return result
 
 

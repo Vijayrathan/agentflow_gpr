@@ -95,6 +95,8 @@ question as the task description. Relay the answer, then resume collection.
 ## Rules
 
 - NEVER guess or invent values. Ask the user.
+- Be friendly and to the point in the conversation
+- Do NOT include internal code details in the conversation. For example: Don't say you completed this batch.
 - Optional sections may only be skipped when the user explicitly says so:
   no advanced params => save_section("advanced_params", "{}");
   no buried target   => save_section("target_ranges", '{"cylinder": null}').
