@@ -19,6 +19,13 @@ Differences from the retired multi-agent bridge (agentflow_langgraph-based):
 - Cross-section edits are allowed at any time; if `layers` / `dataset_config`
   / `target_ranges` change after sampling ran, the samples are re-drawn before
   the derive chain (staleness check on the sampling snapshot).
+
+Refresh/reconnect model: every chat-visible event is recorded on the session's
+`transcript`, and pipeline output is routed through `chat.ws` (the CURRENT
+socket) rather than the socket that started the turn — so a page refresh
+mid-step neither kills the pipeline nor loses its output. A reconnect replays
+the full transcript (`session_restore`), the dataset result, the busy state,
+and the last scene, restoring the UI to exactly where the session left off.
 """
 
 from __future__ import annotations
@@ -31,12 +38,14 @@ import logging
 import re
 import sys
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Ensure imports work both under `uvicorn backend.api:app` and direct execution.
@@ -121,10 +130,52 @@ class ChatSession:
         "placed": False, "emitted": False,
     })
     last_scene: Optional[dict[str, Any]] = None
+    # The CURRENT socket for this session. All pipeline output is sent here,
+    # so a page refresh mid-turn re-routes the remaining output to the new
+    # connection instead of dying on the old one.
+    ws: Optional[WebSocket] = None
+    # Every chat-visible event (user + agent + status), replayed on reconnect
+    # so a refreshed page shows the whole conversation.
+    transcript: list[dict[str, Any]] = field(default_factory=list)
+    # Finalize result kept for replay: repopulates the dataset tab on refresh.
+    dataset_result: Optional[dict[str, Any]] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 sessions: dict[str, ChatSession] = {}
+
+
+# Event types that belong to the conversation record (replayed on reconnect).
+# Transient signals (pipeline_busy, model_update, session_restore, error) are
+# re-derived from session state instead. `user_message` events are appended
+# to the transcript directly (record-only — never echoed back to the client).
+RECORDED_EVENT_TYPES = {
+    "agent_message",
+    "stage_change",
+    "progress",
+    "validation_failed",
+    "dataset_ready",
+}
+
+
+async def _send(chat: ChatSession, payload: dict[str, Any]) -> None:
+    """Record chat-visible events, then push to the session's CURRENT socket.
+
+    Send failures are swallowed: if the client refreshed mid-turn the payload
+    is already in the transcript, so the reconnect replay delivers it — the
+    pipeline itself must never die on a closed socket."""
+    if payload.get("type") in RECORDED_EVENT_TYPES:
+        chat.transcript.append(payload)
+    ws = chat.ws
+    if ws is None:
+        return
+    try:
+        await ws.send_json(payload)
+    except Exception:
+        logger.info(
+            "send to session %s failed (client gone?) — event kept in transcript",
+            chat.session_id,
+        )
 
 
 app = FastAPI(title="GPR LangGraph Chat API")
@@ -147,50 +198,112 @@ async def finalize_dataset(payload: FinalizeDatasetPayload) -> dict[str, Any]:
     return await asyncio.to_thread(_finalize_dataset_sync, payload)
 
 
+def _session_output_dir(session_id: str) -> Path:
+    """Resolve the on-disk dataset directory for an active chat session."""
+    chat = sessions.get(session_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    cfg = chat.state.get("dataset_config")
+    if not cfg:
+        raise HTTPException(status_code=404, detail="Session has no dataset yet")
+    out_dir = _resolve_dataset_path(DatasetConfig.model_validate(cfg).output_dir)
+    if not out_dir.exists():
+        raise HTTPException(status_code=404, detail="Dataset directory not found")
+    return out_dir
+
+
+def _session_emitted_manifest(session_id: str) -> tuple[Path, dict[str, Any]]:
+    out_dir = _session_output_dir(session_id)
+    manifest_path = out_dir / "emitted_files.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="No generated input files yet")
+    return out_dir, _read_json(manifest_path)
+
+
+def _in_files_dir(out_dir: Path, manifest: dict[str, Any]) -> Path:
+    in_dir = manifest.get("in_dir")
+    return Path(in_dir) if in_dir else out_dir / "in_files"
+
+
+@app.get("/datasets/{session_id}/files")
+def list_dataset_files(session_id: str) -> dict[str, Any]:
+    _out_dir, manifest = _session_emitted_manifest(session_id)
+    files = [
+        {"sample_id": f.get("sample_id"), "filename": f.get("filename")}
+        for f in manifest.get("files", [])
+        if f.get("filename")
+    ]
+    return {"n_written": manifest.get("n_written", len(files)), "files": files}
+
+
+@app.get("/datasets/{session_id}/files/{filename}")
+def get_dataset_file(session_id: str, filename: str) -> PlainTextResponse:
+    out_dir, manifest = _session_emitted_manifest(session_id)
+    in_dir = _in_files_dir(out_dir, manifest)
+    # Only ever serve a bare filename from the session's own in_files dir.
+    path = in_dir / Path(filename).name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Input file not found")
+    return PlainTextResponse(path.read_text(encoding="utf-8"))
+
+
+@app.get("/datasets/{session_id}/download")
+def download_dataset_zip(session_id: str) -> StreamingResponse:
+    out_dir, manifest = _session_emitted_manifest(session_id)
+    in_dir = _in_files_dir(out_dir, manifest)
+    entries = [
+        in_dir / Path(f["filename"]).name
+        for f in manifest.get("files", [])
+        if f.get("filename")
+    ]
+    entries = [p for p in entries if p.is_file()]
+    if not entries:
+        raise HTTPException(status_code=404, detail="No input files to download")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in entries:
+            zf.write(path, arcname=path.name)
+    buf.seek(0)
+    zip_name = f"{out_dir.name}_input_deck.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
+
+
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
     await ws.accept()
     state = sessions.setdefault(session_id, _new_chat_session(session_id))
+    # Route ALL pipeline output (including a turn already in flight) here.
+    state.ws = ws
 
     try:
-        async with state.lock:
-            if not state.started:
-                state.started = True
-                await ws.send_json({
+        if not state.started:
+            state.started = True
+            async with state.lock:
+                await _send(state, {
                     "type": "agent_message",
                     "content": "Connected to the single-agent dataset pipeline.",
                 })
-                await _start_stage(ws, state, "dataset_config")
-            elif state.complete:
-                await ws.send_json({
-                    "type": "agent_message",
-                    "content": "This dataset pipeline session is already complete.",
-                })
-            elif state.phase == "agent":
-                await ws.send_json({
-                    "type": "agent_message",
-                    "content": "Reconnected. Continue with the current pipeline question.",
-                })
-            elif state.busy:
-                await ws.send_json({
-                    "type": "agent_message",
-                    "content": "Reconnected while a pipeline step is still running. Please wait.",
-                })
-            else:
-                replacement = _new_chat_session(session_id)
-                sessions[session_id] = replacement
-                state = replacement
-                state.started = True
-                await ws.send_json({
-                    "type": "agent_message",
-                    "content": (
-                        "The previous pipeline session was no longer resumable, "
-                        "so I started a fresh dataset pipeline."
-                    ),
-                })
-                await _start_stage(ws, state, "dataset_config")
-
-            # Reconnect/reload: repopulate the canvas from the last scene.
+                await _start_stage(state, "dataset_config")
+                # Converge the client busy flag (a refresh during this first
+                # kickoff restores `busy: true` on the new socket).
+                await _send(state, {"type": "pipeline_busy", "busy": False})
+        else:
+            # Refresh/reconnect: restore the whole UI state in one shot —
+            # full chat transcript, dataset files, busy flag, then the canvas.
+            # Sent WITHOUT the lock so a long-running step can't delay it.
+            await ws.send_json({
+                "type": "session_restore",
+                "events": list(state.transcript),
+                "busy": state.busy,
+                "phase": state.phase,
+                "complete": state.complete,
+                "dataset": state.dataset_result,
+            })
             if state.last_scene:
                 await ws.send_json({"type": "model_update", "scene": state.last_scene})
 
@@ -203,80 +316,83 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
             if not content:
                 continue
             async with state.lock:
-                await _handle_user_text(ws, state, content)
+                await _handle_user_text(state, content)
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session_id)
     except Exception as exc:
         logger.exception("WebSocket error for session %s", session_id)
         with contextlib.suppress(Exception):
             await ws.send_json({"type": "error", "message": str(exc)})
+    finally:
+        # Only clear the routing target if a newer socket hasn't replaced it.
+        if state.ws is ws:
+            state.ws = None
 
 
 def _new_chat_session(session_id: str) -> ChatSession:
     return ChatSession(session_id=session_id, user_id=session_id)
 
 
-async def _handle_user_text(ws: WebSocket, chat: ChatSession, text: str) -> None:
-    if chat.complete:
-        await ws.send_json({
-            "type": "agent_message",
-            "content": "The dataset has already been created for this session.",
-        })
-        return
+async def _handle_user_text(chat: ChatSession, text: str) -> None:
+    # Record only — the client already rendered its own message locally;
+    # the transcript copy is for the reconnect replay.
+    chat.transcript.append({"type": "user_message", "content": text})
     if chat.busy:
-        await ws.send_json({
+        await _send(chat, {
             "type": "agent_message",
             "content": "A pipeline step is still running. Please wait for it to finish.",
         })
         return
-    if chat.phase != "agent":
-        await ws.send_json({
+    # "complete" still chats: the agent can answer questions about the
+    # finished dataset — only pipeline advancement stops.
+    if chat.phase not in {"agent", "complete"}:
+        await _send(chat, {
             "type": "agent_message",
             "content": "The pipeline is not waiting for a chat reply right now.",
         })
         return
-    if text.lower() in {"quit", "exit"}:
+    if chat.phase == "agent" and text.lower() in {"quit", "exit"}:
         chat.phase = "halted"
         chat.state["halted"] = True
         chat.state["halt_reason"] = f"user exited during {chat.active_purpose}"
-        await ws.send_json({"type": "agent_message", "content": "Pipeline halted."})
+        await _send(chat, {"type": "agent_message", "content": "Pipeline halted."})
         return
 
-    chat.busy = True
     try:
-        result = await asyncio.to_thread(chat.agent_session.invoke, text)
-        await _handle_agent_result(ws, chat, result)
+        await _invoke_and_handle(chat, text)
     finally:
-        chat.busy = False
+        # The turn (agent + any deterministic chain) is over; converge the
+        # client's busy flag — needed when a refresh restored `busy: true`.
+        await _send(chat, {"type": "pipeline_busy", "busy": False})
 
 
-async def _invoke_and_handle(ws: WebSocket, chat: ChatSession, message: str) -> None:
+async def _invoke_and_handle(chat: ChatSession, message: str) -> None:
     """Send `message` into the ONE ongoing conversation and process the turn."""
     chat.busy = True
     try:
         result = await asyncio.to_thread(chat.agent_session.invoke, message)
-        await _handle_agent_result(ws, chat, result)
+        await _handle_agent_result(chat, result)
     finally:
         chat.busy = False
 
 
-async def _start_stage(ws: WebSocket, chat: ChatSession, section: str) -> None:
+async def _start_stage(chat: ChatSession, section: str) -> None:
     """Kick off a collection stage by injecting its section-specific
     instructions (batches, constraints, JSON schema) into the conversation."""
     chat.phase = "agent"
     chat.active_purpose = "collect"
     chat.active_section = section
 
-    await ws.send_json({
+    await _send(chat, {
         "type": "stage_change",
         "stage_name": SECTION_DISPLAY[section],
         "section": section,
     })
-    await _invoke_and_handle(ws, chat, SECTION_KICKOFF[section])
+    await _invoke_and_handle(chat, SECTION_KICKOFF[section])
 
 
 async def _send_model_update(
-    ws: WebSocket, chat: ChatSession, *, stage: Optional[str] = None
+    chat: ChatSession, *, stage: Optional[str] = None
 ) -> None:
     """Project the current store/manifests into a scene and push it to the
     canvas. Display-only: any failure is logged and swallowed so the viz can
@@ -296,7 +412,7 @@ async def _send_model_update(
     if scene is None or scene == chat.last_scene:
         return
     chat.last_scene = scene
-    await ws.send_json({"type": "model_update", "scene": scene})
+    await _send(chat, {"type": "model_update", "scene": scene})
 
 
 # Deterministic node -> viz flag updates. layer_sampling RESETS the downstream
@@ -312,37 +428,39 @@ _VIZ_FLAG_UPDATES: list[tuple[Any, dict[str, bool]]] = [
 ]
 
 
-async def _handle_agent_result(ws: WebSocket, chat: ChatSession, result: dict) -> None:
+async def _handle_agent_result(chat: ChatSession, result: dict) -> None:
     for text in chat.agent_session.new_ai_texts(result):
-        await ws.send_json({"type": "agent_message", "content": text})
+        await _send(chat, {"type": "agent_message", "content": text})
 
     await _send_model_update(
-        ws, chat, stage=chat.active_section or chat.active_purpose
+        chat, stage=chat.active_section or chat.active_purpose
     )
 
+    if chat.complete:
+        return  # post-completion chat: relay only, nothing to advance
     if chat.active_purpose == "collect":
-        await _check_collect_done(ws, chat)
+        await _check_collect_done(chat)
     else:
-        await _check_remediation_done(ws, chat)
+        await _check_remediation_done(chat)
 
 
-async def _check_collect_done(ws: WebSocket, chat: ChatSession) -> None:
+async def _check_collect_done(chat: ChatSession) -> None:
     section = chat.active_section
     if section is None or not chat.agent_session.stage_done(section):
         return  # keep collecting — wait for the next user message
 
     _sync_sections(chat)
-    await ws.send_json({
+    await _send(chat, {
         "type": "progress",
         "content": f"{SECTION_DISPLAY[section]} complete.",
         "section": section,
     })
     chat.active_section = None
     chat.phase = "routing"
-    await _advance_after_collect(ws, chat, section)
+    await _advance_after_collect(chat, section)
 
 
-async def _check_remediation_done(ws: WebSocket, chat: ChatSession) -> None:
+async def _check_remediation_done(chat: ChatSession) -> None:
     """Remediation completes when the agent changed >= 1 section vs the
     snapshot taken at gate failure, and every changed section is complete."""
     changed = _changed_sections(
@@ -355,16 +473,16 @@ async def _check_remediation_done(ws: WebSocket, chat: ChatSession) -> None:
     purpose = chat.active_purpose
     chat.remediation_snapshot = None
     chat.phase = "routing"
-    await ws.send_json({
+    await _send(chat, {
         "type": "progress",
         "content": f"Updated {', '.join(sorted(changed))} — re-validating.",
     })
 
     if purpose == "sample_remediation":
-        await _run_sample_validation_gate(ws, chat)
+        await _run_sample_validation_gate(chat)
     else:
         chat.state["resample_after_global"] = bool(changed & RESAMPLE_SECTIONS)
-        await _run_derive_chain(ws, chat)
+        await _run_derive_chain(chat)
 
 
 def _sync_sections(chat: ChatSession) -> None:
@@ -373,30 +491,30 @@ def _sync_sections(chat: ChatSession) -> None:
     chat.state.update(chat.agent_session.state_sync())
 
 
-async def _advance_after_collect(ws: WebSocket, chat: ChatSession, section: str) -> None:
+async def _advance_after_collect(chat: ChatSession, section: str) -> None:
     if section == "dataset_config":
-        await _start_stage(ws, chat, "layers")
+        await _start_stage(chat, "layers")
     elif section == "layers":
-        await _start_stage(ws, chat, "target_ranges")
+        await _start_stage(chat, "target_ranges")
     elif section == "target_ranges":
-        await _run_deterministic(ws, chat, "Layer + Target Sampling", layer_sampling_node)
-        await _start_stage(ws, chat, "waveform")
+        await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
+        await _start_stage(chat, "waveform")
     elif section == "waveform":
-        await _start_stage(ws, chat, "antenna")
+        await _start_stage(chat, "antenna")
     elif section == "antenna":
-        await _run_sample_validation_gate(ws, chat)
+        await _run_sample_validation_gate(chat)
     elif section == "advanced_params":
-        await _run_derive_chain(ws, chat)
+        await _run_derive_chain(chat)
 
 
-async def _run_sample_validation_gate(ws: WebSocket, chat: ChatSession) -> None:
-    await _run_deterministic(ws, chat, "Sample Validation", sample_validation_node)
+async def _run_sample_validation_gate(chat: ChatSession) -> None:
+    await _run_deterministic(chat, "Sample Validation", sample_validation_node)
     if chat.state.get("sample_validation_passed"):
-        await _start_stage(ws, chat, "advanced_params")
+        await _start_stage(chat, "advanced_params")
         return
 
     errors = chat.state.get("sample_validation_errors") or []
-    await ws.send_json({
+    await _send(chat, {
         "type": "validation_failed",
         "stage_name": "Sample Validation",
         "errors": errors,
@@ -404,13 +522,12 @@ async def _run_sample_validation_gate(ws: WebSocket, chat: ChatSession) -> None:
     chat.state["sample_validation_passed"] = None
     chat.state["sample_validation_errors"] = None
     await _start_remediation(
-        ws, chat, "sample_remediation",
+        chat, "sample_remediation",
         sample_remediation_message(errors, chat.agent_session.store),
     )
 
 
 async def _start_remediation(
-    ws: WebSocket,
     chat: ChatSession,
     purpose: str,
     message: str,
@@ -422,24 +539,24 @@ async def _start_remediation(
     chat.active_purpose = purpose
     chat.active_section = None
     chat.remediation_snapshot = chat.agent_session.snapshot()
-    await _invoke_and_handle(ws, chat, message)
+    await _invoke_and_handle(chat, message)
 
 
-async def _run_derive_chain(ws: WebSocket, chat: ChatSession) -> None:
+async def _run_derive_chain(chat: ChatSession) -> None:
     """Re-sample if needed, then derive the grid and run the global gate."""
     if chat.state.pop("resample_after_global", None) or _samples_stale(chat.state):
-        await _run_deterministic(ws, chat, "Layer + Target Sampling", layer_sampling_node)
+        await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
 
-    await _run_deterministic(ws, chat, "Peplinski Derive", peplinski_derive_node)
-    await _run_deterministic(ws, chat, "Global Derive", global_derive_node)
-    await _run_deterministic(ws, chat, "Global Validation", global_validation_node)
+    await _run_deterministic(chat, "Peplinski Derive", peplinski_derive_node)
+    await _run_deterministic(chat, "Global Derive", global_derive_node)
+    await _run_deterministic(chat, "Global Validation", global_validation_node)
 
     if chat.state.get("global_validation_passed"):
-        await _finish_dataset(ws, chat)
+        await _finish_dataset(chat)
         return
 
     errors = chat.state.get("global_validation_errors") or []
-    await ws.send_json({
+    await _send(chat, {
         "type": "validation_failed",
         "stage_name": "Global Validation",
         "errors": errors,
@@ -447,20 +564,26 @@ async def _run_derive_chain(ws: WebSocket, chat: ChatSession) -> None:
     chat.state["global_validation_passed"] = None
     chat.state["global_validation_errors"] = None
     await _start_remediation(
-        ws, chat, "global_remediation",
+        chat, "global_remediation",
         global_remediation_message(errors, chat.agent_session.store),
     )
 
 
-async def _finish_dataset(ws: WebSocket, chat: ChatSession) -> None:
-    await _run_deterministic(ws, chat, "Per-Sample Target Placement", target_placement_node)
-    await _run_deterministic(ws, chat, "Dataset Generation", dataset_generation_node)
+async def _finish_dataset(chat: ChatSession) -> None:
+    await _run_deterministic(chat, "Per-Sample Target Placement", target_placement_node)
+    await _run_deterministic(chat, "Dataset Generation", dataset_generation_node)
 
     payload = _build_finalize_payload(chat)
     result = await finalize_dataset(FinalizeDatasetPayload.model_validate(payload))
     chat.complete = True
     chat.phase = "complete"
-    await ws.send_json({
+    # Post-completion turns must not look like collection/remediation checks.
+    chat.active_purpose = "collect"
+    chat.active_section = None
+    chat.remediation_snapshot = None
+    # Kept for reconnect replay — repopulates the dataset tab after refresh.
+    chat.dataset_result = result
+    await _send(chat, {
         "type": "dataset_ready",
         "content": (
             f"Dataset created and stored. Wrote {result['rows_inserted']} "
@@ -497,30 +620,29 @@ def _clean_stage_output(output: str) -> str:
 
 
 async def _run_deterministic(
-    ws: WebSocket,
     chat: ChatSession,
     stage_name: str,
     fn: Any,
 ) -> None:
     chat.phase = "deterministic"
     chat.busy = True
-    await ws.send_json({"type": "stage_change", "stage_name": stage_name})
-    await ws.send_json({"type": "pipeline_busy", "busy": True})
+    await _send(chat, {"type": "stage_change", "stage_name": stage_name})
+    await _send(chat, {"type": "pipeline_busy", "busy": True})
     try:
         updates, output = await asyncio.to_thread(_run_node_with_output, fn, dict(chat.state))
         if updates:
             chat.state.update(updates)
         output = _clean_stage_output(output)
         if output:
-            await ws.send_json({"type": "agent_message", "content": output})
+            await _send(chat, {"type": "agent_message", "content": output})
         for node, flag_updates in _VIZ_FLAG_UPDATES:
             if fn is node:
                 chat.viz_flags.update(flag_updates)
                 break
-        await _send_model_update(ws, chat, stage=stage_name)
+        await _send_model_update(chat, stage=stage_name)
     finally:
         chat.busy = False
-        await ws.send_json({"type": "pipeline_busy", "busy": False})
+        await _send(chat, {"type": "pipeline_busy", "busy": False})
 
 
 def _run_node_with_output(fn: Any, state: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -648,6 +770,11 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
         "num_generated": len(sim_rows),
         "output_dir": artifacts.get("output_dir"),
         "in_dir": artifacts.get("in_dir"),
+        "files": [
+            {"sample_id": f.get("sample_id"), "filename": f.get("filename")}
+            for f in emitted_manifest.get("files", [])
+            if f.get("filename")
+        ],
     }
 
 

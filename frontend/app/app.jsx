@@ -53,6 +53,39 @@ function App() {
   const onModelUpdate = useCallback((s) => setScene(s), []);
   const sampleItems = scene?.samples?.items || [];
 
+  // Left-rail tab ("model" tree vs generated "dataset" files) and the
+  // currently opened .in file (shown in place of the canvas).
+  const [railTab, setRailTab] = useState("model");
+  const [datasetFiles, setDatasetFiles] = useState([]);
+  const [datasetView, setDatasetView] = useState(null); // {filename, content, loading, error}
+
+  const onDatasetReady = useCallback((result) => {
+    const files = (result && result.files) || [];
+    setDatasetFiles(files);
+    if (files.length) setRailTab("dataset");
+  }, []);
+
+  const openDatasetFile = useCallback(async (filename) => {
+    setDatasetView({ filename, content: "", loading: true });
+    try {
+      const base = window.getApiHttpBase();
+      const sid = window.getSessionId();
+      const res = await fetch(
+        `${base}/datasets/${sid}/files/${encodeURIComponent(filename)}`,
+      );
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const text = await res.text();
+      setDatasetView({ filename, content: text, loading: false });
+    } catch (e) {
+      setDatasetView({
+        filename,
+        content: "Could not load file — " + e.message,
+        loading: false,
+        error: true,
+      });
+    }
+  }, []);
+
   useEffect(() => {
     if (!scene) return;
     const n = scene.samples?.items?.length || 0;
@@ -193,6 +226,7 @@ function App() {
         activeModel={activeModel}
         setActiveModel={setActiveModel}
         dataset={dataset}
+        datasetCount={datasetFiles.length}
         chatOpen={chatOpen}
         setChatOpen={setChatOpen}
         toast={toast}
@@ -287,6 +321,11 @@ function App() {
               onSelect={onSelect}
               collapsed={railCollapsed}
               toast={toast}
+              railTab={railTab}
+              setRailTab={setRailTab}
+              datasetFiles={datasetFiles}
+              onOpenFile={openDatasetFile}
+              activeFile={datasetView?.filename}
             />
 
             <div className="stage">
@@ -314,6 +353,15 @@ function App() {
                     solving={solving}
                   />
                 </div>
+
+                {/* generated .in file viewer — covers the canvas when a
+                    dataset sample is opened from the left rail */}
+                {datasetView && (
+                  <DatasetFileView
+                    view={datasetView}
+                    onClose={() => setDatasetView(null)}
+                  />
+                )}
 
                 {/* view tabs: ranges overview vs one sampled realization */}
                 <div className="viewtabs">
@@ -485,6 +533,7 @@ function App() {
           modelRef={modelRef}
           setModel={setModel}
           onModelUpdate={onModelUpdate}
+          onDatasetReady={onDatasetReady}
           onRun={runForward}
           dataset={dataset}
           addDataset={addDataset}

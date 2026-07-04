@@ -21,6 +21,7 @@ simulation_outputs/
 
 # DVC and data files
 datasets/
+dataset/
 *.in
 *.out
 *.vti
@@ -32,3 +33,5 @@ db/retrieval_docs/
 review_docs/
 .cursor/
 test_notebooks/
+.pytest_cache/
+.vscode/

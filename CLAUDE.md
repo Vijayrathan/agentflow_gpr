@@ -59,6 +59,7 @@ This is the single most important design constraint. Violating it is never accep
 | `rag.py` | RAG retrieval: Qdrant vector DB + BAAI/bge-m3 embeddings + Docling parsing |
 | `physics_modelling.py` | Peplinski ε computation via gprMax-native routines |
 | `validation_tools_new.py` | Tiered validation (Tier 0–4) for physics constraints |
+| `viz_projection.py` | Pure projection of the section store + pipeline manifests into the `model_update` scene payload for the live frontend visualization (no FastAPI/LLM imports) |
 
 ### Single-Agent Extraction (ACTIVE — `backend/agentflow_single_agent.py`)
 
@@ -123,11 +124,65 @@ Executed after extraction, in strict order:
 
 ### Frontend (`frontend/`)
 
-Vanilla React/JSX (no build step). Entry: `frontend/html-design.html`. Components in `frontend/app/`:
-- `chatbot.jsx` — WebSocket chat interface to backend
+Vanilla React/JSX (no build step; Babel-standalone, all components exported on
+`window`). Entry: `frontend/html-design.html`. Components in `frontend/app/`:
+- `app.jsx` — root component; owns `model`, the live `scene`, canvas view tabs
+- `chatbot.jsx` — WebSocket chat pane (drag-resizable; width persisted in localStorage)
 - `viz.jsx` — 2D GPR domain visualization (layers, antenna, targets, B-scan)
-- `data.jsx` — State management for model data
-- `panels.jsx` — Property inspector panels
+- `data.jsx` — catalogs, `makeInitialModel` (BLANK scene), `makeUtilityModel` (demo
+  preset), `sceneToModel`, `materialKeyForLayer`, `overviewCaveats`
+- `panels.jsx` — Property inspector panels, model tree, dock
+
+Layout sizing: chat / rail / dock use viewport-relative clamps (`clamp(...)` in
+`html-design.html`), not fixed px — keep it that way. The subsurface SVG
+(`viewBox 1000×660`, `meet`) fills the FULL canvas width when the bottom dock is
+collapsed, so absolutely-positioned canvas overlays will cover the plot; new
+overlays must be compact/collapsible (see the caveats chip) rather than permanent
+panels.
+
+### Live Subsurface Visualization (`model_update` event)
+
+The canvas builds up live while the agent collects parameters. Data flow:
+
+```
+section store / manifests → viz_projection.build_scene() → ws `model_update {scene}`
+  → ChatPane onModelUpdate (ref) → App.scene → sceneToModel() → setModel → SubsurfaceView
+```
+
+- **Emission** (`api.py`): after every agent turn (`_handle_agent_result`) and after
+  each deterministic node (`_run_deterministic`), via `_send_model_update` —
+  failures are swallowed (viz must never break the chat loop), identical scenes are
+  deduplicated (`ChatSession.last_scene`), and the last scene is replayed on
+  reconnect so a page reload repopulates the canvas.
+- **Flag gating** (`ChatSession.viz_flags`: `sampled/derived/grid/placed/emitted`):
+  `build_scene` only reads a manifest (`sampled_layers.json`, `derived_layers.json`,
+  `global_derive.json`) when the producing node ran in THIS session — stale files
+  from a previous run must never be shown. `layer_sampling` RESETS all downstream
+  flags (covers staleness re-sampling and global-remediation resample).
+- **Scene payload**: `ranges` (midpoint layers + thickness min/max + preview εr,
+  midpoint target) always reflects the store; `samples` (capped at `SAMPLE_CAP=200`,
+  with `total/included/truncated`) and `grid` coexist with it because
+  `layer_sampling` runs mid-collection. `domain.provisional` is true until
+  `global_derive` fixes the real grid.
+- **Preview εr** is deterministic Python: `derive_layer_eps` (gprMax-native
+  Peplinski, in-band `calculate_er(f).real`) at midpoint composition; evaluated at a
+  0.9 GHz placeholder (`eps_provisional: true`) until the waveform frequency exists.
+  σ is intentionally never previewed. Per-sample εr is joined from
+  `derived_layers.json`, not recomputed.
+- **Canvas tabs** (`app.jsx`): "Overview" renders range midpoints + cumulative
+  thickness-uncertainty bands (`thicknessMin/Max` on layers → shaded bands in
+  `SubsurfaceView`); "Samples" (disabled until samples exist) renders one concrete
+  realization chosen via a dropdown keyed by `sample_id` (ids may be non-contiguous
+  after target placement drops samples). Overview also shows a collapsible
+  "assumptions" chip (`overviewCaveats`) listing what is still placeholder vs derived.
+- **Frontend invariants**: `ws.onmessage` is bound once at mount, so callbacks
+  passed into `ChatPane` must be read through a ref (stale-closure trap).
+  `makeInitialModel()` is a BLANK scene — the demo model lives in
+  `makeUtilityModel()` (used by the presets menu); don't re-populate the initial
+  model. Backend sends physics only; material colors/patterns are a frontend
+  display classification (`materialKeyForLayer`).
+- Key-free tests: `backend/tests/test_viz_projection.py` (store→scene,
+  manifests→scene, sample cap, flag gating).
 
 ### Database (`db/`)
 
@@ -167,8 +222,24 @@ state, so cross-section edits land immediately.
 
 **Frontend WebSocket protocol** (`api.py` → `chatbot.jsx`): `agent_message`,
 `stage_change`, `progress`, `validation_failed`, `pipeline_busy`, `dataset_ready`,
-`error`. `choice_required` is no longer emitted (the agent negotiates the fix in
-conversation); the frontend handler remains for compatibility.
+`model_update`, `session_restore`, `error`. `choice_required` is no longer emitted
+(the agent negotiates the fix in conversation); the frontend handler remains for
+compatibility.
+
+**Refresh/reconnect model** (`api.py` ↔ `chatbot.jsx`): every chat-visible event
+(`RECORDED_EVENT_TYPES` + user messages) is appended to `ChatSession.transcript`;
+all pipeline output goes through `_send(chat, …)`, which targets `chat.ws` — the
+CURRENT socket — and swallows send failures, so a page refresh mid-turn neither
+kills the pipeline nor loses output (it lands in the transcript). Reconnecting to
+a started session replays `session_restore` (full transcript + `dataset` result +
+`busy`/`phase`/`complete`) followed by the last `model_update` scene; the frontend
+rebuilds the message list via `replayToMessage` (must mirror `handleServerEvent`
+rendering) and re-hydrates the dataset tab through `onDatasetReady`. `user_message`
+events are record-only (never echoed back). After `dataset_ready` the session stays
+conversational: `_handle_user_text` accepts phase `complete` and relays agent replies
+without advancing the pipeline. Every top-level turn ends with a `pipeline_busy:
+false` so a restored `busy: true` always converges. Sessions live in-memory only —
+an API-server restart still starts a fresh pipeline.
 
 ## Physics Constraints
 

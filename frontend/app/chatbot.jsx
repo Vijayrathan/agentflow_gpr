@@ -30,6 +30,44 @@ function nextChips(kind) {
   return [];
 }
 
+// Map one recorded transcript event to a chat message for the reconnect
+// replay (`session_restore`). Must mirror the live handleServerEvent
+// rendering so a refreshed page shows the identical conversation.
+function replayToMessage(ev) {
+  const t = ev.type;
+  if (t === "user_message")
+    return { id: uid("m"), role: "user", html: mdToHtml(ev.content || "") };
+  if (t === "agent_message" || t === "dataset_ready")
+    return { id: uid("m"), role: "bot", html: mdToHtml(ev.content || "") };
+  if (t === "stage_change")
+    return {
+      id: uid("m"),
+      role: "bot",
+      status: true,
+      html: mdToHtml("**Stage:** " + (ev.stage_name || "Pipeline step")),
+    };
+  if (t === "progress")
+    return {
+      id: uid("m"),
+      role: "bot",
+      status: true,
+      html: mdToHtml(ev.content || "Step complete."),
+    };
+  if (t === "validation_failed") {
+    const errors = (ev.errors || []).map((e) => "- " + e).join("\n");
+    return {
+      id: uid("m"),
+      role: "bot",
+      html: mdToHtml(
+        "**Validation failed:** " +
+          (ev.stage_name || "") +
+          (errors ? "\n" + errors : ""),
+      ),
+    };
+  }
+  return null;
+}
+
 function getSessionId() {
   const key = "nl2sim_chat_session_id";
   let id = localStorage.getItem(key);
@@ -43,16 +81,25 @@ function getSessionId() {
   return id;
 }
 
-function getWsUrl(sessionId) {
-  if (window.NL2SIM_WS_URL) return window.NL2SIM_WS_URL + "/" + sessionId;
+function getApiHost() {
   const isFile = window.location.protocol === "file:";
   const isStaticDevServer =
     window.location.hostname === "127.0.0.1" &&
     ["5173", "8001", "8080"].includes(window.location.port);
-  const host =
-    isFile || isStaticDevServer ? "127.0.0.1:8000" : window.location.host;
+  return isFile || isStaticDevServer ? "127.0.0.1:8000" : window.location.host;
+}
+
+function getWsUrl(sessionId) {
+  if (window.NL2SIM_WS_URL) return window.NL2SIM_WS_URL + "/" + sessionId;
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${host}/ws/${sessionId}`;
+  return `${proto}://${getApiHost()}/ws/${sessionId}`;
+}
+
+// HTTP base for REST calls (dataset file listing / content / zip download).
+function getApiHttpBase() {
+  if (window.NL2SIM_HTTP_URL) return window.NL2SIM_HTTP_URL;
+  const proto = window.location.protocol === "https:" ? "https" : "http";
+  return `${proto}://${getApiHost()}`;
 }
 
 function ChatPane({
@@ -61,6 +108,7 @@ function ChatPane({
   setCollapsed,
   toast,
   onModelUpdate,
+  onDatasetReady,
 }) {
   const [messages, setMessages] = React.useState([
     {
@@ -119,6 +167,8 @@ function ChatPane({
   // handleServerEvent; route the callback through a ref so it stays current.
   const onModelUpdateRef = React.useRef(onModelUpdate);
   onModelUpdateRef.current = onModelUpdate;
+  const onDatasetReadyRef = React.useRef(onDatasetReady);
+  onDatasetReadyRef.current = onDatasetReady;
 
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -139,7 +189,11 @@ function ChatPane({
       setTyping(false);
       setBusy(false);
       setSending(false);
-      pushBot(mdToHtml("Connection closed. Restart the API server and reload the page."));
+      pushBot(
+        mdToHtml(
+          "Connection closed. Restart the API server and reload the page.",
+        ),
+      );
     };
     ws.onerror = () => {
       setStatus("error");
@@ -182,6 +236,19 @@ function ChatPane({
       if (onModelUpdateRef.current) onModelUpdateRef.current(msg.scene);
       return;
     }
+    if (msg.type === "session_restore") {
+      // Page refresh on an existing session: rebuild the entire chat from
+      // the recorded transcript and re-hydrate the dataset tab + busy flag,
+      // so the UI resumes exactly where the session left off.
+      const rebuilt = (msg.events || []).map(replayToMessage).filter(Boolean);
+      if (rebuilt.length) setMessages(rebuilt);
+      setBusy(Boolean(msg.busy));
+      setTyping(Boolean(msg.busy)); // a turn is still in flight — show activity
+      setChips([]);
+      if (msg.dataset && onDatasetReadyRef.current)
+        onDatasetReadyRef.current(msg.dataset);
+      return;
+    }
 
     setSending(false);
     setTyping(false);
@@ -202,7 +269,13 @@ function ChatPane({
     }
     if (msg.type === "validation_failed") {
       const errors = (msg.errors || []).map((e) => "- " + e).join("\n");
-      pushBot(mdToHtml("**Validation failed:** " + (msg.stage_name || "") + (errors ? "\n" + errors : "")));
+      pushBot(
+        mdToHtml(
+          "**Validation failed:** " +
+            (msg.stage_name || "") +
+            (errors ? "\n" + errors : ""),
+        ),
+      );
       return;
     }
     if (msg.type === "choice_required") {
@@ -218,11 +291,15 @@ function ChatPane({
     if (msg.type === "dataset_ready") {
       pushBot(mdToHtml(msg.content || "Dataset created."));
       setChips([]);
+      if (onDatasetReadyRef.current)
+        onDatasetReadyRef.current(msg.result || {});
       if (toast) toast("Dataset created and stored", "ok");
       return;
     }
     if (msg.type === "error") {
-      pushBot(mdToHtml("**Backend error:** " + (msg.message || "Unknown error")));
+      pushBot(
+        mdToHtml("**Backend error:** " + (msg.message || "Unknown error")),
+      );
       return;
     }
   }
@@ -354,7 +431,7 @@ function ChatPane({
             rows={1}
             placeholder={
               connected
-                ? "Reply to the LangGraph agent..."
+                ? "Reply to the agent..."
                 : "Waiting for backend connection..."
             }
             value={draft}
@@ -385,11 +462,17 @@ function ChatPane({
           </button>
         </div>
         <div className="chat-hint">
-          LangGraph agent pipeline · press ↵ to send
+          press ↵ to send
         </div>
       </div>
     </section>
   );
 }
 
-Object.assign(window, { ChatPane, mdToHtml, nextChips });
+Object.assign(window, {
+  ChatPane,
+  mdToHtml,
+  nextChips,
+  getSessionId,
+  getApiHttpBase,
+});

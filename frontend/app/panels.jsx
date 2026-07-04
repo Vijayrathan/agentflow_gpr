@@ -89,6 +89,7 @@ function MenuBar(props) {
     activeModel,
     setActiveModel,
     dataset,
+    datasetCount,
     chatOpen,
     setChatOpen,
     toast,
@@ -96,6 +97,23 @@ function MenuBar(props) {
     onManual,
   } = props;
   const [open, setOpen] = React.useState(null);
+
+  // Download all generated gprMax .in files as a zip from the backend.
+  const downloadInputDeck = () => {
+    if (!datasetCount) {
+      toast("Generate a dataset first to download the input deck", "info");
+      return;
+    }
+    const base = window.getApiHttpBase ? window.getApiHttpBase() : "";
+    const sid = window.getSessionId ? window.getSessionId() : "";
+    const a = document.createElement("a");
+    a.href = `${base}/datasets/${sid}/download`;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast("Downloading <b>gprMax input deck</b> · .zip", "ok");
+  };
   const close = () => setOpen(null);
   React.useEffect(() => {
     const h = () => close();
@@ -229,64 +247,27 @@ function MenuBar(props) {
                 className="item"
                 onClick={() => {
                   close();
-                  openModal("gprmax");
+                  downloadInputDeck();
                 }}
               >
                 <Icon name="cpu" className="ic" />
                 <div className="col">
                   <span>gprMax input deck</span>
-                  <span className="sub">.in — ready to solve</span>
+                  <span className="sub">
+                    {datasetCount
+                      ? datasetCount + " generated .in files"
+                      : "generate a dataset first"}
+                  </span>
                 </div>
-                <span className="meta">.in</span>
+                <span className="meta">.zip</span>
               </button>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  openModal("json");
-                }}
-              >
-                <Icon name="database" className="ic" />
-                <div className="col">
-                  <span>Scenario definition</span>
-                  <span className="sub">full parameter set</span>
-                </div>
-                <span className="meta">.json</span>
-              </button>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  toast(
-                    "Exported <b>dataset_labels.csv</b> · " +
-                      dataset.toLocaleString() +
-                      " rows",
-                    "ok",
-                  );
-                }}
-              >
+              <button className="item" disabled title="Coming soon">
                 <Icon name="table" className="ic" />
                 <div className="col">
                   <span>Dataset labels</span>
-                  <span className="sub">
-                    {dataset.toLocaleString()} samples
-                  </span>
+                  <span className="sub">not yet available</span>
                 </div>
                 <span className="meta">.csv</span>
-              </button>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  toast("Exported <b>bscan_preview.png</b>", "ok");
-                }}
-              >
-                <Icon name="radar" className="ic" />
-                <div className="col">
-                  <span>B-scan image</span>
-                  <span className="sub">current radargram</span>
-                </div>
-                <span className="meta">.png</span>
               </button>
             </div>
           )}
@@ -377,7 +358,19 @@ function MenuBar(props) {
 /* ============================================================
    MODEL TREE (left rail)
    ============================================================ */
-function ModelTree({ model, setModel, selected, onSelect, collapsed, toast }) {
+function ModelTree({
+  model,
+  setModel,
+  selected,
+  onSelect,
+  collapsed,
+  toast,
+  railTab,
+  setRailTab,
+  datasetFiles,
+  onOpenFile,
+  activeFile,
+}) {
   const [openL, setOpenL] = React.useState(true);
   const [openT, setOpenT] = React.useState(true);
   const addLayer = () => {
@@ -421,12 +414,62 @@ function ModelTree({ model, setModel, selected, onSelect, collapsed, toast }) {
     toast("Added target", "ok");
   };
 
+  const files = datasetFiles || [];
+
   return (
     <aside className={"rail" + (collapsed ? " collapsed" : "")}>
-      <div className="rail-head">
-        <span className="t">Model Tree</span>
-        <span className="tn-meta mono">{model.project}</span>
+      <div className="rail-tabs">
+        <button
+          className={"rail-tab" + (railTab === "model" ? " on" : "")}
+          onClick={() => setRailTab("model")}
+        >
+          <Icon name="layers" size={13} />
+          Model
+        </button>
+        <button
+          className={"rail-tab" + (railTab === "dataset" ? " on" : "")}
+          onClick={() => setRailTab("dataset")}
+        >
+          <Icon name="database" size={13} />
+          Dataset
+          {files.length > 0 && <span className="rail-tab-count">{files.length}</span>}
+        </button>
       </div>
+
+      {railTab === "dataset" ? (
+        <div className="rail-scroll">
+          <div className="tree-sec">
+            <div className="tree-sec-head" style={{ cursor: "default" }}>
+              <Icon name="cpu" size={13} style={{ opacity: 0.7 }} />
+              Samples
+              <span className="count mono">{files.length}</span>
+            </div>
+            {files.length === 0 && (
+              <div
+                style={{
+                  padding: "8px 10px",
+                  fontSize: 11.5,
+                  color: "var(--muted)",
+                }}
+              >
+                No dataset yet — ask the assistant to generate one.
+              </div>
+            )}
+            {files.map((f) => (
+              <div
+                key={f.filename}
+                className={"tnode" + (activeFile === f.filename ? " sel" : "")}
+                onClick={() => onOpenFile(f.filename)}
+                title={f.filename}
+              >
+                <Icon name="cpu" size={13} style={{ opacity: 0.6 }} />
+                <span className="tn-name">{f.filename}</span>
+                <span className="tn-meta mono">#{f.sample_id}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
       <div className="rail-scroll">
         {/* domain summary */}
         <div className="tree-sec">
@@ -574,6 +617,7 @@ function ModelTree({ model, setModel, selected, onSelect, collapsed, toast }) {
           )}
         </div>
       </div>
+      )}
     </aside>
   );
 }
@@ -1125,6 +1169,36 @@ function ExportModal({ kind, model, onClose, toast }) {
   );
 }
 
+/* ---------- generated .in file viewer (covers the canvas) ---------- */
+function DatasetFileView({ view, onClose }) {
+  const html = String(view.content || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/(#[a-z_]+:)/g, '<span class="k">$1</span>')
+    .replace(/(--.*$)/gm, '<span class="c">$1</span>');
+  return (
+    <div className="fileview">
+      <div className="fileview-head">
+        <Icon name="cpu" size={15} style={{ color: "var(--accent)" }} />
+        <span className="fileview-name mono">{view.filename}</span>
+        <span className="badge mono">.in</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        <button className="hbtn" title="Close" onClick={onClose}>
+          <Icon name="x" size={15} />
+        </button>
+      </div>
+      <div className="fileview-body">
+        {view.loading ? (
+          <div className="fileview-empty">Loading {view.filename}…</div>
+        ) : (
+          <pre className="codeblk" dangerouslySetInnerHTML={{ __html: html }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 Object.assign(window, {
   MenuBar,
   ModelTree,
@@ -1133,6 +1207,7 @@ Object.assign(window, {
   Acquisition,
   Toasts,
   ExportModal,
+  DatasetFileView,
   generateGprMax,
   updLayer,
   updTarget,

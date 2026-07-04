@@ -1,8 +1,8 @@
 {
   "eps_r_aggregate": {
-    "eps_r_max": 16.21882211711936,
+    "eps_r_max": 16.2273829841259,
     "eps_r_min": 5.931017064382155,
-    "num_samples": 10,
+    "num_samples": 20,
     "frequency_hz": 700000000.0,
     "nbins": 50,
     "smallest_feature_global_m": null,
@@ -207,6 +207,206 @@
           "name": "lower_clay_loam",
           "eps_r_dry": 8.38129015560303,
           "eps_r_wet": 15.637724646241612
+        }
+      ]
+    },
+    {
+      "sample_id": 11,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.24403296148577,
+          "eps_r_wet": 12.19701231099679
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 6.941383141812729,
+          "eps_r_wet": 13.843203567579415
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.745635352794888,
+          "eps_r_wet": 16.093873202546952
+        }
+      ]
+    },
+    {
+      "sample_id": 12,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.0153574668316185,
+          "eps_r_wet": 11.84616962646178
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.330020800929317,
+          "eps_r_wet": 14.403482180151236
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.142917868288366,
+          "eps_r_wet": 15.209623825111684
+        }
+      ]
+    },
+    {
+      "sample_id": 13,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.1187752823640755,
+          "eps_r_wet": 12.076651675471485
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.223948984615008,
+          "eps_r_wet": 14.358910417459537
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.49341214737907,
+          "eps_r_wet": 15.685195943519108
+        }
+      ]
+    },
+    {
+      "sample_id": 14,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.394967259035576,
+          "eps_r_wet": 12.342856221973562
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.327932462557479,
+          "eps_r_wet": 14.548742283293233
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.310329427799054,
+          "eps_r_wet": 15.48913154613917
+        }
+      ]
+    },
+    {
+      "sample_id": 15,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.24844503757144,
+          "eps_r_wet": 12.229505412323501
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.060804396760666,
+          "eps_r_wet": 14.076516543756615
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.653856049236474,
+          "eps_r_wet": 15.977175390428371
+        }
+      ]
+    },
+    {
+      "sample_id": 16,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.0861622869350835,
+          "eps_r_wet": 11.995633260308287
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.0467449871939625,
+          "eps_r_wet": 13.922559989019204
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.793959092452722,
+          "eps_r_wet": 16.2273829841259
+        }
+      ]
+    },
+    {
+      "sample_id": 17,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.413174667994319,
+          "eps_r_wet": 12.398831583140566
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.056562045411483,
+          "eps_r_wet": 13.94103918240347
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.609108563059426,
+          "eps_r_wet": 15.955771531522412
+        }
+      ]
+    },
+    {
+      "sample_id": 18,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 5.9581730872735355,
+          "eps_r_wet": 11.717964133393236
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.237199221100607,
+          "eps_r_wet": 14.38909758141945
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.672276187306277,
+          "eps_r_wet": 16.023822653293266
+        }
+      ]
+    },
+    {
+      "sample_id": 19,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.344044452069409,
+          "eps_r_wet": 12.265909877035039
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 6.816282851260672,
+          "eps_r_wet": 13.604277125575127
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.16013459704468,
+          "eps_r_wet": 15.26774253307294
+        }
+      ]
+    },
+    {
+      "sample_id": 20,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "eps_r_dry": 6.2320626679443,
+          "eps_r_wet": 12.200550884694685
+        },
+        {
+          "name": "middle_silt_loam",
+          "eps_r_dry": 7.243130341053405,
+          "eps_r_wet": 14.375133788731507
+        },
+        {
+          "name": "lower_clay_loam",
+          "eps_r_dry": 8.181449220318566,
+          "eps_r_wet": 15.336624144774497
         }
       ]
     }
