@@ -35,3 +35,4 @@ review_docs/
 test_notebooks/
 .pytest_cache/
 .vscode/
+.inputs_easy.txt

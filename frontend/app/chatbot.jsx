@@ -114,7 +114,7 @@ function ChatPane({
     {
       id: uid("m"),
       role: "bot",
-      html: mdToHtml("Connecting to the **NL2Sim** LangGraph pipeline..."),
+      html: mdToHtml("Connecting to **NL2Sim** Agent..."),
     },
   ]);
   const [chips, setChips] = React.useState([]);

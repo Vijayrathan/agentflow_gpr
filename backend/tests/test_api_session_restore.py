@@ -64,3 +64,82 @@ def test_send_targets_current_socket_after_reconnect():
     assert [m["content"] for m in old.sent] == ["before"]
     assert [m["content"] for m in new.sent] == ["after"]
     assert [m["content"] for m in chat.transcript] == ["before", "after"]
+
+
+# ---------------------------------------------------------------------------
+# Eager staleness re-sample: a cross-edit to a sampling input after
+# layer_sampling ran (e.g. adding the buried cylinder during the waveform
+# stage) must re-draw the samples immediately, not wait for advanced_params.
+# ---------------------------------------------------------------------------
+
+_CYLINDER = {
+    "cylinder": {
+        "x_center_min_m": 0.4, "x_center_max_m": 0.6,
+        "depth_min_m": 0.2, "depth_max_m": 0.3,
+        "radius_min_m": 0.02, "radius_max_m": 0.04,
+    }
+}
+
+
+def _resample_recorder(monkeypatch):
+    calls = []
+
+    async def fake_run_deterministic(chat, stage_name, fn):
+        chat.phase = "deterministic"  # mimic the real node runner's side effect
+        calls.append((stage_name, fn))
+
+    monkeypatch.setattr(api, "_run_deterministic", fake_run_deterministic)
+    return calls
+
+
+def test_no_resample_before_sampling_ran(monkeypatch):
+    calls = _resample_recorder(monkeypatch)
+    chat = _chat(FakeWS())
+    chat.agent_session.store["target_ranges"] = dict(_CYLINDER)
+    asyncio.run(api._maybe_resample_stale(chat))  # sampling_snapshot is None
+    assert calls == []
+
+
+def test_no_resample_when_inputs_unchanged(monkeypatch):
+    calls = _resample_recorder(monkeypatch)
+    chat = _chat(FakeWS())
+    chat.agent_session.store["target_ranges"] = dict(_CYLINDER)
+    chat.state["sampling_snapshot"] = {
+        s: chat.agent_session.store.get(s) for s in api.SAMPLING_INPUT_SECTIONS
+    }
+    asyncio.run(api._maybe_resample_stale(chat))
+    assert calls == []
+
+
+def test_cross_edit_triggers_immediate_resample(monkeypatch):
+    calls = _resample_recorder(monkeypatch)
+    chat = _chat(FakeWS())
+    # Sampling ran while the target was skipped (empty optional section).
+    chat.agent_session.store["target_ranges"] = {}
+    chat.state["sampling_snapshot"] = {
+        s: chat.agent_session.store.get(s) for s in api.SAMPLING_INPUT_SECTIONS
+    }
+    # Mid-waveform, the user adds the cylinder.
+    chat.agent_session.store["target_ranges"] = dict(_CYLINDER)
+    chat.phase = "agent"
+    asyncio.run(api._maybe_resample_stale(chat))
+    assert [fn for _, fn in calls] == [api.layer_sampling_node]
+    # The store edit was synced into pipeline state before the node ran.
+    assert chat.state["target_ranges"] == _CYLINDER
+    # Still mid-collection: the phase must return to "agent" or the user's
+    # next chat message would be rejected ("pipeline is not waiting...").
+    assert chat.phase == "agent"
+
+
+def test_incomplete_edit_defers_resample(monkeypatch):
+    calls = _resample_recorder(monkeypatch)
+    chat = _chat(FakeWS())
+    chat.agent_session.store["target_ranges"] = {}
+    chat.state["sampling_snapshot"] = {
+        s: chat.agent_session.store.get(s) for s in api.SAMPLING_INPUT_SECTIONS
+    }
+    # A schema-invalid layers payload can't reach the store via save_section,
+    # but stage_done must still gate the eager path (defensive).
+    chat.agent_session.store["layers"] = {"num_layers": "not-an-int"}
+    asyncio.run(api._maybe_resample_stale(chat))
+    assert calls == []

@@ -59,6 +59,7 @@ for _p in (_backend_dir, _project_root, _ds_dir, _gprmax_root):
 
 from agentflow_single_agent import (  # noqa: E402
     RESAMPLE_SECTIONS,
+    SAMPLING_INPUT_SECTIONS,
     SECTION_DISPLAY,
     SingleAgentSession,
     _changed_sections,
@@ -439,9 +440,32 @@ async def _handle_agent_result(chat: ChatSession, result: dict) -> None:
     if chat.complete:
         return  # post-completion chat: relay only, nothing to advance
     if chat.active_purpose == "collect":
+        await _maybe_resample_stale(chat)
         await _check_collect_done(chat)
     else:
         await _check_remediation_done(chat)
+
+
+async def _maybe_resample_stale(chat: ChatSession) -> None:
+    """Eagerly re-draw samples when a cross-edit changed a sampling input
+    after layer_sampling ran (e.g. the user adds the buried target during
+    the waveform stage). Without this the stale draws sit on disk and on
+    the canvas until the deferred check in _run_derive_chain fires after
+    advanced_params."""
+    snap = chat.state.get("sampling_snapshot")
+    if snap is None:
+        return  # sampling hasn't run yet
+    store = chat.agent_session.store
+    changed = {s for s in SAMPLING_INPUT_SECTIONS if store.get(s) != snap.get(s)}
+    if not changed:
+        return
+    if not all(chat.agent_session.stage_done(s) for s in changed):
+        return  # mid-edit; _run_derive_chain's deferred check still covers it
+    _sync_sections(chat)
+    await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
+    # Still mid-collection on the active section: _run_deterministic left the
+    # phase at "deterministic", which would reject the user's next chat turn.
+    chat.phase = "agent"
 
 
 async def _check_collect_done(chat: ChatSession) -> None:

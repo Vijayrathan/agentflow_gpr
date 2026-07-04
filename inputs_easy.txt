@@ -1,0 +1,24 @@
+Please define all 3 layers now:
+Layer 1 name=top_sandy_loam; thickness_m_min=0.18; thickness_m_max=0.24; sand_pct_min=45; sand_pct_max=50; clay_pct_min=5; clay_pct_max=10; theta_v_min=0.08; theta_v_max=0.18; bulk_density_gcm3_min=1.35; bulk_density_gcm3_max=1.55; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
+Layer 2 name=middle_silt_loam; thickness_m_min=0.28; thickness_m_max=0.36; sand_pct_min=25; sand_pct_max=35; clay_pct_min=10; clay_pct_max=16; theta_v_min=0.12; theta_v_max=0.24; bulk_density_gcm3_min=1.30; bulk_density_gcm3_max=1.50; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
+Layer 3 name=lower_clay_loam; thickness_m_min=0.38; thickness_m_max=0.48; sand_pct_min=15; sand_pct_max=25; clay_pct_min=16; clay_pct_max=20; theta_v_min=0.16; theta_v_max=0.28; bulk_density_gcm3_min=1.25; bulk_density_gcm3_max=1.45; particle_density_gcm3_min=2.64; particle_density_gcm3_max=2.68.
+------
+
+Buried target:
+
+"name": "metal_pipe_22",
+"material": "pec",
+"x_center_min_m": 0.45,
+"x_center_max_m": 0.75,
+"depth_min_m": 0.10,
+"depth_max_m": 0.40,
+"radius_min_m": 0.055,
+"radius_max_m": 0.065,
+
+---
+
+waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=700000000; waveform_name=ricker_700mhz_peak
+
+---
+
+antenna_kind=hertzian_dipole; antenna_axis=x; tx_rx_offset_m=0.12; resistance=null
