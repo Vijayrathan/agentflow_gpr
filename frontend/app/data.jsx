@@ -244,42 +244,22 @@ const ANTENNAS = [
   { id: "custom", label: "Custom Hertzian", freq: 1.2, sep: 0.05 },
 ];
 
-/* ---------- downstream ML models the dataset feeds ---------- */
+/* ---------- forward-model solvers (the "Run forward model" button runs
+   whichever is selected; only gprMax exists today) ---------- */
 const ML_MODELS = [
   {
-    id: "permnet",
-    label: "Permittivity Estimator",
-    arch: "CNN · regression",
-    desc: "Predicts layer εr from B-scan",
-    samples: "32k",
+    id: "gprmax",
+    label: "gprMax",
+    arch: "FDTD",
+    desc: "Full-wave electromagnetic solver",
+    available: true,
   },
   {
-    id: "clf",
-    label: "Target Classifier",
-    arch: "ResNet-18",
-    desc: "Pipe / rebar / void / clutter",
-    samples: "58k",
-  },
-  {
-    id: "unet",
-    label: "Clutter Removal",
-    arch: "U-Net",
-    desc: "Suppresses surface clutter",
-    samples: "41k",
-  },
-  {
-    id: "depthreg",
-    label: "Depth Regressor",
-    arch: "XGBoost",
-    desc: "Estimates target burial depth",
-    samples: "27k",
-  },
-  {
-    id: "seg",
-    label: "Subsurface Segmenter",
-    arch: "SegFormer",
-    desc: "Layer boundary segmentation",
-    samples: "19k",
+    id: "surrogate",
+    label: "Surrogate ML model",
+    arch: "Neural surrogate",
+    desc: "Fast approximate forward model",
+    available: false,
   },
 ];
 

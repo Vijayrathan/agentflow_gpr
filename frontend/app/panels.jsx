@@ -287,15 +287,17 @@ function MenuBar(props) {
           </button>
           {open === "ml" && (
             <div className="pop" style={{ minWidth: 288 }} onClick={stop}>
-              <div className="head">Target model · dataset feeds</div>
+              <div className="head">Forward model · solver</div>
               {ML_MODELS.map((m) => (
                 <button
                   key={m.id}
                   className={"item" + (m.id === activeModel ? " sel" : "")}
+                  disabled={!m.available}
+                  title={m.available ? undefined : "Not available"}
                   onClick={() => {
                     setActiveModel(m.id);
                     close();
-                    toast("Target model → <b>" + m.label + "</b>", "info");
+                    toast("Forward model → <b>" + m.label + "</b>", "info");
                   }}
                 >
                   <Icon
@@ -308,7 +310,9 @@ function MenuBar(props) {
                       {m.arch} · {m.desc}
                     </span>
                   </div>
-                  <span className="meta">{m.samples}</span>
+                  <span className="meta">
+                    {m.available ? "" : "Not available"}
+                  </span>
                 </button>
               ))}
             </div>

@@ -386,7 +386,7 @@ function ChatPane({
             <b style={{ color: "var(--ink-2)", fontWeight: 600 }}>
               &nbsp;{ML_MODELS.find((m) => m.id === activeModel)?.label}
             </b>
-            &nbsp;data
+            &nbsp;solver
           </div>
         </div>
         <button

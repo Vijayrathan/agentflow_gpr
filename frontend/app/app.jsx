@@ -23,7 +23,7 @@ function App() {
   }, [model]);
 
   const [selected, setSelected] = useState(null);
-  const [activeModel, setActiveModel] = useState("permnet");
+  const [activeModel, setActiveModel] = useState("gprmax");
   const [dataset, setDataset] = useState(12480);
 
   const [chatOpen, setChatOpen] = useState(true);
@@ -150,6 +150,15 @@ function App() {
       );
       return;
     }
+    const solver = ML_MODELS.find((m) => m.id === activeModel);
+    if (!solver || !solver.available) {
+      toast(
+        (solver ? solver.label : "Selected model") +
+          " is not available yet — switch to <b>gprMax</b> to run",
+        "info",
+      );
+      return;
+    }
     setSolved(false);
     setSolving(true);
     setProgress(0);
@@ -171,7 +180,7 @@ function App() {
       setSim(null);
       toast("Could not start the forward model — " + e.message, "info");
     }
-  }, [datasetFiles.length, toast]);
+  }, [datasetFiles.length, activeModel, toast]);
 
   // simulation_* events from the backend (routed through the chat WS)
   const onSimulationEvent = useCallback(
@@ -222,39 +231,6 @@ function App() {
       }
     },
     [toast],
-  );
-
-  const addDataset = useCallback(
-    (n) => {
-      let i = 0;
-      const target = n;
-      const start = performance.now();
-      const tick = (now) => {
-        const p = Math.min(1, (now - start) / 900);
-        setDataset((d) => {
-          return d;
-        });
-        if (p < 1) requestAnimationFrame(tick);
-      };
-      // animate counter
-      const base = dataset;
-      const begin = performance.now();
-      const step = (now) => {
-        const p = Math.min(1, (now - begin) / 1000);
-        setDataset(Math.round(base + target * p));
-        if (p < 1) requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-      setTimeout(
-        () =>
-          toast(
-            "Synthesised <b>" + n.toLocaleString() + "</b> labelled variations",
-            "ok",
-          ),
-        950,
-      );
-    },
-    [dataset, toast],
   );
 
   const onLoadPreset = useCallback((key) => {
@@ -362,15 +338,6 @@ function App() {
               </button>
               <button className="tbtn" title="Fit" onClick={() => setZoom(1)}>
                 <Icon name="fit" className="ic" />
-              </button>
-            </div>
-
-            <div className="dataset-chip" title="Labelled samples in dataset">
-              <Icon name="database" size={14} style={{ opacity: 0.55 }} />
-              <span className="n">{dataset.toLocaleString()}</span>
-              <button className="add" onClick={() => addDataset(250)}>
-                <Icon name="plus" size={11} />
-                250
               </button>
             </div>
 
@@ -617,8 +584,6 @@ function App() {
           onDatasetReady={onDatasetReady}
           onSimulationEvent={onSimulationEvent}
           onRun={runForward}
-          dataset={dataset}
-          addDataset={addDataset}
           activeModel={activeModel}
           collapsed={!chatOpen}
           setCollapsed={(v) =>
