@@ -60,6 +60,7 @@ This is the single most important design constraint. Violating it is never accep
 | `physics_modelling.py` | Peplinski ε computation via gprMax-native routines |
 | `validation_tools_new.py` | Tiered validation (Tier 0–4) for physics constraints |
 | `viz_projection.py` | Pure projection of the section store + pipeline manifests into the `model_update` scene payload for the live frontend visualization (no FastAPI/LLM imports) |
+| `simulate.py` | Batch gprMax forward-model runner (deterministic; lazy gprMax import). Backs the UI "Run forward model" button via `POST /datasets/{sid}/simulate` and doubles as a CLI |
 
 ### Single-Agent Extraction (ACTIVE — `backend/agentflow_single_agent.py`)
 
@@ -222,9 +223,23 @@ state, so cross-section edits land immediately.
 
 **Frontend WebSocket protocol** (`api.py` → `chatbot.jsx`): `agent_message`,
 `stage_change`, `progress`, `validation_failed`, `pipeline_busy`, `dataset_ready`,
-`model_update`, `session_restore`, `error`. `choice_required` is no longer emitted
-(the agent negotiates the fix in conversation); the frontend handler remains for
-compatibility.
+`model_update`, `session_restore`, `simulation_progress`, `simulation_complete`,
+`error`. `choice_required` is no longer emitted (the agent negotiates the fix in
+conversation); the frontend handler remains for compatibility.
+
+**Forward model** ("Run forward model" button → `POST /datasets/{sid}/simulate`):
+once the dataset is emitted, the button runs `simulate.run_batch_simulation` (gprMax
+Python API, lazy import) on the session's `.in` files in a worker thread, writing
+`.out` files to `<output_dir>/out_files`. The batch is restricted to the emission
+manifest's filenames — the shared in_files dir may hold stale decks from earlier
+runs, which must never be simulated. Per-file progress streams as
+`simulation_progress` (transient; drives the run button/progress bar in `app.jsx`
+via `onSimulationEvent`); the recorded `simulation_complete` summary lands in the
+chat and `.out` paths are written onto the session's `Simulation` rows
+(`db.set_simulation_outputs`, keyed by `sample_index`; failures swallowed). The
+endpoint 409s while a run or pipeline step is in flight; `simulating` +
+`simulation` ride along on `session_restore` so a refresh re-hydrates the run
+state. Key-free tests: `backend/tests/test_simulate.py` (solver stubbed).
 
 **Refresh/reconnect model** (`api.py` ↔ `chatbot.jsx`): every chat-visible event
 (`RECORDED_EVENT_TYPES` + user messages) is appended to `ChatSession.transcript`;

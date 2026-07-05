@@ -1,16 +1,24 @@
 """
-simulate.py - Batch gprMax simulation runner.
+simulate.py - Batch gprMax forward-model runner.
 
-Processes all .in files in an input directory sequentially using the gprMax
-Python API, writing .out (HDF5) files to the output directory.
+Runs every .in file in an input directory sequentially through the gprMax
+Python API, writing .out (HDF5) files to the output directory. This is the
+deterministic execution stage of the pipeline: no LLM involvement, plain
+Python only.
+
+Two entry points:
+- `run_batch_simulation(...)` — called by `api.py` when the user presses
+  "Run forward model" in the UI (with a per-file `progress` callback that
+  the server streams to the frontend over the session WebSocket).
+- CLI: `python backend/simulate.py --input-dir <dir> [...]`.
 
 The output directory defaults to out_files/ as a sibling of the input
-directory, e.g. datasets/my_dataset/files -> datasets/my_dataset/out_files.
+directory, e.g. dataset/in_files -> dataset/out_files.
 
 Usage:
-    python simulate.py \\
-        --input-dir datasets/my_dataset/files \\
-        [--output-dir datasets/my_dataset/out_files] \\
+    python backend/simulate.py \\
+        --input-dir dataset/in_files \\
+        [--output-dir dataset/out_files] \\
         [--n 1] [--gpu] [--gpu-ids 0 1] [--skip-existing] [--verbose]
 """
 
@@ -19,19 +27,33 @@ from __future__ import annotations
 import argparse
 import gc
 import io
-import os
+import logging
 import sys
 import time
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from typing import Any, Callable, Optional
 
-# Bootstrap: add gprMax repo to sys.path so `from gprMax.gprMax import api` resolves
-GPRMAX_ROOT = Path(__file__).parent.parent / "gprMax"
+# Bootstrap: gprMax lives as a source checkout at the repo root.
+GPRMAX_ROOT = Path(__file__).resolve().parent.parent / "gprMax"
 if str(GPRMAX_ROOT) not in sys.path:
     sys.path.insert(0, str(GPRMAX_ROOT))
 
-from gprMax.gprMax import api
+logger = logging.getLogger(__name__)
+
+# Called before ("start") and after ("done") each file with:
+#   {event, index, total, filename, status?, elapsed_s?, out_file?, error?}
+# status is "ok" | "failed" | "skipped" (skips emit a single "done" event).
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _gprmax_api():
+    """Import the solver lazily: api.py imports this module at startup, but
+    gprMax (compiled Cython extensions) is only needed when a run starts."""
+    from gprMax.gprMax import api
+
+    return api
 
 
 def inject_output_dir(content: str, output_dir: Path) -> str:
@@ -51,17 +73,9 @@ def inject_output_dir(content: str, output_dir: Path) -> str:
     return "".join(lines)
 
 
-def build_gpu_arg(args) -> list | None:
-    """Build the gpu argument expected by gprMax api."""
-    if not args.gpu:
-        return None
-    if args.gpu_ids:
-        return [args.gpu_ids]   # e.g. [[0, 1]]
-    return [[]]                 # default device, equivalent to -gpu with no id
-
-
 def run_simulation(tmp_in: Path, n: int, gpu_arg, verbose: bool) -> None:
-    """Call gprMax api, optionally suppressing output."""
+    """Call gprMax api, optionally suppressing its console output."""
+    api = _gprmax_api()
     if verbose:
         api(str(tmp_in), n=n, gpu=gpu_arg)
     else:
@@ -78,21 +92,28 @@ def run_batch_simulation(
     gpu_ids: list[int] | None = None,
     skip_existing: bool = False,
     verbose: bool = False,
-    on_error: 'Callable[[str, str, str], None] | None' = None,
+    on_error: Optional[Callable[[str, str, str], None]] = None,
     stop_on_first_error: bool = False,
+    progress: Optional[ProgressCallback] = None,
+    filenames: Optional[list[str]] = None,
 ) -> dict:
-    """Run gprMax simulations on all .in files in input_dir.
+    """Run gprMax simulations on .in files in input_dir.
 
-    Callable from Python (used by the dataset generation pipeline).
-    Returns a dict with keys: succeeded, failed, skipped, total, output_dir, errors.
+    Returns a dict with keys: succeeded, failed, skipped, total, output_dir,
+    outputs, errors. `outputs` maps each completed file to its .out path:
+    [{"filename": ..., "out_file": ...}, ...] (skipped files with an existing
+    .out are included — the output exists either way).
 
     Args:
         on_error: Optional callback invoked on each simulation failure with
             (filename, traceback_str, in_file_content).
+        progress: Optional per-file callback (see ProgressCallback above).
+            Exceptions raised by it are swallowed — reporting must never
+            kill the batch.
+        filenames: Optional restriction to these .in names. The dataset
+            in_files dir is shared across sessions/runs, so a batch must
+            run its own manifest's files — not everything on disk.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
     if gpu_ids:
         gpu = True
 
@@ -106,46 +127,71 @@ def run_batch_simulation(
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # gprMax names the .out after the .in stem; running from a tmp copy with
+    # the same stem keeps the output name while letting us inject #output_dir.
     tmp_dir = output_dir / "_tmp"
     tmp_dir.mkdir(exist_ok=True)
 
     in_files = sorted(input_dir.glob("*.in"))
+    if filenames is not None:
+        wanted = {Path(name).name for name in filenames}
+        in_files = [p for p in in_files if p.name in wanted]
     if not in_files:
         raise FileNotFoundError(f"No .in files found in {input_dir}")
 
-    # Build gpu arg
-    gpu_arg = None
-    if gpu:
-        gpu_arg = [gpu_ids] if gpu_ids else [[]]
+    gpu_arg = ([gpu_ids] if gpu_ids else [[]]) if gpu else None
 
     total = len(in_files)
     succeeded = 0
     failed = 0
     skipped = 0
+    outputs: list[dict[str, str]] = []
     errors: list[dict] = []
+
+    def _report(payload: dict[str, Any]) -> None:
+        if progress is None:
+            return
+        try:
+            progress(payload)
+        except Exception:
+            logger.exception("simulation progress callback failed")
 
     logger.info(f"[SIMULATE] {total} input file(s) in {input_dir} -> {output_dir}")
 
     for idx, in_file in enumerate(in_files, start=1):
-        stem = in_file.stem
-        expected_out = output_dir / f"{stem}.out"
+        expected_out = output_dir / f"{in_file.stem}.out"
 
         if skip_existing and expected_out.exists():
             logger.info(f"[SIMULATE] [{idx}/{total}] SKIP {in_file.name}")
             skipped += 1
+            outputs.append({"filename": in_file.name, "out_file": str(expected_out)})
+            _report({
+                "event": "done", "index": idx, "total": total,
+                "filename": in_file.name, "status": "skipped",
+                "out_file": str(expected_out),
+            })
             continue
 
         tmp_in = tmp_dir / in_file.name
         original_content = in_file.read_text()
-        modified_content = inject_output_dir(original_content, output_dir)
-        tmp_in.write_text(modified_content)
+        tmp_in.write_text(inject_output_dir(original_content, output_dir))
 
+        _report({
+            "event": "start", "index": idx, "total": total,
+            "filename": in_file.name,
+        })
         t0 = time.perf_counter()
         try:
             run_simulation(tmp_in, n=n, gpu_arg=gpu_arg, verbose=verbose)
             elapsed = time.perf_counter() - t0
             logger.info(f"[SIMULATE] [{idx}/{total}] OK {in_file.name} ({elapsed:.1f}s)")
             succeeded += 1
+            outputs.append({"filename": in_file.name, "out_file": str(expected_out)})
+            _report({
+                "event": "done", "index": idx, "total": total,
+                "filename": in_file.name, "status": "ok",
+                "elapsed_s": elapsed, "out_file": str(expected_out),
+            })
         except Exception:
             elapsed = time.perf_counter() - t0
             tb = traceback.format_exc()
@@ -156,10 +202,22 @@ def run_batch_simulation(
             if on_error:
                 on_error(in_file.name, tb, original_content)
             failed += 1
+            _report({
+                "event": "done", "index": idx, "total": total,
+                "filename": in_file.name, "status": "failed",
+                "elapsed_s": elapsed, "error": tb.strip().splitlines()[-1],
+            })
             if stop_on_first_error:
                 break
         finally:
             tmp_in.unlink(missing_ok=True)
+            # gprMax writes sibling artifacts next to the input file (e.g.
+            # #geometry_view .vti) — move them to the real output dir.
+            for stray in tmp_dir.iterdir():
+                try:
+                    stray.replace(output_dir / stray.name)
+                except OSError:
+                    pass
             gc.collect()
 
     try:
@@ -177,8 +235,24 @@ def run_batch_simulation(
         "skipped": skipped,
         "total": total,
         "output_dir": str(output_dir),
+        "outputs": outputs,
         "errors": errors,
     }
+
+
+def _cli_progress(event: dict[str, Any]) -> None:
+    idx, total, name = event["index"], event["total"], event["filename"]
+    if event["event"] == "start":
+        print(f"[{idx}/{total}] RUN   {name} ...", end=" ", flush=True)
+        return
+    status = event["status"]
+    if status == "skipped":
+        print(f"[{idx}/{total}] SKIP  {name} (output exists)")
+    elif status == "ok":
+        print(f"OK ({event['elapsed_s']:.1f}s)")
+    else:
+        print(f"FAILED ({event['elapsed_s']:.1f}s)")
+        print(event.get("error", ""))
 
 
 def main():
@@ -199,81 +273,29 @@ def main():
     parser.add_argument("--verbose", action="store_true", default=False, help="Show gprMax output per simulation")
     args = parser.parse_args()
 
-    if args.gpu_ids:
-        args.gpu = True
-
-    input_dir = Path(args.input_dir).resolve()
-    if args.output_dir:
-        output_dir = Path(args.output_dir).resolve()
-    else:
-        output_dir = (input_dir.parent / "out_files").resolve()
-
-    if not input_dir.exists():
-        print(f"[ERROR] Input directory not found: {input_dir}")
-        sys.exit(1)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = output_dir / "_tmp"
-    tmp_dir.mkdir(exist_ok=True)
-
-    in_files = sorted(input_dir.glob("*.in"))
-    if not in_files:
-        print(f"[ERROR] No .in files found in {input_dir}")
-        sys.exit(1)
-
-    gpu_arg = build_gpu_arg(args)
-    total = len(in_files)
-    succeeded = 0
-    failed = 0
-    skipped = 0
-
-    print(f"Found {total} input file(s) in {input_dir}")
-    print(f"Output directory: {output_dir}")
-    print(f"GPU: {'enabled' if args.gpu else 'disabled'} | n={args.n} | skip-existing={args.skip_existing}")
-    print("-" * 60)
-
-    for idx, in_file in enumerate(in_files, start=1):
-        stem = in_file.stem
-        expected_out = output_dir / f"{stem}.out"
-
-        if args.skip_existing and expected_out.exists():
-            print(f"[{idx}/{total}] SKIP  {in_file.name} (output exists)")
-            skipped += 1
-            continue
-
-        # Write modified .in file to tmp dir (same stem = same output name)
-        tmp_in = tmp_dir / in_file.name
-        original_content = in_file.read_text()
-        modified_content = inject_output_dir(original_content, output_dir)
-        tmp_in.write_text(modified_content)
-
-        print(f"[{idx}/{total}] RUN   {in_file.name} ...", end=" ", flush=True)
-        t0 = time.perf_counter()
-
-        try:
-            run_simulation(tmp_in, n=args.n, gpu_arg=gpu_arg, verbose=args.verbose)
-            elapsed = time.perf_counter() - t0
-            print(f"OK ({elapsed:.1f}s)")
-            succeeded += 1
-        except Exception:
-            elapsed = time.perf_counter() - t0
-            print(f"FAILED ({elapsed:.1f}s)")
-            print(traceback.format_exc())
-            failed += 1
-        finally:
-            tmp_in.unlink(missing_ok=True)
-            gc.collect()
-
-    # Clean up tmp dir if empty
     try:
-        tmp_dir.rmdir()
-    except OSError:
-        pass
+        result = run_batch_simulation(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            n=args.n,
+            gpu=args.gpu,
+            gpu_ids=args.gpu_ids,
+            skip_existing=args.skip_existing,
+            verbose=args.verbose,
+            progress=_cli_progress,
+        )
+    except FileNotFoundError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
     print("-" * 60)
-    print(f"Done. {succeeded} succeeded | {failed} failed | {skipped} skipped  (total: {total})")
+    print(
+        f"Done. {result['succeeded']} succeeded | {result['failed']} failed | "
+        f"{result['skipped']} skipped  (total: {result['total']})"
+    )
+    print(f"Output directory: {result['output_dir']}")
 
-    if failed > 0:
+    if result["failed"] > 0:
         sys.exit(1)
 
 

@@ -43,6 +43,8 @@ function App() {
   const [solved, setSolved] = useState(false);
   const [progress, setProgress] = useState(0);
   const [scanFrac, setScanFrac] = useState(0.12);
+  // live gprMax run counters ({done, total} while a batch is running)
+  const [sim, setSim] = useState(null);
 
   // live scene streamed by the backend agent (model_update events);
   // vizTab: "overview" = range midpoints + uncertainty bands,
@@ -102,7 +104,6 @@ function App() {
 
   const [modal, setModal] = useState(null);
   const [toasts, setToasts] = useState([]);
-  const rafRef = useRef(0);
 
   const toast = useCallback((msg, kind = "info") => {
     const id = uid("t");
@@ -119,8 +120,15 @@ function App() {
     }
   }, []);
 
-  // invalidate solved B-scan when model changes
+  // invalidate solved B-scan when model changes — except for the single
+  // scene replay that follows a session restore (it re-renders the same
+  // model the restored "solved" state belongs to).
+  const keepSolvedOnceRef = useRef(false);
   useEffect(() => {
+    if (keepSolvedOnceRef.current) {
+      keepSolvedOnceRef.current = false;
+      return;
+    }
     setSolved(false);
     setProgress(0);
   }, [
@@ -131,30 +139,90 @@ function App() {
     model.acquisition.waveform,
   ]);
 
-  const runForward = useCallback(() => {
-    cancelAnimationFrame(rafRef.current);
+  // Run the real gprMax forward model on the emitted dataset. The POST only
+  // kicks the batch off; per-file progress and the final summary arrive as
+  // simulation_* events on the chat WebSocket (onSimulationEvent below).
+  const runForward = useCallback(async () => {
+    if (!datasetFiles.length) {
+      toast(
+        "Generate the dataset first — the forward model runs the emitted gprMax files",
+        "info",
+      );
+      return;
+    }
     setSolved(false);
     setSolving(true);
     setProgress(0);
+    setSim({ done: 0, total: datasetFiles.length });
     setDockTab("radar");
     setDockCollapsed(false);
-    const t0 = performance.now();
-    const dur = 1700;
-    const tick = (now) => {
-      const p = Math.min(1, (now - t0) / dur);
-      setProgress(p);
-      setScanFrac(0.06 + p * 0.88);
-      if (p < 1) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else {
-        setSolving(false);
-        setSolved(true);
-        setDataset((d) => d + 1);
-        toast("Forward model complete · <b>+1</b> labelled sample", "ok");
+    try {
+      const base = window.getApiHttpBase();
+      const sid = window.getSessionId();
+      const res = await fetch(`${base}/datasets/${sid}/simulate`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "HTTP " + res.status);
       }
-    };
-    rafRef.current = requestAnimationFrame(tick);
-  }, [toast]);
+    } catch (e) {
+      setSolving(false);
+      setSim(null);
+      toast("Could not start the forward model — " + e.message, "info");
+    }
+  }, [datasetFiles.length, toast]);
+
+  // simulation_* events from the backend (routed through the chat WS)
+  const onSimulationEvent = useCallback(
+    (msg) => {
+      if (msg.type === "simulation_progress") {
+        const total = msg.total || 1;
+        const done = msg.event === "done" ? msg.index : msg.index - 1;
+        const p = clamp(done / total, 0, 1);
+        setSolving(true);
+        setSolved(false);
+        setSim({ done, total });
+        setProgress(p);
+        setScanFrac(0.06 + p * 0.88);
+        return;
+      }
+      if (msg.type === "simulation_complete") {
+        const r = msg.result || {};
+        setSolving(false);
+        setSim(null);
+        const ran = (r.succeeded || 0) + (r.skipped || 0);
+        if (ran > 0) {
+          setSolved(true);
+          setProgress(1);
+          setScanFrac(0.94);
+          setDataset((d) => d + (r.succeeded || 0));
+        }
+        toast(
+          r.failed
+            ? `Forward model finished · <b>${r.succeeded}/${r.total}</b> ok, ${r.failed} failed`
+            : `Forward model complete · <b>${ran}</b> simulation(s)`,
+          r.failed ? "info" : "ok",
+        );
+        return;
+      }
+      if (msg.type === "session_restore") {
+        // page refresh: re-hydrate the run indicator / solved state
+        if (msg.simulating) {
+          setSolving(true);
+          setSim(null);
+        } else if (
+          msg.result &&
+          (msg.result.succeeded || 0) + (msg.result.skipped || 0) > 0
+        ) {
+          keepSolvedOnceRef.current = true;
+          setSolved(true);
+          setProgress(1);
+        }
+      }
+    },
+    [toast],
+  );
 
   const addDataset = useCallback(
     (n) => {
@@ -306,9 +374,22 @@ function App() {
               </button>
             </div>
 
-            <button className="runbtn" onClick={runForward} disabled={solving}>
+            <button
+              className="runbtn"
+              onClick={runForward}
+              disabled={solving}
+              title={
+                datasetFiles.length
+                  ? "Run gprMax on the generated input files"
+                  : "Available once the dataset has been generated"
+              }
+            >
               <Icon name="play" className="ic" />
-              {solving ? "Solving…" : "Run forward model"}
+              {solving
+                ? sim && sim.total
+                  ? `Running ${sim.done}/${sim.total}…`
+                  : "Running…"
+                : "Run forward model"}
             </button>
           </div>
 
@@ -534,6 +615,7 @@ function App() {
           setModel={setModel}
           onModelUpdate={onModelUpdate}
           onDatasetReady={onDatasetReady}
+          onSimulationEvent={onSimulationEvent}
           onRun={runForward}
           dataset={dataset}
           addDataset={addDataset}

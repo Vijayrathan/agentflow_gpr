@@ -46,7 +46,7 @@ function replayToMessage(ev) {
       status: true,
       html: mdToHtml("**Stage:** " + (ev.stage_name || "Pipeline step")),
     };
-  if (t === "progress")
+  if (t === "progress" || t === "simulation_complete")
     return {
       id: uid("m"),
       role: "bot",
@@ -109,6 +109,7 @@ function ChatPane({
   toast,
   onModelUpdate,
   onDatasetReady,
+  onSimulationEvent,
 }) {
   const [messages, setMessages] = React.useState([
     {
@@ -169,6 +170,8 @@ function ChatPane({
   onModelUpdateRef.current = onModelUpdate;
   const onDatasetReadyRef = React.useRef(onDatasetReady);
   onDatasetReadyRef.current = onDatasetReady;
+  const onSimulationEventRef = React.useRef(onSimulationEvent);
+  onSimulationEventRef.current = onSimulationEvent;
 
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -236,6 +239,17 @@ function ChatPane({
       if (onModelUpdateRef.current) onModelUpdateRef.current(msg.scene);
       return;
     }
+    if (msg.type === "simulation_progress") {
+      // Forward-model run is independent of the chat turn — drive the run
+      // button/progress bar only, don't touch typing/busy.
+      if (onSimulationEventRef.current) onSimulationEventRef.current(msg);
+      return;
+    }
+    if (msg.type === "simulation_complete") {
+      if (onSimulationEventRef.current) onSimulationEventRef.current(msg);
+      pushStatus(msg.content || "Forward model complete.");
+      return;
+    }
     if (msg.type === "session_restore") {
       // Page refresh on an existing session: rebuild the entire chat from
       // the recorded transcript and re-hydrate the dataset tab + busy flag,
@@ -247,6 +261,12 @@ function ChatPane({
       setChips([]);
       if (msg.dataset && onDatasetReadyRef.current)
         onDatasetReadyRef.current(msg.dataset);
+      if (onSimulationEventRef.current)
+        onSimulationEventRef.current({
+          type: "session_restore",
+          simulating: Boolean(msg.simulating),
+          result: msg.simulation || null,
+        });
       return;
     }
 

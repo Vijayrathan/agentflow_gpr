@@ -353,6 +353,33 @@ def bulk_update_signals(
     return total
 
 
+def set_simulation_outputs(
+    session_id: _uuid.UUID,
+    outputs_by_sample: Dict[int, str],
+) -> int:
+    """Record forward-model results for one session: set output_file_path
+    (+ completion timestamp) on its Simulation rows, keyed by sample_index.
+
+    Returns the number of rows updated.
+    """
+    from sqlmodel import select
+
+    total = 0
+    with get_session() as db:
+        rows = db.exec(
+            select(Simulation).where(Simulation.session_id == session_id)
+        ).all()
+        for sim in rows:
+            path = outputs_by_sample.get(sim.sample_index)
+            if path is None:
+                continue
+            sim.output_file_path = path
+            sim.simulation_completed_at = datetime.now(timezone.utc)
+            total += 1
+        db.commit()
+    return total
+
+
 def get_completed_simulations(
     model_filter: Optional[str] = None,
     num_layers_filter: Optional[int] = None,

@@ -78,7 +78,13 @@ from single_agent_prompts import (  # noqa: E402
     sample_remediation_message,
 )
 from viz_projection import build_scene  # noqa: E402
-from db.db import ExtractionSession, batch_insert_simulations, get_session  # noqa: E402
+from simulate import run_batch_simulation  # noqa: E402
+from db.db import (  # noqa: E402
+    ExtractionSession,
+    batch_insert_simulations,
+    get_session,
+    set_simulation_outputs,
+)
 from schema import (  # noqa: E402
     DatasetConfig,
     ExtractedAdvancedParams,
@@ -140,6 +146,11 @@ class ChatSession:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     # Finalize result kept for replay: repopulates the dataset tab on refresh.
     dataset_result: Optional[dict[str, Any]] = None
+    # Forward-model (gprMax) run state. `simulating` guards against concurrent
+    # runs and restores the run indicator on reconnect; the result is kept so
+    # a refresh re-hydrates the "solved" state.
+    simulating: bool = False
+    simulation_result: Optional[dict[str, Any]] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -156,6 +167,7 @@ RECORDED_EVENT_TYPES = {
     "progress",
     "validation_failed",
     "dataset_ready",
+    "simulation_complete",
 }
 
 
@@ -274,6 +286,143 @@ def download_dataset_zip(session_id: str) -> StreamingResponse:
     )
 
 
+@app.post("/datasets/{session_id}/simulate")
+async def start_forward_model(session_id: str) -> dict[str, Any]:
+    """Kick off the gprMax forward model on the session's emitted .in files
+    ("Run forward model" button). Returns immediately; per-file progress and
+    the final summary stream over the session's WebSocket."""
+    chat = sessions.get(session_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    out_dir, manifest = _session_emitted_manifest(session_id)
+    in_dir = _in_files_dir(out_dir, manifest)
+    # Run ONLY this session's emitted files — the in_files dir is shared
+    # across sessions/runs and may hold stale decks from earlier datasets.
+    filenames = [
+        Path(f["filename"]).name
+        for f in manifest.get("files", [])
+        if f.get("filename") and (in_dir / Path(f["filename"]).name).is_file()
+    ]
+    if not filenames:
+        raise HTTPException(status_code=404, detail="No generated input files yet")
+    if chat.simulating:
+        raise HTTPException(status_code=409, detail="Forward model already running")
+    if chat.busy:
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline step is still running — wait for it to finish",
+        )
+
+    chat.simulating = True
+    # The event loop keeps only a weak ref to tasks — hold one until done.
+    task = asyncio.create_task(
+        _run_forward_model(chat, manifest, in_dir, out_dir / "out_files", filenames)
+    )
+    _simulation_tasks.add(task)
+    task.add_done_callback(_simulation_tasks.discard)
+    return {"status": "started", "total": len(filenames)}
+
+
+_simulation_tasks: set[asyncio.Task] = set()
+
+
+async def _run_forward_model(
+    chat: ChatSession,
+    manifest: dict[str, Any],
+    in_dir: Path,
+    out_dir: Path,
+    filenames: list[str],
+) -> None:
+    """Run the gprMax batch in a worker thread, streaming per-file progress
+    to the session's CURRENT socket. The chat stays usable meanwhile — the
+    run only reads the emitted files and never touches the pipeline state."""
+    loop = asyncio.get_running_loop()
+
+    def on_progress(event: dict[str, Any]) -> None:
+        # Called from the worker thread — marshal onto the event loop.
+        asyncio.run_coroutine_threadsafe(
+            _send(chat, {"type": "simulation_progress", **event}), loop
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            run_batch_simulation,
+            input_dir=in_dir,
+            output_dir=out_dir,
+            filenames=filenames,
+            progress=on_progress,
+        )
+    except Exception as exc:
+        logger.exception("forward model failed for session %s", chat.session_id)
+        chat.simulating = False
+        await _send(chat, {
+            "type": "simulation_complete",
+            "content": f"Forward model failed to start: {exc}",
+            "result": {"succeeded": 0, "failed": 0, "skipped": 0, "total": 0,
+                       "errors": [{"error": str(exc)}]},
+        })
+        return
+
+    rows_updated = await asyncio.to_thread(
+        _record_simulation_outputs, chat, manifest, result
+    )
+    summary = {
+        "succeeded": result["succeeded"],
+        "failed": result["failed"],
+        "skipped": result["skipped"],
+        "total": result["total"],
+        "output_dir": result["output_dir"],
+        "rows_updated": rows_updated,
+        # Full tracebacks stay in the server log; the chat gets one line each.
+        "errors": [
+            {"filename": e["filename"],
+             "error": e["error"].strip().splitlines()[-1]}
+            for e in result.get("errors", [])
+        ],
+    }
+    content = (
+        f"Forward model complete — {summary['succeeded']} succeeded, "
+        f"{summary['failed']} failed, {summary['skipped']} skipped "
+        f"(of {summary['total']}). Output written to "
+        f"{str(out_dir).replace(_project_root + '/', '')}."
+    )
+    chat.simulation_result = summary
+    chat.simulating = False
+    await _send(chat, {
+        "type": "simulation_complete",
+        "content": content,
+        "result": summary,
+    })
+
+
+def _record_simulation_outputs(
+    chat: ChatSession,
+    manifest: dict[str, Any],
+    result: dict[str, Any],
+) -> int:
+    """Persist each sample's .out path onto its Simulation row. DB failures
+    are logged and swallowed — the simulations themselves already ran."""
+    sample_by_in = {
+        f["filename"]: int(f["sample_id"])
+        for f in manifest.get("files", [])
+        if f.get("filename") and f.get("sample_id") is not None
+    }
+    outputs = {
+        sample_by_in[o["filename"]]: o["out_file"]
+        for o in result.get("outputs", [])
+        if o["filename"] in sample_by_in
+    }
+    if not outputs:
+        return 0
+    try:
+        return set_simulation_outputs(_coerce_uuid(chat.session_id), outputs)
+    except Exception:
+        logger.exception(
+            "recording simulation outputs failed for session %s", chat.session_id
+        )
+        return 0
+
+
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
     await ws.accept()
@@ -304,6 +453,8 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
                 "phase": state.phase,
                 "complete": state.complete,
                 "dataset": state.dataset_result,
+                "simulating": state.simulating,
+                "simulation": state.simulation_result,
             })
             if state.last_scene:
                 await ws.send_json({"type": "model_update", "scene": state.last_scene})
