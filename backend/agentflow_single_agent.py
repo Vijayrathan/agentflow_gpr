@@ -201,11 +201,9 @@ def _section_is_complete(section: str, model) -> bool:
     if section in OPTIONAL_SECTIONS:
         return True
     if section == "dataset_config":
-        return (
-            model.num_samples > 0
-            and model.dimensionality in ("2D", "3D")
-            and model.center_freq_is_peak is not None
-        )
+        # output_dir / dimensionality are server-fixed (./dataset, 2D) in
+        # save_section, so completeness only hinges on the user-collected core.
+        return model.num_samples > 0 and model.center_freq_is_peak is not None
     if section == "layers":
         return model.num_layers > 0 and len(model.layers) > 0
     if section == "waveform":
@@ -242,6 +240,14 @@ def _make_section_tools(store: dict):
             data = json.loads(payload)
         except json.JSONDecodeError as e:
             return json.dumps({"error": "invalid_json", "detail": str(e)})
+        if section == "dataset_config" and isinstance(data, dict):
+            # Server-fixed fields, never user-selected: output lands in the
+            # server-local ./dataset, only 2D runs are supported, and OpenMP
+            # threading is a deployment concern (None -> gprMax default). Any
+            # value the agent passes through is overridden here.
+            data["output_dir"] = "./dataset"
+            data["dimensionality"] = "2D"
+            data["num_threads"] = None
         try:
             model = SECTION_SCHEMA[section].model_validate(data)
         except (ValueError, TypeError) as e:

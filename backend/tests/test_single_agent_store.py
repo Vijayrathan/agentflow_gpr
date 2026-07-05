@@ -106,6 +106,24 @@ def test_dataset_config_defaults_complete():
     out = _save("dataset_config", {"num_samples": 5})
     assert out["status"] == "ok"
     assert sap._stage_done("dataset_config")
+    # Server-fixed fields land at their defaults without being collected.
+    assert sap._STORE["dataset_config"]["output_dir"] == "./dataset"
+    assert sap._STORE["dataset_config"]["dimensionality"] == "2D"
+
+
+def test_dataset_config_server_fixed_fields_are_overridden():
+    # Even if the agent passes user-supplied values through, the server-fixed
+    # fields are forced back to their defaults.
+    out = _save("dataset_config", {
+        "num_samples": 5,
+        "output_dir": "/somewhere/else",
+        "dimensionality": "3D",
+        "num_threads": 16,
+    })
+    assert out["status"] == "ok"
+    assert sap._STORE["dataset_config"]["output_dir"] == "./dataset"
+    assert sap._STORE["dataset_config"]["dimensionality"] == "2D"
+    assert sap._STORE["dataset_config"]["num_threads"] is None
 
 
 def test_optional_section_skip_completes():

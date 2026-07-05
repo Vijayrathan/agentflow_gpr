@@ -28,9 +28,23 @@ from backend.schema import (
     ExtractedAntenna,
     ExtractedAdvancedParams,
 )
-from backend.prompt_library import schema_to_json
-
 import json
+
+
+# Fields that exist in a section's Pydantic schema (the deterministic pipeline
+# reads them) but are fixed server-side and never user-collected. They are
+# stripped from the JSON schema shown to the agent, and save_section
+# force-overrides them regardless (see agentflow_single_agent.py).
+SERVER_FIXED_FIELDS = {
+    "dataset_config": ("output_dir", "dimensionality", "num_threads"),
+}
+
+
+def _schema_for_prompt(section, schema_class):
+    schema = schema_class.model_json_schema()
+    for field in SERVER_FIXED_FIELDS.get(section, ()):
+        schema.get("properties", {}).pop(field, None)
+    return json.dumps(schema, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +157,7 @@ the remaining fields.
 
 The payload must conform to this JSON Schema:
 ```json
-{schema_to_json(schema_class)}
+{_schema_for_prompt(section, schema_class)}
 ```
 
 Begin by asking for the first values directly.\
@@ -161,8 +175,6 @@ SECTION_KICKOFF = {
 (required, > 0). NOTE: this is the number of .in files, NOT time samples.
    - model_basename: base name for the #title and output filename stem \
 (default: "soil_sample")
-   - output_dir: directory for generated files (default: "./dataset")
-   - num_threads: OpenMP threads (optional; None = gprMax default)
 
    **FDTD grid / boundary policy:**
    - pml_cells: number of in-plane PML absorbing boundary cells (default: 10).
@@ -171,7 +183,6 @@ SECTION_KICKOFF = {
    - buffer_cells: extra cells between the PML and the objects (default: 10)
    - cells_per_wavelength: cells per minimum wavelength, the λ/N rule \
 (default: 10; higher = more accurate but slower)
-   - dimensionality: "2D" or "3D" (default: "2D")
    - fractal_nbins: number of materials in the #soil_peplinski fractal series \
 (default: 50)
 
@@ -185,6 +196,9 @@ Default: True.
    **Note:** the dielectric model is fixed to **Peplinski** in this pipeline. \
 Domain size, cell size, depth, time window and source height are DERIVED \
 downstream from the soil + waveform parameters — do NOT collect them here.
+   If the user asks where files are stored or about running 3D: the output \
+location is managed by the server and only 2D simulation is currently \
+supported — neither is configurable.
 """,
         skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
