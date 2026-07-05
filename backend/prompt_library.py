@@ -345,6 +345,10 @@ phase_name="dataset configuration phase",
     cross_section_examples="soil layers, waveform frequency, buried objects",
 )
 
+# LEGACY: predates the unified multi-object target stage (cylinders + boxes,
+# x_offset-from-center, static = min==max ranges). This prompt still describes
+# the old single-cylinder / {"cylinder": null} schema and will NOT produce a
+# valid target_ranges payload against the current ExtractedTargetRanges.
 TARGET_AGENT_PROMPT = _make_agent_prompt(
     agent_title="gprMax Buried-Target Range Agent",
     collecting_description=(
@@ -396,6 +400,8 @@ the target is OPTIONAL — if the user wants no buried target, store \
     cross_section_examples="soil layers, waveform frequency, domain size",
 )
 
+# LEGACY: predates the unified target stage — advanced params no longer carry
+# geometry objects (cylinders/boxes/spheres moved to target_ranges as ranges).
 ADVANCED_AGENT_PROMPT = _make_agent_prompt(
     agent_title="gprMax Advanced Parameters Configurator",
     collecting_description="optional/advanced simulation parameters",

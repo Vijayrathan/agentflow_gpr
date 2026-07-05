@@ -70,6 +70,34 @@
     "enforce_validity": true,
     "num_samples": 3
   },
+  "target_ranges": {
+    "cylinders": [
+      {
+        "name": "buried_pipe",
+        "material": "pec",
+        "x_offset_min_m": -0.02,
+        "x_offset_max_m": -0.02,
+        "depth_min_m": 0.35,
+        "depth_max_m": 0.35,
+        "radius_min_m": 0.02,
+        "radius_max_m": 0.02
+      }
+    ],
+    "boxes": [
+      {
+        "name": "buried_slab",
+        "material": "pec",
+        "x_offset_min_m": -0.1,
+        "x_offset_max_m": 0.1,
+        "depth_min_m": 0.3,
+        "depth_max_m": 0.45,
+        "width_min_m": 0.08,
+        "width_max_m": 0.15,
+        "height_min_m": 0.05,
+        "height_max_m": 0.08
+      }
+    ]
+  },
   "advanced_params": {
     "pml_cells": 10,
     "num_threads": 4,
@@ -108,57 +136,6 @@
         "x2": 0.6,
         "y2": 1.2,
         "z2": 0.002
-      }
-    ],
-    "cylinders": [
-      {
-        "name": "buried_pipe",
-        "x1": 0.28,
-        "y1": 0.45,
-        "z1": 0.0,
-        "x2": 0.28,
-        "y2": 0.45,
-        "z2": 0.002,
-        "radius": 0.02,
-        "material": "pec",
-        "custom_material": null,
-        "dielectric_smoothing": true
-      }
-    ],
-    "boxes": [
-      {
-        "name": "concrete_slab",
-        "x1": 0.38,
-        "y1": 0.35,
-        "z1": 0.0,
-        "x2": 0.48,
-        "y2": 0.42,
-        "z2": 0.002,
-        "material": "custom",
-        "custom_material": {
-          "eps_r": 6.0,
-          "sigma": 0.02,
-          "mu_r": 1.0,
-          "sigma_m": 0.0
-        },
-        "dielectric_smoothing": true
-      }
-    ],
-    "spheres": [
-      {
-        "name": "cobble_stone",
-        "cx": 0.15,
-        "cy": 0.55,
-        "cz": 0.001,
-        "radius": 0.015,
-        "material": "custom",
-        "custom_material": {
-          "eps_r": 4.5,
-          "sigma": 0.001,
-          "mu_r": 1.0,
-          "sigma_m": 0.0
-        },
-        "dielectric_smoothing": false
       }
     ]
   }

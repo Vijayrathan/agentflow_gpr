@@ -52,16 +52,33 @@ LAYERS_SECTION = {
 }
 
 TARGET_SECTION = {
-    "cylinder": {
-        "name": "pipe",
-        "material": "pec",
-        "x_center_min_m": 0.3,
-        "x_center_max_m": 0.7,
-        "depth_min_m": 0.2,
-        "depth_max_m": 0.4,
-        "radius_min_m": 0.03,
-        "radius_max_m": 0.07,
-    }
+    "cylinders": [
+        {
+            "name": "pipe",
+            "material": "pec",
+            "x_offset_min_m": -0.2,
+            "x_offset_max_m": 0.2,
+            "depth_min_m": 0.2,
+            "depth_max_m": 0.4,
+            "radius_min_m": 0.03,
+            "radius_max_m": 0.07,
+        }
+    ],
+    "boxes": [
+        {
+            # STATIC box: min == max on every field
+            "name": "slab",
+            "material": "pec",
+            "x_offset_min_m": -0.3,
+            "x_offset_max_m": -0.3,
+            "depth_min_m": 0.35,
+            "depth_max_m": 0.35,
+            "width_min_m": 0.2,
+            "width_max_m": 0.2,
+            "height_min_m": 0.06,
+            "height_max_m": 0.06,
+        }
+    ],
 }
 
 WAVEFORM_SECTION = {
@@ -93,10 +110,13 @@ def _write_manifests(out_dir: Path, num_samples: int = 2, with_target: bool = Tr
                 "bulk_density_gcm3": 1.55,
                 "particle_density_gcm3": 2.63,
             }],
-            "target": {
-                "kind": "cylinder", "name": "pipe", "material": "pec",
-                "x_center_m": 0.5, "depth_m": 0.3, "radius_m": 0.05,
-            } if with_target else None,
+            "targets": [
+                {"kind": "cylinder", "name": "pipe", "material": "pec",
+                 "x_offset_m": -0.1, "depth_m": 0.3, "radius_m": 0.05},
+                {"kind": "box", "name": "slab", "material": "pec",
+                 "x_offset_m": -0.3, "depth_m": 0.35,
+                 "width_m": 0.2, "height_m": 0.06},
+            ] if with_target else [],
         })
     (out_dir / "sampled_layers.json").write_text(json.dumps({
         "num_samples": num_samples, "warnings": [], "samples": samples,
@@ -177,17 +197,27 @@ def test_waveform_fixes_preview_frequency():
     assert scene["acquisition"]["waveform"] == "ricker"
 
 
-def test_target_ranges_midpoint_cylinder():
+def test_target_ranges_midpoints_multi():
     scene = vz.build_scene(
         _store(layers=LAYERS_SECTION, target_ranges=TARGET_SECTION), NO_FLAGS, None
     )
-    target = scene["ranges"]["target"]
-    assert target["x_mid_m"] == 0.5
-    assert target["depth_mid_m"] == 0.3
-    assert target["radius_mid_m"] == 0.05
-    assert target["material"] == "pec"
-    # width stretches to cover the target range (+ margin)
-    assert scene["domain"]["width_m"] >= 0.7 + 0.07
+    targets = scene["ranges"]["targets"]
+    assert len(targets) == 2
+    cyl, box = targets  # canonical order: cylinders, then boxes
+    assert cyl["kind"] == "cylinder"
+    assert cyl["x_offset_mid_m"] == 0.0
+    assert cyl["depth_mid_m"] == 0.3
+    assert cyl["radius_mid_m"] == 0.05
+    assert cyl["material"] == "pec"
+    assert cyl["static"] is False
+    assert box["kind"] == "box"
+    assert box["x_offset_mid_m"] == -0.3
+    assert box["width_mid_m"] == 0.2
+    assert box["height_mid_m"] == 0.06
+    assert box["static"] is True  # min == max on every field
+    # provisional width covers the worst offset+extent symmetrically:
+    # box |offset| 0.3 + width/2 0.1 + margin 0.2 => >= 2*0.6
+    assert scene["domain"]["width_m"] >= 2 * (0.3 + 0.1 + 0.2) - 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +257,13 @@ def test_samples_joined_with_derived_eps_and_grid(tmp_path):
     # per-sample eps comes from derived_layers.json, not the range preview
     assert layer["eps_dry"] == 5.0 and layer["eps_wet"] == 12.0
     assert layer["eps_mid"] == 8.5
-    assert item["target"]["x_m"] == 0.5
-    assert item["target"]["depth_m"] == 0.3
+    t_cyl, t_box = item["targets"]
+    assert t_cyl["kind"] == "cylinder"
+    assert t_cyl["x_offset_m"] == -0.1
+    assert t_cyl["depth_m"] == 0.3
+    assert t_cyl["radius_m"] == 0.05
+    assert t_box["kind"] == "box"
+    assert t_box["width_m"] == 0.2 and t_box["height_m"] == 0.06
 
     grid = scene["grid"]
     assert grid["domain_x_m"] == 1.3

@@ -895,14 +895,23 @@ function materialKeyForLayer({ sandPct, clayPct, thetaV, epsilon }) {
   return "topsoil";
 }
 
-function sceneTargetToModel(id, name, material, x, depth, radius) {
+/* One scene target -> viz model target. `x` is ABSOLUTE canvas metres — the
+   caller resolves the backend's center-relative offset against the current
+   domain width (x = width/2 + x_offset), mirroring the backend's own
+   resolution against the derived grid. Boxes render as rects (shape). */
+function sceneTargetToModel(id, kind, name, material, x, depth, radius, width, height) {
+  const isBox = kind === "box";
   return {
     id,
     name: name || "Target",
     type: material === "pec" ? "metalpipe" : "pvcpipe",
+    kind: kind || "cylinder",
+    shape: isBox ? "rect" : "circle",
     x: x ?? 0,
     depth: depth ?? 0,
-    diameter: 2 * (radius ?? 0.05),
+    diameter: isBox ? (width ?? 0.1) : 2 * (radius ?? 0.05),
+    width: isBox ? (width ?? 0.1) : undefined,
+    height: isBox ? (height ?? 0.1) : undefined,
     visible: true,
   };
 }
@@ -956,17 +965,19 @@ function sceneToModel(scene, vizTab, sampleIdx) {
       sigma: null,
       visible: true,
     }));
-    if (item.target)
-      targets = [
-        sceneTargetToModel(
-          "tg_0",
-          item.target.name,
-          item.target.material,
-          item.target.x_m,
-          item.target.depth_m,
-          item.target.radius_m,
-        ),
-      ];
+    targets = (item.targets || []).map((t, i) =>
+      sceneTargetToModel(
+        "tg_" + i,
+        t.kind,
+        t.name,
+        t.material,
+        domain.width / 2 + (t.x_offset_m ?? 0),
+        t.depth_m,
+        t.radius_m,
+        t.width_m,
+        t.height_m,
+      ),
+    );
   } else if (scene.ranges) {
     layers = (scene.ranges.layers || []).map((l, i) => ({
       id: "ly_" + i,
@@ -984,18 +995,19 @@ function sceneToModel(scene, vizTab, sampleIdx) {
       sigma: null,
       visible: true,
     }));
-    const rt = scene.ranges.target;
-    if (rt)
-      targets = [
-        sceneTargetToModel(
-          "tg_0",
-          rt.name,
-          rt.material,
-          rt.x_mid_m,
-          rt.depth_mid_m,
-          rt.radius_mid_m,
-        ),
-      ];
+    targets = (scene.ranges.targets || []).map((t, i) =>
+      sceneTargetToModel(
+        "tg_" + i,
+        t.kind,
+        t.name,
+        t.material,
+        domain.width / 2 + (t.x_offset_mid_m ?? 0),
+        t.depth_mid_m,
+        t.radius_mid_m,
+        t.width_mid_m,
+        t.height_mid_m,
+      ),
+    );
   }
 
   return {
@@ -1015,7 +1027,7 @@ function overviewCaveats(scene) {
   if (!scene) return [];
   const out = [];
   const layers = scene.ranges?.layers || [];
-  const target = scene.ranges?.target;
+  const rangeTargets = scene.ranges?.targets || [];
   const nSamples = scene.samples?.items?.length || 0;
   const epsProvisional = layers.some((l) => l.eps_provisional);
 
@@ -1039,10 +1051,15 @@ function overviewCaveats(scene) {
       "Layer colors are a display classification from texture, not a physical material assignment.",
     );
   }
-  if (target)
+  if (rangeTargets.length > 0) {
     out.push(
-      "Target is drawn at the midpoint of its ranges; the actual position and size are drawn per sample.",
+      "Objects are drawn at the midpoints of their ranges; actual positions and sizes are drawn per sample.",
     );
+    if (rangeTargets.some((t) => t.static))
+      out.push(
+        "Fixed objects (min = max ranges) appear identically in every sample.",
+      );
+  }
   if (!scene.acquisition?.frequency_ghz)
     out.push(
       "Frequency and antenna values are defaults until the waveform and antenna stages complete.",

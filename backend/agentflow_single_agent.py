@@ -135,8 +135,8 @@ SECTION_DISPLAY = {
 OPTIONAL_SECTIONS = {"target_ranges", "advanced_params"}
 
 # Sections whose values feed the per-sample draw. Unlike the 5-agent pipeline,
-# target_ranges is included: sample_and_write consumes target_ranges.cylinder,
-# and the single agent can edit it at any point.
+# target_ranges is included: sample_and_write draws every object range
+# (cylinders + boxes), and the single agent can edit it at any point.
 RESAMPLE_SECTIONS = {"layers", "dataset_config", "target_ranges"}
 
 # Sampling inputs snapshotted by layer_sampling for the staleness check.
@@ -541,21 +541,31 @@ def layer_sampling_node(state: PipelineState) -> dict:
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     layers = ExtractedLayers.model_validate(state["layers"])
 
-    target_range = None
+    target_ranges = None
     if state.get("target_ranges") is not None:
-        target_range = ExtractedTargetRanges.model_validate(state["target_ranges"]).cylinder
+        tr = ExtractedTargetRanges.model_validate(state["target_ranges"])
+        target_ranges = tr if tr.has_targets else None
 
+    if target_ranges is not None:
+        obj_desc = " + ".join(
+            f"{len(lst)} {kind}(s)"
+            for kind, lst in (("cylinder", target_ranges.cylinders),
+                              ("box", target_ranges.boxes))
+            if lst
+        )
+        obj_desc = f" + buried objects ({obj_desc})"
+    else:
+        obj_desc = ""
     print(
         f"Sampling {dataset_cfg.num_samples} parameter set(s) over "
-        f"{len(layers.layers)} layer range(s)"
-        f"{' + a buried cylinder target' if target_range is not None else ''}..."
+        f"{len(layers.layers)} layer range(s){obj_desc}..."
     )
     samples, path, warnings = sample_and_write(
         extracted=layers,
         num_samples=dataset_cfg.num_samples,
         output_dir=dataset_cfg.output_dir,
         seed=42,
-        target_range=target_range,
+        target_ranges=target_ranges,
     )
     print(f"  Wrote {len(samples)} sampled parameter set(s) to:\n    {path}")
     if warnings:
@@ -601,10 +611,16 @@ def peplinski_derive_node(state: PipelineState) -> dict:
 
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     waveform = ExtractedWaveform.model_validate(state["waveform"])
+    target_ranges = (
+        ExtractedTargetRanges.model_validate(state["target_ranges"])
+        if state.get("target_ranges") is not None
+        else None
+    )
 
     samples = read_samples(dataset_cfg.output_dir)
     _derived, aggregate, path = derive_and_write(
-        samples, dataset_cfg, waveform, dataset_cfg.output_dir
+        samples, dataset_cfg, waveform, dataset_cfg.output_dir,
+        target_ranges=target_ranges,
     )
 
     print(
@@ -627,20 +643,16 @@ def global_derive_node(state: PipelineState) -> dict:
     waveform = ExtractedWaveform.model_validate(state["waveform"])
     antenna = ExtractedAntenna.model_validate(state["antenna"])
     layers = ExtractedLayers.model_validate(state["layers"])
-    advanced = (
-        ExtractedAdvancedParams.model_validate(state["advanced_params"])
-        if state.get("advanced_params") is not None
-        else None
-    )
 
     aggregate = read_aggregate(dataset_cfg.output_dir)
     grid, path = derive_and_write_global(
-        dataset_cfg, waveform, antenna, layers, advanced,
+        dataset_cfg, waveform, antenna, layers,
         aggregate.eps_r_max, aggregate.eps_r_min,
         dataset_cfg.output_dir,
         smallest_feature_global_m=aggregate.smallest_feature_global_m,
         largest_extent_global_m=aggregate.largest_extent_global_m,
         deepest_target_bottom_global_m=aggregate.deepest_target_bottom_global_m,
+        static_x_halfwidth_global_m=aggregate.static_x_halfwidth_global_m,
     )
 
     print(
@@ -665,14 +677,17 @@ def global_validation_node(state: PipelineState) -> dict:
     waveform = ExtractedWaveform.model_validate(state["waveform"])
     antenna = ExtractedAntenna.model_validate(state["antenna"])
     layers = ExtractedLayers.model_validate(state["layers"])
-    advanced = (
-        ExtractedAdvancedParams.model_validate(state["advanced_params"])
-        if state.get("advanced_params") is not None
+    target_ranges = (
+        ExtractedTargetRanges.model_validate(state["target_ranges"])
+        if state.get("target_ranges") is not None
         else None
     )
     grid = read_global(dataset_cfg.output_dir)
 
-    report = validate_global(grid, dataset_cfg, waveform, antenna, layers, advanced)
+    report = validate_global(
+        grid, dataset_cfg, waveform, antenna, layers,
+        target_ranges=target_ranges,
+    )
 
     if report.warnings:
         print("  Warnings:")
@@ -697,23 +712,26 @@ def global_validation_node(state: PipelineState) -> dict:
 
 
 def target_placement_node(state: PipelineState) -> dict:
-    """Validate each sample's buried target against the FIXED global grid."""
-    target_range = None
+    """Validate each sample's DYNAMIC buried objects against the FIXED global
+    grid (static objects were validated once at the global gate)."""
+    target_ranges = None
     if state.get("target_ranges") is not None:
-        target_range = ExtractedTargetRanges.model_validate(state["target_ranges"]).cylinder
-    if target_range is None:
-        return {}  # no buried target -> nothing to place
+        tr = ExtractedTargetRanges.model_validate(state["target_ranges"])
+        target_ranges = tr if tr.has_targets else None
+    if target_ranges is None:
+        return {}  # no buried objects -> nothing to place
 
     _banner("Per-Sample Target Placement")
 
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     grid = read_global(dataset_cfg.output_dir)
 
-    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_range, seed=1234)
+    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_ranges, seed=1234)
 
     print(
-        f"Placed targets: {result.n_unchanged} kept as-is, {result.n_redrawn} re-drawn, "
-        f"{len(result.dropped)} dropped."
+        f"Placed objects: {result.n_unchanged} sample(s) kept as-is, "
+        f"{result.n_redrawn} object(s) re-drawn, "
+        f"{len(result.dropped)} sample(s) dropped."
     )
     if result.dropped:
         print("  Dropped samples (dataset N reduced):")

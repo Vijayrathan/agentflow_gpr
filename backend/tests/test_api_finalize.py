@@ -26,14 +26,25 @@ def _sampled_manifest():
                         "particle_density_gcm3": 2.66,
                     }
                 ],
-                "target": {
-                    "kind": "cylinder",
-                    "name": "target",
-                    "material": "pec",
-                    "x_center_m": 0.5,
-                    "depth_m": 0.2,
-                    "radius_m": 0.05,
-                },
+                "targets": [
+                    {
+                        "kind": "cylinder",
+                        "name": "target",
+                        "material": "pec",
+                        "x_offset_m": -0.1,
+                        "depth_m": 0.2,
+                        "radius_m": 0.05,
+                    },
+                    {
+                        "kind": "box",
+                        "name": "slab",
+                        "material": "pec",
+                        "x_offset_m": 0.2,
+                        "depth_m": 0.3,
+                        "width_m": 0.2,
+                        "height_m": 0.06,
+                    },
+                ],
             }
         ]
     }
@@ -79,7 +90,10 @@ def test_build_simulation_rows_maps_emitted_file_and_sample_target():
     assert row["model"] == "demo"
     assert row["input_file_path"] == "/tmp/demo_1.in"
     assert row["max_cell_m"] == 0.002
-    assert row["cylinders"][0]["radius_m"] == 0.05
+    # per-kind split of the sample's targets; no adv geometry exists any more
+    assert row["cylinders"] == [_sampled_manifest()["samples"][0]["targets"][0]]
+    assert row["boxes"] == [_sampled_manifest()["samples"][0]["targets"][1]]
+    assert row["spheres"] is None
     assert row["layers"][0]["name"] == "sand"
 
 

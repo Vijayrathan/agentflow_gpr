@@ -109,9 +109,37 @@ def test_dataset_config_defaults_complete():
 
 
 def test_optional_section_skip_completes():
-    out = _save("target_ranges", {"cylinder": None})
+    out = _save("target_ranges", {})  # skip = empty payload (no objects)
     assert out["status"] == "ok"
     assert sap._stage_done("target_ranges")
+
+
+def test_target_ranges_multi_object_roundtrip():
+    payload = {
+        "cylinders": [{
+            "name": "pipe", "material": "pec",
+            "x_offset_min_m": -0.2, "x_offset_max_m": 0.2,
+            "depth_min_m": 0.2, "depth_max_m": 0.4,
+            "radius_min_m": 0.03, "radius_max_m": 0.07,
+        }],
+        "boxes": [{
+            # static: min == max everywhere
+            "name": "slab", "material": "pec",
+            "x_offset_min_m": -0.3, "x_offset_max_m": -0.3,
+            "depth_min_m": 0.35, "depth_max_m": 0.35,
+            "width_min_m": 0.2, "width_max_m": 0.2,
+            "height_min_m": 0.06, "height_max_m": 0.06,
+        }],
+    }
+    out = _save("target_ranges", payload)
+    assert out["status"] == "ok"
+    assert sap._stage_done("target_ranges")
+    got = json.loads(sap.get_section.invoke({"section": "target_ranges"}))
+    assert len(got["cylinders"]) == 1 and len(got["boxes"]) == 1
+    # the old single-cylinder key is a clean break: extra keys are rejected
+    # only if the schema forbids them; here `cylinder` is simply ignored by
+    # pydantic, so assert the canonical lists instead of its absence.
+    assert got["boxes"][0]["width_min_m"] == 0.2
 
 
 def test_get_section_roundtrip_and_not_populated():

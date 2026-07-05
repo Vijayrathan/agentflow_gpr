@@ -53,6 +53,7 @@ from backend.schema import (
     GlobalEpsAggregate,
 )
 from backend.validation_tools_new import peak_frequency
+from dataset_sampling import target_shapes
 
 
 class _GridStub:
@@ -108,9 +109,16 @@ def derive_samples(
     samples: List[SampledSample],
     dataset_config: DatasetConfig,
     waveform: ExtractedWaveform,
+    target_ranges=None,
 ) -> Tuple[List[DerivedSample], GlobalEpsAggregate]:
     """Derive in-band eps_r edges for every sampled layer and aggregate the
-    global eps_r corners across all sample-layers."""
+    global eps_r corners across all sample-layers.
+
+    `target_ranges` (ExtractedTargetRanges | None) is used ONLY for the static
+    x-footprint corner: static (min==max) objects have an exactly known
+    horizontal position, so their |x_offset| + extent/2 halfwidth lets the
+    global derive widen domain_x to fit them (dynamic objects reposition via
+    redraw instead)."""
     nbins = dataset_config.fractal_nbins
     freq = peak_frequency(
         waveform.waveform_center_freq_hz, dataset_config.center_freq_is_peak
@@ -130,9 +138,9 @@ def derive_samples(
     # the driest) and over-sizes the global grid slightly — it is always at least
     # as safe as the true per-sample worst case, which is exactly what one global
     # grid for all samples requires.
-    smallest_feature = float("inf")   # min 2*radius  -> tightens dx
-    largest_extent = float("-inf")    # max 2*radius  -> enlarges domain_x
-    deepest_bottom = float("-inf")    # max depth+radius -> enlarges depth_z
+    smallest_feature = float("inf")   # min in-plane feature -> tightens dx
+    largest_extent = float("-inf")    # max x extent         -> enlarges domain_x
+    deepest_bottom = float("-inf")    # max bottom depth     -> enlarges depth_z
     have_target = False
     for s in samples:
         dlayers: List[DerivedLayer] = []
@@ -153,14 +161,18 @@ def derive_samples(
             )
             eps_max = max(eps_max, eps_wet)
             eps_min = min(eps_min, eps_dry)
-        if s.target is not None:
+        for t in s.targets:
             have_target = True
-            diameter = 2.0 * s.target.radius_m            # cylinder disc: same extent in x and y
-            smallest_feature = min(smallest_feature, diameter)
-            largest_extent = max(largest_extent, diameter)
-            deepest_bottom = max(deepest_bottom, s.target.depth_m + s.target.radius_m)
+            smallest_feature = min(smallest_feature, target_shapes.smallest_feature(t))
+            largest_extent = max(largest_extent, target_shapes.largest_extent(t))
+            deepest_bottom = max(deepest_bottom, target_shapes.bottom_depth(t))
         derived.append(DerivedSample(sample_id=s.sample_id, layers=dlayers))
 
+    static_halfwidth = (
+        target_shapes.static_x_halfwidth(target_ranges)
+        if target_ranges is not None
+        else None
+    )
     aggregate = GlobalEpsAggregate(
         eps_r_max=eps_max,
         eps_r_min=eps_min,
@@ -170,6 +182,7 @@ def derive_samples(
         smallest_feature_global_m=smallest_feature if have_target else None,
         largest_extent_global_m=largest_extent if have_target else None,
         deepest_target_bottom_global_m=deepest_bottom if have_target else None,
+        static_x_halfwidth_global_m=static_halfwidth,
     )
     return derived, aggregate
 
@@ -216,11 +229,14 @@ def derive_and_write(
     waveform: ExtractedWaveform,
     output_dir: str,
     filename: str = "derived_layers.json",
+    target_ranges=None,
 ) -> Tuple[List[DerivedSample], GlobalEpsAggregate, str]:
     """Derive in-band eps_r for all samples and persist the manifest.
 
     Returns (derived, aggregate, json_path).
     """
-    derived, aggregate = derive_samples(samples, dataset_config, waveform)
+    derived, aggregate = derive_samples(
+        samples, dataset_config, waveform, target_ranges=target_ranges
+    )
     path = write_derived(derived, aggregate, output_dir, filename=filename)
     return derived, aggregate, path

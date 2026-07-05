@@ -10,25 +10,33 @@ dozen downstream errors that all stem from it:
            alignment, PML-vs-domain) — if this fails the cell counts feeding the
            later checks are meaningless, so STOP here.
   Phase 2  placement & stratigraphy         (static Tx/Rx clearance, source-height
-           vs domain, layer stack, time window, rx-array step) — STOP on error.
+           vs domain, STATIC buried targets, layer stack, time window, rx-array
+           step) — STOP on error.
   Phase 3  feasibility (warnings, last)      (memory, CFL iteration count).
 
-Per-sample TARGET placement is NOT validated here — it is grid-dependent but
-per-sample, so it lives in STAGE 7 (target_placement.py).
+Target placement splits by kind of range:
+  STATIC objects (min == max on every range field) are fully determined once the
+  grid exists and are identical in every sample, so they are validated HERE — a
+  failure is a gate error that routes to remediation (there is nothing to redraw:
+  the coordinates are the user's own fixed choice).
+  DYNAMIC (ranged) objects stay per-sample and live in STAGE 7
+  (target_placement.py) with redraw-then-drop.
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from backend.schema import (
     DatasetConfig,
+    ExtractedTargetRanges,
     ExtractedWaveform,
     ExtractedAntenna,
     ExtractedLayers,
-    ExtractedAdvancedParams,
     GlobalDerived,
 )
+from dataset_sampling.target_shapes import draw_target, iter_ranges, placement_failures
 from backend.validation_tools_new import (
     PML_GAP_CELLS,
     validate_global_grid,
@@ -86,13 +94,41 @@ def _check_source_height_vs_domain(
     return e, []
 
 
+def _check_static_targets(
+    target_ranges: Optional[ExtractedTargetRanges],
+    grid: GlobalDerived,
+    cfg: DatasetConfig,
+) -> tuple:
+    """Placement check for STATIC objects (all range fields min == max).
+
+    A degenerate range draws deterministically, so materialize each static
+    object and run the shared placement check (ALL faces: in-domain, PML+gap
+    clearance on every side, >=10 cells across, fully buried). The x-halfwidth
+    corner only ever WIDENS domain_x — violations widening cannot fix (too
+    shallow / too deep / pinned into the bottom clearance) must surface here."""
+    if target_ranges is None:
+        return [], []
+    e: List[str] = []
+    for idx, spec in enumerate(iter_ranges(target_ranges)):
+        if not spec.is_static:
+            continue
+        t = draw_target(spec, random.Random(0))  # degenerate -> deterministic
+        for msg in placement_failures(t, grid, cfg):
+            e.append(
+                f"static object #{idx} '{t.name}' ({t.kind}): {msg} — fixed "
+                "objects are never repositioned; adjust its target_ranges entry"
+            )
+    return e, []
+
+
 def validate_global(
     grid: GlobalDerived,
     cfg: DatasetConfig,
     wf: ExtractedWaveform,
     ant: ExtractedAntenna,
     layers: ExtractedLayers,
-    adv=None,  # ExtractedAdvancedParams | None (unused for now; kept for parity)
+    adv=None,  # retained positionally for legacy callers; unused
+    target_ranges: Optional[ExtractedTargetRanges] = None,
 ) -> GlobalValidationReport:
     """Validate the single global grid in cascade-gated phases."""
     report = GlobalValidationReport()
@@ -130,6 +166,7 @@ def validate_global(
         lambda_max_air_m=grid.lambda_max_m, pml_cells=cfg.pml_cells,
     ))
     _add(report, "source_height_vs_domain", _check_source_height_vs_domain(grid, clearance))
+    _add(report, "static_target_placement", _check_static_targets(target_ranges, grid, cfg))
     _add(report, "layer_thickness_and_stack", validate_layer_thickness_and_stack(
         layer_names=[L.name or f"layer_{i+1}" for i, L in enumerate(layers.layers)],
         thicknesses_m=[L.thickness_m_max for L in layers.layers],
@@ -151,5 +188,18 @@ def validate_global(
     # ── Phase 3 — feasibility (warnings, last) ────────────────────────────────
     _add(report, "memory", validate_memory(dom_x, dom_y, dom_z, dx, dy, dz))
     _add(report, "cfl_and_iterations", validate_cfl_and_iterations(dx, dy, dz, grid.time_window_s))
+
+    # Advisory: a small target feature can tighten Δx far below the λ budget,
+    # inflating cell count and runtime. The 3x factor is an ARBITRARY advisory
+    # threshold (cost heads-up), not a physical limit.
+    lambda_budget_dx = grid.lambda_min_m / cfg.cells_per_wavelength
+    if grid.dx_m < lambda_budget_dx / 3.0 - 1e-15:
+        report.warnings.append(
+            f"[dx_feature_advisory] target feature drove dx to {grid.dx_m*1e3:.2f} mm, "
+            f">3x finer than the wavelength budget ({lambda_budget_dx*1e3:.2f} mm). "
+            "This is an advisory cost threshold (3x is arbitrary, not a physical "
+            "limit): simulations will be substantially larger/slower. Consider a "
+            "larger smallest object dimension if runtime matters."
+        )
 
     return report

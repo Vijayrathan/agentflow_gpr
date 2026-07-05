@@ -129,18 +129,36 @@ Rules:
 
 ## Variable targets + static antenna
 
-- Target **geometry** (position, depth, radius) is **per-sample**; its **grid/domain requirements
-  aggregate to global worst-case corners** (smallest feature tightens Δx; largest extent enlarges
-  domain; deepest bottom enlarges depth).
+- **ONE object stage** (`target_ranges`, after layers): zero or more buried objects of TWO kinds —
+  **cylinder** and **box** — all range-based. Spheres are **deferred until 3D** (in the one-cell-z
+  2D domain a real sphere would extend outside the domain in z). Advanced params carry NO geometry.
+- **Coordinates are domain-independent** (the domain does not exist at collection time):
+  `x_offset` = SIGNED offset of the object center from the domain's horizontal center (= Tx/Rx
+  midpoint), resolved as `x_abs = domain_x/2 + x_offset` once the grid exists; `depth` = depth of
+  the object **CENTER** below ground (all kinds), resolved as `y_center = ground_y − depth`.
+- **STATIC objects = degenerate ranges (min == max on every field)**: the sampler draws them
+  identically into every sample (no separate mechanism). They are **never redrawn/dropped** —
+  their placement is validated ONCE at the global-validation gate (`[static_target_placement]`);
+  a violation is a gate error routed to remediation (the coordinates are the user's own fixed
+  choice, so there is nothing to redraw against). Their exact x-footprint feeds a symmetric
+  aggregate corner `static_x_halfwidth = max(|x_offset| + extent/2)` that widens
+  `domain_x ≥ 2·(halfwidth + clearance)` — covers left- AND right-pinned objects.
+- Object **grid/domain requirements aggregate to global worst-case corners** over ALL drawn
+  objects (smallest IN-PLANE feature tightens Δx; largest x extent enlarges domain; deepest
+  bottom enlarges depth). Per kind: cylinder feature/extent `2r`, bottom `depth + r`; box feature
+  `min(w, h)`, extent `w`, bottom `depth + h/2`. The thin-z extent NEVER enters the feature.
 - **Tx/Rx are STATIC** — derived once in global derive, validated once.
-- **Targets are PEC** → they do **not** feed ε corners (only size/extent). Revisit only if target
-  material becomes sampled.
-- **Redraw on placement failure:** radius range `[r_floor, original_radius]` (shrink/reposition
-  only, never grow). `r_floor = max(5·Δx, radius_min_m)`. If no valid center exists even at
-  `r_floor`, drop immediately. Assert `original_radius >= r_floor` at runtime so a future Δx change
-  fails loudly. Cap attempts at `MAX_TARGET_ATTEMPTS`.
-- **Dropped samples reduce N** (not backfilled); log `(sample_id, reason)`. Document the delivered
-  count in the manifest.
+- **Targets are PEC-only** (schema-enforced) → they do **not** feed ε corners (only size/extent).
+  Revisit only if target material becomes sampled.
+- **Redraw on placement failure (DYNAMIC objects only):** shrink/reposition, never grow.
+  Cylinder floor `r_floor = max(5·Δx, radius_min_m)` (radius is a HALF-extent → 10 cells across
+  the diameter); box floors `max(10·Δx, side_min)` per side (sides are FULL extents — the 5·Δx vs
+  10·Δx difference is the same ≥10-cells rule, not an inconsistency). If no valid center exists
+  even at the floor size, drop immediately. Assert drawn size ≥ floor at runtime so a future Δx
+  change fails loudly. Cap attempts at `MAX_TARGET_ATTEMPTS`.
+- **ANY dynamic object failing placement drops the WHOLE sample** (files always contain the full
+  object set). Dropped samples reduce N (not backfilled); log `(sample_id, reason)` naming the
+  object. Document the delivered count in the manifest.
 - **Ghost corner** (a dropped sample may have set a grid corner) is **accepted, not re-derived** —
   re-deriving is circular, and the error is always in the safe direction (grid oversized, never
   undersized). Document in out-of-scope.

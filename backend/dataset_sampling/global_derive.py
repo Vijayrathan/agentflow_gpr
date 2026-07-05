@@ -3,9 +3,10 @@ STAGE 7 — global derive.
 
 Runs ONCE over the whole sampling space, after the per-sample Peplinski eps derive
 (STAGE 6) and after all collect stages. Turns the aggregated eps_r corners + the
-waveform / antenna / layers / advanced params into the ONE global grid, domain,
-depth and time window shared by every sample, so all N input files sit on the same
-Yee grid and are directly comparable for ML.
+waveform / antenna / layers + the buried-target corners into the ONE global grid,
+domain, depth and time window shared by every sample, so all N input files sit on
+the same Yee grid and are directly comparable for ML. The target corners (from the
+STAGE 6 aggregation over all drawn objects) are the ONLY geometry input.
 
 Order is strict: f_peak -> Wang band (Peplinski gate) -> lambda -> dx -> domain ->
 depth -> dt -> time window. eps corners come from STAGE 6:
@@ -25,7 +26,6 @@ from backend.schema import (
     ExtractedWaveform,
     ExtractedAntenna,
     ExtractedLayers,
-    ExtractedAdvancedParams,
     GlobalDerived,
 )
 from backend.validation_tools_new import (
@@ -40,47 +40,28 @@ from backend.validation_tools_new import (
 PEPLINSKI_FMIN_HZ, PEPLINSKI_FMAX_HZ = PEPLINSKI_FREQ_HZ
 
 
-def _smallest_feature_m(adv: Optional[ExtractedAdvancedParams]) -> Optional[float]:
-    """Smallest target diameter across cylinders/spheres, used to tighten dx so
-    the smallest feature resolves to >=10 cells. None when there are no targets."""
-    if adv is None:
-        return None
-    feats = []
-    for c in (adv.cylinders or []):
-        if c.radius:
-            feats.append(2 * c.radius)
-    for s in (adv.spheres or []):
-        if s.radius:
-            feats.append(2 * s.radius)
-    return min(feats) if feats else None
-
-
-def _target_footprint_x_m(adv: Optional[ExtractedAdvancedParams]) -> Optional[float]:
-    """Hook for real geometry x-extents; None when no targets contribute."""
-    return None
-
-
 def derive_global(
     cfg: DatasetConfig,
     wf: ExtractedWaveform,
     ant: ExtractedAntenna,
     layers: ExtractedLayers,
-    adv: Optional[ExtractedAdvancedParams],
     eps_r_max_over_samples: float,
     eps_r_min_over_samples: float,
     smallest_feature_global_m: Optional[float] = None,
     largest_extent_global_m: Optional[float] = None,
     deepest_target_bottom_global_m: Optional[float] = None,
+    static_x_halfwidth_global_m: Optional[float] = None,
 ) -> GlobalDerived:
     """Size the single global grid/domain/depth/time window from the aggregated
     eps_r corners and the buried-target corners.
 
     eps_r_max/min come from the STAGE 6 derive across all samples. The target
-    corners (size/extent/deepest bottom) also come from that same pass and are
-    size-only: they tighten Δx, widen domain_x, and deepen depth_z so the global
-    grid fits the worst-case per-sample target while staying identical for every
-    sample. `clearance = (pml_cells + PML_GAP_CELLS)*Δx` is the object/source PML
-    gap and is DISTINCT from the domain `pad = (pml_cells + buffer_cells)*Δx`."""
+    corners (size/extent/deepest bottom, plus the static x halfwidth) also come
+    from that same pass and are size-only: they tighten Δx, widen domain_x, and
+    deepen depth_z so the global grid fits the worst-case per-sample target while
+    staying identical for every sample. `clearance = (pml_cells + PML_GAP_CELLS)*Δx`
+    is the object/source PML gap and is DISTINCT from the domain
+    `pad = (pml_cells + buffer_cells)*Δx`."""
     # 7a. peak frequency (what #waveform actually takes).
     if cfg.center_freq_is_peak:
         f_peak = wf.waveform_center_freq_hz
@@ -107,13 +88,13 @@ def derive_global(
     eps_max = eps_r_max_over_samples
     eps_min = min(eps_r_min_over_samples, 1.0)   # air sets the largest lambda
 
-    # 7e. global Δx from lambda_min (finest grid). Tighten for the smallest target
-    #     — both fixed adv objects AND the per-sample buried-target corner.
+    # 7e. global Δx from lambda_min (finest grid). Tighten so the smallest
+    #     in-plane target feature (aggregated over ALL drawn objects in STAGE 6)
+    #     resolves to >=10 cells.
     lambda_min = C0 / (f_high * (eps_max ** 0.5))
     dx = lambda_min / cfg.cells_per_wavelength
-    feats = [f for f in (_smallest_feature_m(adv), smallest_feature_global_m) if f is not None]
-    if feats:
-        dx = min(dx, min(feats) / 10.0)          # >=10 cells across smallest feature
+    if smallest_feature_global_m is not None:
+        dx = min(dx, smallest_feature_global_m / 10.0)
     # Δx is now FINAL. clearance (object/source PML gap) is distinct from `pad`.
     clearance = (cfg.pml_cells + PML_GAP_CELLS) * dx
     pad = (cfg.pml_cells + cfg.buffer_cells) * dx
@@ -146,16 +127,18 @@ def derive_global(
     #     antenna would otherwise sit only buffer(10) cells from the top PML.
     ground_y = pad + depth_z                       # ground surface (pre-snap, fixed)
     domain_y = pad + depth_z + source_height + max(pad, clearance)
-    target_footprint = _target_footprint_x_m(adv)
     # x margins use `clearance` (not `pad`) so the static Tx/Rx clear the side PMLs
     # by the (pml+15) gap.
-    domain_x = max(
-        surface_xy,
-        (target_footprint or 0.0) + ant.tx_rx_offset_m + 2 * clearance,
-    )
+    domain_x = max(surface_xy, ant.tx_rx_offset_m + 2 * clearance)
     # widen x so the widest buried target fits horizontally with PML+gap clearance
     if largest_extent_global_m is not None:
         domain_x = max(domain_x, largest_extent_global_m + 2 * clearance)
+    # widen x so STATIC (pinned) objects fit at their exact position. Offsets are
+    # center-relative, so the halfwidth (max |x_offset| + extent/2) is symmetric:
+    # widening covers both left- and right-pinned objects. Dynamic objects don't
+    # need this — the per-sample placement pass repositions them via redraw.
+    if static_x_halfwidth_global_m is not None:
+        domain_x = max(domain_x, 2.0 * (static_x_halfwidth_global_m + clearance))
 
     # snap domains UP to whole cells so every sample shares one integer Yee grid;
     # snapping extends the TOP only (bottom face at y=0 and ground_y stay fixed).
@@ -225,7 +208,6 @@ def derive_and_write_global(
     wf: ExtractedWaveform,
     ant: ExtractedAntenna,
     layers: ExtractedLayers,
-    adv: Optional[ExtractedAdvancedParams],
     eps_r_max_over_samples: float,
     eps_r_min_over_samples: float,
     output_dir: str,
@@ -233,17 +215,19 @@ def derive_and_write_global(
     smallest_feature_global_m: Optional[float] = None,
     largest_extent_global_m: Optional[float] = None,
     deepest_target_bottom_global_m: Optional[float] = None,
+    static_x_halfwidth_global_m: Optional[float] = None,
 ):
     """Derive the global grid/domain/depth/time window and persist it.
 
     Returns (global_derived, json_path).
     """
     grid = derive_global(
-        cfg, wf, ant, layers, adv,
+        cfg, wf, ant, layers,
         eps_r_max_over_samples, eps_r_min_over_samples,
         smallest_feature_global_m=smallest_feature_global_m,
         largest_extent_global_m=largest_extent_global_m,
         deepest_target_bottom_global_m=deepest_target_bottom_global_m,
+        static_x_halfwidth_global_m=static_x_halfwidth_global_m,
     )
     path = write_global(grid, output_dir, filename=filename)
     return grid, path

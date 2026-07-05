@@ -365,52 +365,132 @@ class ExtractedAntenna(BaseModel):
 
 
 class ExtractedAdvancedParams(BaseModel):
-    """Output of the optional / advanced parameters extraction subagent (STAGE 4)."""
+    """Output of the optional / advanced parameters extraction stage.
+
+    Geometry objects were REMOVED from this section: all buried objects (fixed
+    or sampled) are collected as ranges in the target stage (ExtractedTargetRanges;
+    a static object is a degenerate min==max range)."""
     surface_roughness: Optional[SurfaceRoughnessConfigSchema] = None
     snapshots: Optional[List[SnapshotConfigSchema]] = None
-    cylinders: Optional[List[CylinderSchema]] = None
-    boxes: Optional[List[BoxSchema]] = None
-    spheres: Optional[List[SphereSchema]] = None
 
 
 # ---------------------------------------------------------------------------
-# Variable buried-target ranges (collected by the early target-range mini-stage,
-# BEFORE the soil draw). The target geometry is DRAWN per sample over these
-# ranges; only its size/extent affect the global grid (its material does not
-# feed the eps_r corners). Cylinders only for now; box/sphere are future.
+# Variable buried-target ranges (collected by the target stage, right after
+# layers and BEFORE the soil draw). Object geometry is DRAWN per sample over
+# these ranges; only size/extent affect the global grid (material never feeds
+# the eps_r corners — targets are PEC-only).
+#
+# Coordinate frame (domain-independent — the domain does not exist yet at
+# collection time):
+#   x_offset — SIGNED offset of the object's center from the domain's
+#              horizontal center (= the Tx/Rx midpoint). 0 = under the antenna
+#              midpoint, negative = left. Resolved to absolute x as
+#              domain_x/2 + x_offset once the global derive fixes the grid.
+#   depth    — depth of the object's CENTER below the ground surface (all
+#              kinds), resolved as y_center = ground_y - depth.
+#
+# STATIC objects: a range with min == max on EVERY field draws identically
+# into every sample (no special machinery). Static objects are never
+# redrawn/dropped per sample — their placement is validated ONCE at the
+# global-validation gate.
+#
+# Spheres are deliberately NOT supported: in the 2D one-cell-z domain a real
+# sphere (r >> dx/2) would extend outside the domain in z. Deferred until a
+# 3D emitter exists.
 # ---------------------------------------------------------------------------
 
-class CylinderTargetRange(BaseModel):
-    """Per-sample sampling range for a buried cylinder target (2D: a disc of the
-    given radius in the x-y plane, axis along the thin z). x_center/depth are
-    absolute-metre ranges; depth is measured BELOW the ground surface."""
+class _TargetRangeBase(BaseModel):
+    """Shared fields + static detection for buried-target sampling ranges."""
     name: str = "target"
-    material: str = "pec"
-    x_center_min_m: float
-    x_center_max_m: float
-    depth_min_m: float           # depth below ground surface
+    material: Literal["pec"] = "pec"   # PEC-only: size-only grid effect, no eps
+    x_offset_min_m: float              # signed offset from domain center
+    x_offset_max_m: float
+    depth_min_m: float                 # depth of CENTER below ground surface
     depth_max_m: float
-    radius_min_m: float
-    radius_max_m: float
+
+    def _range_pairs(self) -> List[Tuple[float, float]]:
+        """The geometric (min, max) pairs; subclasses extend."""
+        return [
+            (self.x_offset_min_m, self.x_offset_max_m),
+            (self.depth_min_m, self.depth_max_m),
+        ]
+
+    @property
+    def is_static(self) -> bool:
+        """True when EVERY range is degenerate (min == max): the object draws
+        identically into every sample. Partially-degenerate objects are dynamic."""
+        return all(lo == hi for lo, hi in self._range_pairs())
 
     @model_validator(mode="after")
-    def _check_ranges(self):
+    def _check_base_ranges(self):
         for lo, hi, label in [
-            (self.x_center_min_m, self.x_center_max_m, "x_center"),
+            (self.x_offset_min_m, self.x_offset_max_m, "x_offset"),
             (self.depth_min_m, self.depth_max_m, "depth"),
-            (self.radius_min_m, self.radius_max_m, "radius"),
         ]:
             if lo > hi:
                 raise ValueError(f"{label}: min ({lo}) > max ({hi})")
+        return self
+
+
+class CylinderTargetRange(_TargetRangeBase):
+    """Buried cylinder range (2D: a disc of the given radius in the x-y plane,
+    axis along the thin z)."""
+    kind: Literal["cylinder"] = "cylinder"
+    radius_min_m: float
+    radius_max_m: float
+
+    def _range_pairs(self) -> List[Tuple[float, float]]:
+        return super()._range_pairs() + [(self.radius_min_m, self.radius_max_m)]
+
+    @model_validator(mode="after")
+    def _check_ranges(self):
+        if self.radius_min_m > self.radius_max_m:
+            raise ValueError(
+                f"radius: min ({self.radius_min_m}) > max ({self.radius_max_m})")
         if self.radius_min_m <= 0:
             raise ValueError(f"radius_min_m must be > 0 (got {self.radius_min_m})")
         return self
 
 
+class BoxTargetRange(_TargetRangeBase):
+    """Buried rectangular box range. width = x extent, height = y extent;
+    depth is the depth of the box CENTER below ground (same rule as cylinder)."""
+    kind: Literal["box"] = "box"
+    width_min_m: float
+    width_max_m: float
+    height_min_m: float
+    height_max_m: float
+
+    def _range_pairs(self) -> List[Tuple[float, float]]:
+        return super()._range_pairs() + [
+            (self.width_min_m, self.width_max_m),
+            (self.height_min_m, self.height_max_m),
+        ]
+
+    @model_validator(mode="after")
+    def _check_ranges(self):
+        for lo, hi, label in [
+            (self.width_min_m, self.width_max_m, "width"),
+            (self.height_min_m, self.height_max_m, "height"),
+        ]:
+            if lo > hi:
+                raise ValueError(f"{label}: min ({lo}) > max ({hi})")
+        if self.width_min_m <= 0:
+            raise ValueError(f"width_min_m must be > 0 (got {self.width_min_m})")
+        if self.height_min_m <= 0:
+            raise ValueError(f"height_min_m must be > 0 (got {self.height_min_m})")
+        return self
+
+
 class ExtractedTargetRanges(BaseModel):
-    """Output of the target-range mini-stage (collected right after layers)."""
-    cylinder: Optional[CylinderTargetRange] = None
-    # box / sphere target ranges are future work (stubbed); cylinders only now.
+    """Output of the target stage: zero or more buried objects, each range-based.
+    Skip = save an empty payload {} (both lists default empty)."""
+    cylinders: List[CylinderTargetRange] = Field(default_factory=list)
+    boxes: List[BoxTargetRange] = Field(default_factory=list)
+
+    @property
+    def has_targets(self) -> bool:
+        return bool(self.cylinders or self.boxes)
 
 
 #the smallest target feature must resolve to ≥10 cells, which can tighten Δx below λmin/10, and target extents enlarge the domain
@@ -457,25 +537,37 @@ class SampledLayer(BaseModel):
 
 
 class SampledTarget(BaseModel):
-    """One concrete buried target drawn for a sample (cylinder only for now).
+    """One concrete buried object drawn for a sample (cylinder or box).
 
-    x_center_m/depth_m/radius_m are absolute metres; depth is BELOW the ground
-    surface. The absolute y of the centre is resolved at placement time once the
-    global derive fixes the surface (y_center = ground_y - depth).
+    x_offset_m is the SIGNED offset of the center from the domain's horizontal
+    center; depth_m is the depth of the CENTER below the ground surface. Both
+    resolve to absolute coordinates only once the global derive fixes the grid
+    (x_abs = domain_x/2 + x_offset, y_center = ground_y - depth).
     """
-    kind: Literal["cylinder"] = "cylinder"
+    kind: Literal["cylinder", "box"]
     name: str = "target"
     material: str = "pec"
-    x_center_m: float
+    x_offset_m: float
     depth_m: float
-    radius_m: float
+    radius_m: Optional[float] = None    # cylinder
+    width_m: Optional[float] = None     # box: x extent
+    height_m: Optional[float] = None    # box: y extent
+
+    @model_validator(mode="after")
+    def _kind_fields(self):
+        if self.kind == "cylinder" and self.radius_m is None:
+            raise ValueError("cylinder target requires radius_m")
+        if self.kind == "box" and (self.width_m is None or self.height_m is None):
+            raise ValueError("box target requires width_m and height_m")
+        return self
 
 
 class SampledSample(BaseModel):
-    """One drawn sample: concrete values for every layer (+ optional target)."""
+    """One drawn sample: concrete values for every layer (+ drawn objects, in
+    the canonical range order: cylinders first, then boxes)."""
     sample_id: int
     layers: List[SampledLayer]
-    target: Optional[SampledTarget] = None
+    targets: List[SampledTarget] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -510,10 +602,17 @@ class GlobalEpsAggregate(BaseModel):
     num_samples: int
     frequency_hz: float
     nbins: int
-    # Buried-target corners (None when no target was drawn):
-    smallest_feature_global_m: Optional[float] = None   # min 2*radius   -> tightens dx
-    largest_extent_global_m: Optional[float] = None      # max 2*radius   -> enlarges domain_x
-    deepest_target_bottom_global_m: Optional[float] = None  # max depth+radius -> enlarges depth_z
+    # Buried-target corners (None when no targets were drawn). Per kind:
+    # cylinder feature/extent = 2r, bottom = depth + r; box feature = min(w, h),
+    # extent = w, bottom = depth + h/2 (in-plane dimensions only; thin z never
+    # enters the feature).
+    smallest_feature_global_m: Optional[float] = None   # min feature -> tightens dx
+    largest_extent_global_m: Optional[float] = None      # max x extent -> enlarges domain_x
+    deepest_target_bottom_global_m: Optional[float] = None  # max bottom depth -> enlarges depth_z
+    # STATIC objects only: max(|x_offset| + extent/2). Center-relative offsets
+    # make this symmetric, so widening domain_x to 2*(halfwidth + clearance)
+    # accommodates both left- and right-pinned fixed objects.
+    static_x_halfwidth_global_m: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

@@ -46,10 +46,10 @@ stage by stage, and persists them to an in-memory store.
 
 - `"dataset_config"` — dataset size/naming, FDTD grid & boundary policy, resolution policy
 - `"layers"` — soil layer sampling RANGES (thickness, texture, moisture, densities)
-- `"target_ranges"` — buried cylinder target sampling ranges (OPTIONAL)
+- `"target_ranges"` — buried object sampling ranges: cylinders + boxes (OPTIONAL)
 - `"waveform"` — waveform kind, amplitude, centre frequency, source timing
 - `"antenna"` — antenna kind/axis, Tx-Rx offset, receiver placement
-- `"advanced_params"` — geometry objects, surface roughness, snapshots (OPTIONAL)
+- `"advanced_params"` — surface roughness, snapshots (OPTIONAL)
 
 ## Stage protocol
 
@@ -111,7 +111,7 @@ question as the task description. Relay the answer, then resume collection.
 - Do NOT include internal code details in the conversation. For example: Don't say you completed this batch.
 - Optional sections may only be skipped when the user explicitly says so:
   no advanced params => save_section("advanced_params", "{}");
-  no buried target   => save_section("target_ranges", '{"cylinder": null}').
+  no buried objects  => save_section("target_ranges", "{}").
 - Physics/grid checks beyond the schema run automatically in downstream
   deterministic stages — do NOT attempt them yourself.
 """
@@ -226,35 +226,47 @@ user should explicitly tell to skip. You should not skip on your own\
 
     "target_ranges": _stage_message(
         section="target_ranges",
-        title="Buried-Target Range Extraction",
+        title="Buried-Object Range Extraction",
         schema_class=ExtractedTargetRanges,
         batches="""
-   **Only the CYLINDER target is supported right now** (box/sphere targets are \
-future work). The target is a buried cylinder — in the 2D x–y plane it is a \
-disc of the given radius; its axis runs along the thin out-of-plane direction. \
-Its geometry is DRAWN fresh for every sample over the ranges you collect, while \
-the FDTD grid stays identical across the whole dataset.
+   The user may bury ZERO OR MORE objects of two kinds — **cylinders** and \
+**boxes** (spheres are not supported in the 2D model). Every field is a RANGE \
+(min/max): each object's geometry is DRAWN fresh for every sample over its \
+ranges, while the FDTD grid stays identical across the whole dataset. All \
+objects are PEC (metallic) — do not offer a material choice.
 
-   If the user does NOT want a buried target, save \
-`{"cylinder": null}` and finish — the target is optional.
+   If the user does NOT want any buried objects, save `{}` and finish — this \
+section is optional.
 
-   **Cylinder target ranges (all in metres):**
-   - name: target name (default "target")
-   - material: gprMax material identifier (default "pec")
-   - x_center_min_m / x_center_max_m: horizontal centre position range. These \
-are absolute metres; if a drawn position does not fit the derived domain it is \
-re-drawn downstream, so an approximate range is fine.
-   - depth_min_m / depth_max_m: depth of the centre BELOW the ground surface
-   - radius_min_m / radius_max_m: target radius range (radius_min_m must be > 0)
+   **Coordinates (all in metres, domain-independent):**
+   - x_offset_min_m / x_offset_max_m: SIGNED horizontal offset of the object's \
+centre from the survey centre (0 = directly under the antenna midpoint, \
+negative = left, positive = right)
+   - depth_min_m / depth_max_m: depth of the object's CENTRE below the ground \
+surface (all kinds use centre depth)
 
-   **Guidance:** keep `depth_min_m ≥ radius_max_m` so the target stays fully \
-buried (its top stays below the surface). The grid is sized so the smallest \
-drawn target still resolves to ≥10 cells and the deepest/largest one still \
-clears the absorbing boundary — you do NOT collect any grid/domain values here.
+   **Per kind:**
+   - Cylinder (a disc in the 2D x–y plane): name, x_offset range, depth range, \
+radius_min_m / radius_max_m (radius_min_m must be > 0)
+   - Box (rectangle in the 2D x–y plane): name, x_offset range, depth range, \
+width_min_m / width_max_m (horizontal extent), height_min_m / height_max_m \
+(vertical extent); both must be > 0
+
+   **Fixed objects:** to pin an object in place (identical in every sample), \
+set min = max on EVERY field. Fixed objects are never repositioned — their \
+placement is checked once against the derived grid, and a violation comes back \
+as a validation error to fix here.
+
+   **Guidance:** keep the object fully buried — `depth_min_m ≥ radius_max_m` \
+for cylinders, `depth_min_m ≥ height_max_m / 2` for boxes. The grid is sized \
+so the smallest drawn object still resolves to ≥10 cells and the deepest/widest \
+one still clears the absorbing boundary — you do NOT collect any grid/domain \
+values here. Note that a very small object dimension forces a very fine global \
+grid and slower simulations.
 """,
         skip_policy="""\
-the target is OPTIONAL — if the user wants no buried target, save \
-`{"cylinder": null}`. Otherwise collect the full cylinder range\
+buried objects are OPTIONAL — if the user wants none, save `{}`. Otherwise \
+collect complete ranges for every object the user describes\
 """,
     ),
 
@@ -333,17 +345,6 @@ advanced params"), you MUST still call `save_section` with section \
 completion and allows the pipeline to advance to dataset generation.\
 """,
         batches="""
-   **Geometry objects (buried targets):**
-   The user may add zero or more of each type. For each object, collect:
-   - **Cylinders**: name, start coordinates (x1, y1, z1), end coordinates \
-(x2, y2, z2), radius in metres, material identifier (default: "pec"), \
-optional custom_material (eps_r, sigma, mu_r, sigma_m), \
-dielectric_smoothing (true/false, default: true)
-   - **Boxes**: name, corner coordinates (x1, y1, z1) to (x2, y2, z2), \
-material identifier, optional custom_material, dielectric_smoothing
-   - **Spheres**: name, centre coordinates (cx, cy, cz), radius in metres, \
-material identifier, optional custom_material, dielectric_smoothing
-
    **Surface roughness:**
    - fractal_dim: fractal dimension (1.0–3.0; default: 1.5). Values below \
 1.0 are not physically meaningful for surface roughness.
@@ -362,9 +363,11 @@ amplitude_m when add_water=true)
    - Optional: spatial extent (x1, y1, z1, x2, y2, z2) and resolution \
 (dx, dy, dz) — defaults to full domain at simulation resolution
 
-   **Moved elsewhere (do NOT collect here):** the receiver array is part \
-of the `antenna` section, and run settings (PML cells, threads, output dir, \
-fractal_nbins) are part of the `dataset_config` section.
+   **Moved elsewhere (do NOT collect here):** buried geometry objects \
+(cylinders/boxes) are part of the `target_ranges` section (a fixed object is \
+a min = max range there); the receiver array is part of the `antenna` section; \
+run settings (PML cells, threads, output dir, fractal_nbins) are part of the \
+`dataset_config` section.
 """,
         skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
@@ -417,17 +420,21 @@ VALIDATION FAILED — Global Grid Validation (TIER 3).
 The single global FDTD grid derived from the collected parameters failed:
 {err_lines}
 
-The error tags are grid-internal names (e.g. [global_grid], [antenna_placement]),
-not section names. These failures are usually resolved by adjusting one of:
+The error tags are grid-internal names (e.g. [global_grid], [antenna_placement],
+[static_target_placement]), not section names. These failures are usually
+resolved by adjusting one of:
   dataset_config  (cells_per_wavelength, pml_cells, buffer_cells)
   antenna         (source_height_m, tx_rx_offset_m)
   waveform        (center frequency)
   layers          (thicknesses)
+  target_ranges   (fixed-object position/size — [static_target_placement]
+                   errors always point here: a fixed object is never moved
+                   automatically, the user must adjust its ranges)
   advanced_params (surface roughness, snapshots)
 
 The currently stored values of those sections are:
 
-{_dump_sections(store, ["dataset_config", "antenna", "waveform", "layers", "advanced_params"])}
+{_dump_sections(store, ["dataset_config", "antenna", "waveform", "layers", "target_ranges", "advanced_params"])}
 
 Please: (1) explain the problem to the user in plain language; (2) discuss and
 agree WHICH section/value to change; (3) re-save the FULL corrected section(s)

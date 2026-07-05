@@ -431,21 +431,24 @@ def layer_sampling_node(state: PipelineState) -> dict:
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     layers = ExtractedLayers.model_validate(state["layers"])
 
-    target_range = None
+    # LEGACY path: mechanically updated for the unified multi-object
+    # target_ranges schema (cylinders + boxes); predates that refactor.
+    target_ranges = None
     if state.get("target_ranges") is not None:
-        target_range = ExtractedTargetRanges.model_validate(state["target_ranges"]).cylinder
+        tr = ExtractedTargetRanges.model_validate(state["target_ranges"])
+        target_ranges = tr if tr.has_targets else None
 
     print(
         f"Sampling {dataset_cfg.num_samples} parameter set(s) over "
         f"{len(layers.layers)} layer range(s)"
-        f"{' + a buried cylinder target' if target_range is not None else ''}..."
+        f"{' + buried object(s)' if target_ranges is not None else ''}..."
     )
     samples, path, warnings = sample_and_write(
         extracted=layers,
         num_samples=dataset_cfg.num_samples,
         output_dir=dataset_cfg.output_dir,
         seed=42,
-        target_range=target_range,
+        target_ranges=target_ranges,
     )
     print(f"  Wrote {len(samples)} sampled parameter set(s) to:\n    {path}")
     if warnings:
@@ -525,12 +528,13 @@ def global_derive_node(state: PipelineState) -> dict:
 
     aggregate = read_aggregate(dataset_cfg.output_dir)
     grid, path = derive_and_write_global(
-        dataset_cfg, waveform, antenna, layers, advanced,
+        dataset_cfg, waveform, antenna, layers,
         aggregate.eps_r_max, aggregate.eps_r_min,
         dataset_cfg.output_dir,
         smallest_feature_global_m=aggregate.smallest_feature_global_m,
         largest_extent_global_m=aggregate.largest_extent_global_m,
         deepest_target_bottom_global_m=aggregate.deepest_target_bottom_global_m,
+        static_x_halfwidth_global_m=aggregate.static_x_halfwidth_global_m,
     )
 
     print(
@@ -588,10 +592,11 @@ def global_validation_node(state: PipelineState) -> dict:
 
 def target_placement_node(state: PipelineState) -> dict:
     """Validate each sample's buried target against the FIXED global grid."""
-    target_range = None
+    target_ranges = None
     if state.get("target_ranges") is not None:
-        target_range = ExtractedTargetRanges.model_validate(state["target_ranges"]).cylinder
-    if target_range is None:
+        tr = ExtractedTargetRanges.model_validate(state["target_ranges"])
+        target_ranges = tr if tr.has_targets else None
+    if target_ranges is None:
         return {}  # no buried target -> nothing to place
 
     _banner("Per-Sample Target Placement")
@@ -599,7 +604,7 @@ def target_placement_node(state: PipelineState) -> dict:
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     grid = read_global(dataset_cfg.output_dir)
 
-    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_range, seed=1234)
+    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_ranges, seed=1234)
 
     print(
         f"Placed targets: {result.n_unchanged} kept as-is, {result.n_redrawn} re-drawn, "

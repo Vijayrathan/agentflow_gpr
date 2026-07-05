@@ -6,11 +6,11 @@ Layer 3 name=lower_clay_loam; thickness_m_min=0.38; thickness_m_max=0.48; sand_p
 
 Buried target:
 
-"name": "metal_pipe_22",
+"name": "metal_pipe_83",
 "material": "pec",
-"x_center_min_m": 0.45,
-"x_center_max_m": 0.75,
-"depth_min_m": 0.10,
+"x_center_min_m": 0.41,
+"x_center_max_m": 0.71,
+"depth_min_m": 0.20,
 "depth_max_m": 0.40,
 "radius_min_m": 0.055,
 "radius_max_m": 0.065,

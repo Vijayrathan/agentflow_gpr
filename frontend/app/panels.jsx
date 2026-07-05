@@ -586,7 +586,9 @@ function ModelTree({
                     }}
                   ></span>
                   <span className="tn-name">{t.name}</span>
-                  <span className="tn-meta">{fmt(t.depth)}m</span>
+                  <span className="tn-meta">
+                    {(t.kind === "box" ? "box · " : "") + fmt(t.depth) + "m"}
+                  </span>
                   <button
                     className={"vis" + (t.visible === false ? " off" : "")}
                     onClick={(e) => {
@@ -925,17 +927,45 @@ function Inspector({ layer, target, model, setModel, onSelect }) {
             })
           }
         />
-        <NumField
-          label="Diameter"
-          value={target.diameter}
-          unit="m"
-          step={0.005}
-          onChange={(v) =>
-            updTarget(setModel, target.id, {
-              diameter: clamp(v || 0.01, 0.005, 1),
-            })
-          }
-        />
+        {target.kind === "box" ? (
+          <React.Fragment>
+            <NumField
+              label="Width"
+              value={target.width}
+              unit="m"
+              step={0.005}
+              onChange={(v) =>
+                updTarget(setModel, target.id, {
+                  width: clamp(v || 0.01, 0.005, 2),
+                  diameter: clamp(v || 0.01, 0.005, 2),
+                })
+              }
+            />
+            <NumField
+              label="Height"
+              value={target.height}
+              unit="m"
+              step={0.005}
+              onChange={(v) =>
+                updTarget(setModel, target.id, {
+                  height: clamp(v || 0.01, 0.005, 2),
+                })
+              }
+            />
+          </React.Fragment>
+        ) : (
+          <NumField
+            label="Diameter"
+            value={target.diameter}
+            unit="m"
+            step={0.005}
+            onChange={(v) =>
+              updTarget(setModel, target.id, {
+                diameter: clamp(v || 0.01, 0.005, 1),
+              })
+            }
+          />
+        )}
         <div className="fld">
           <label>EM property</label>
           <div className="ctl">

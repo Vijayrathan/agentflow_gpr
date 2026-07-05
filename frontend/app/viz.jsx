@@ -590,7 +590,35 @@ function TargetGlyph({ t, mx, my, scale, selected, onSelect }) {
   const r = Math.max(4, (t.diameter / 2) * scale);
   const label = `${t.name} · ${fmt(t.depth)} m`;
   let glyph;
-  if (tt.shape === "rebar") {
+  if (t.shape === "rect") {
+    // box target: rectangle with the same metal treatment as PEC circles
+    const w = Math.max(6, (t.width ?? t.diameter ?? 0.1) * scale);
+    const h = Math.max(6, (t.height ?? t.diameter ?? 0.1) * scale);
+    glyph = (
+      <g>
+        <rect
+          x={cx - w / 2}
+          y={cy - h / 2}
+          width={w}
+          height={h}
+          rx={2}
+          fill={tt.kind === "pec" ? "url(#g-metal)" : tt.color}
+          stroke="#3c4350"
+          strokeWidth="1.25"
+        />
+        {tt.kind === "pec" && (
+          <rect
+            x={cx - w * 0.35}
+            y={cy - h * 0.35}
+            width={w * 0.3}
+            height={h * 0.2}
+            rx={2}
+            fill="rgba(255,255,255,.4)"
+          />
+        )}
+      </g>
+    );
+  } else if (tt.shape === "rebar") {
     const n = 5,
       span = Math.max(r * 4, 60);
     glyph = (

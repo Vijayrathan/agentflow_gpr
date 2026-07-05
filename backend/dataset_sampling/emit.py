@@ -12,11 +12,15 @@ Inputs consumed
     time window shared by every sample. In particular ``grid.f_peak_hz`` is the
     ALREADY-converted peak frequency (see global_derive.py:85-88); the emitter
     uses it verbatim and NEVER reads the raw collected centre frequency.
-  * sampled_layers.json (via read_samples) -> per-sample concrete layers (+ an
-    optional, already-placed buried target). This is the post-target-placement
-    survivor set.
+  * sampled_layers.json (via read_samples) -> per-sample concrete layers (+ the
+    already-placed buried objects, cylinders and boxes). This is the
+    post-target-placement survivor set. Object x positions are stored as SIGNED
+    offsets from the domain center and resolved here (x_abs = domain_x/2 +
+    x_offset); depths resolve against ground_y.
   * the collected waveform / antenna / advanced sections (graph state), for the
-    #waveform, source, #rx and optional advanced objects.
+    #waveform, source, #rx and optional surface roughness / snapshots. Advanced
+    geometry objects no longer exist — ALL buried objects come from the sampled
+    targets (a fixed object is a degenerate min==max range).
 
 Geometry conventions (see the approved plan / verified user_models examples)
 --------------------------------------------------------------------------
@@ -50,9 +54,6 @@ from backend.schema import (
     SampledSample,
     SampledLayer,
     SampledTarget,
-    CylinderSchema,
-    BoxSchema,
-    SphereSchema,
     SurfaceRoughnessConfigSchema,
     SnapshotConfigSchema,
 )
@@ -149,12 +150,34 @@ def _rx_line(grid: GlobalDerived) -> str:
 def _target_cylinder_line(target: SampledTarget, grid: GlobalDerived) -> str:
     """Buried cylinder disc (axis along thin z). Dielectric smoothing OFF ('n') so
     a PEC target fully replaces the underlying fractal materials at its boundary."""
+    x_abs = grid.domain_x_m / 2.0 + target.x_offset_m
     y_center = grid.ground_y_m - target.depth_m
     return (
-        f"#cylinder: {_g(target.x_center_m)} {_g(y_center)} 0 "
-        f"{_g(target.x_center_m)} {_g(y_center)} {_g(grid.dx_m)} "
+        f"#cylinder: {_g(x_abs)} {_g(y_center)} 0 "
+        f"{_g(x_abs)} {_g(y_center)} {_g(grid.dx_m)} "
         f"{_g(target.radius_m)} {_sanitize(target.material)} n"
     )
+
+
+def _target_box_line(target: SampledTarget, grid: GlobalDerived) -> str:
+    """Buried rectangular box (thin z: one cell). Smoothing OFF like the cylinder
+    so the PEC fully replaces the fractal soil at its boundary."""
+    x_abs = grid.domain_x_m / 2.0 + target.x_offset_m
+    y_center = grid.ground_y_m - target.depth_m
+    hx, hy = target.width_m / 2.0, target.height_m / 2.0
+    return (
+        f"#box: {_g(x_abs - hx)} {_g(y_center - hy)} 0 "
+        f"{_g(x_abs + hx)} {_g(y_center + hy)} {_g(grid.dx_m)} "
+        f"{_sanitize(target.material)} n"
+    )
+
+
+def _target_line(target: SampledTarget, grid: GlobalDerived) -> str:
+    if target.kind == "cylinder":
+        return _target_cylinder_line(target, grid)
+    if target.kind == "box":
+        return _target_box_line(target, grid)
+    raise ValueError(f"Unknown target kind '{target.kind}'")
 
 
 def _surface_roughness_line(
@@ -172,32 +195,6 @@ def _surface_roughness_line(
         f"{_g(grid.domain_x_m)} {_g(ground_y)} {_g(grid.dx_m)} "
         f"{_g(rough.fractal_dim)} {_g(rough.weight_x)} {_g(rough.weight_y)} "
         f"{_g(y_lo)} {_g(y_hi)} {box_id}{seed_part}"
-    )
-
-
-def _cylinder_line(obj: CylinderSchema) -> str:
-    smoothing = "y" if obj.dielectric_smoothing else "n"
-    return (
-        f"#cylinder: {_g(obj.x1)} {_g(obj.y1)} {_g(obj.z1)} "
-        f"{_g(obj.x2)} {_g(obj.y2)} {_g(obj.z2)} {_g(obj.radius)} "
-        f"{_sanitize(obj.material)} {smoothing}"
-    )
-
-
-def _box_line(obj: BoxSchema) -> str:
-    smoothing = "y" if obj.dielectric_smoothing else "n"
-    return (
-        f"#box: {_g(obj.x1)} {_g(obj.y1)} {_g(obj.z1)} "
-        f"{_g(obj.x2)} {_g(obj.y2)} {_g(obj.z2)} "
-        f"{_sanitize(obj.material)} {smoothing}"
-    )
-
-
-def _sphere_line(obj: SphereSchema) -> str:
-    smoothing = "y" if obj.dielectric_smoothing else "n"
-    return (
-        f"#sphere: {_g(obj.cx)} {_g(obj.cy)} {_g(obj.cz)} {_g(obj.radius)} "
-        f"{_sanitize(obj.material)} {smoothing}"
     )
 
 
@@ -350,27 +347,17 @@ def build_in_text(
     lines.append(_rx_line(grid))
     lines.append("")
 
-    # --- buried target (AFTER the fractal boxes so it overrides the soil) ---
-    if sample.target is not None:
-        lines.append(_target_cylinder_line(sample.target, grid))
+    # --- buried objects (AFTER the fractal boxes so they override the soil) ---
+    if sample.targets:
+        for t in sample.targets:
+            lines.append(_target_line(t, grid))
         lines.append("")
 
-    # --- optional fixed advanced objects ---
-    if adv is not None:
-        obj_lines: List[str] = []
-        for c in (adv.cylinders or []):
-            obj_lines.append(_cylinder_line(c))
-        for b in (adv.boxes or []):
-            obj_lines.append(_box_line(b))
-        for s in (adv.spheres or []):
-            obj_lines.append(_sphere_line(s))
-        if obj_lines:
-            lines.extend(obj_lines)
-            lines.append("")
-        for snap in (adv.snapshots or []):
+    # --- optional snapshots ---
+    if adv is not None and adv.snapshots:
+        for snap in adv.snapshots:
             lines.append(_snapshot_line(snap, grid))
-        if adv.snapshots:
-            lines.append("")
+        lines.append("")
 
     # --- geometry view (for --geometry-only inspection) ---
     lines.append(_geometry_view_line(grid, f"{title}_geo"))

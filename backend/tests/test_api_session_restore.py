@@ -73,11 +73,11 @@ def test_send_targets_current_socket_after_reconnect():
 # ---------------------------------------------------------------------------
 
 _CYLINDER = {
-    "cylinder": {
-        "x_center_min_m": 0.4, "x_center_max_m": 0.6,
+    "cylinders": [{
+        "x_offset_min_m": -0.1, "x_offset_max_m": 0.1,
         "depth_min_m": 0.2, "depth_max_m": 0.3,
         "radius_min_m": 0.02, "radius_max_m": 0.04,
-    }
+    }]
 }
 
 

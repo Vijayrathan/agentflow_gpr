@@ -122,37 +122,89 @@ def _project_range_layers(store: Mapping[str, Any]) -> Optional[list[dict]]:
     return out
 
 
-def _project_range_target(store: Mapping[str, Any]) -> Optional[dict]:
-    cyl = (store.get("target_ranges") or {}).get("cylinder")
-    if not cyl:
-        return None
-    return {
-        "name": cyl.get("name") or "target",
-        "material": cyl.get("material") or "pec",
-        "x_mid_m": _round(_mid(cyl["x_center_min_m"], cyl["x_center_max_m"])),
-        "depth_mid_m": _round(_mid(cyl["depth_min_m"], cyl["depth_max_m"])),
-        "radius_mid_m": _round(_mid(cyl["radius_min_m"], cyl["radius_max_m"])),
-        "x_min_m": _round(cyl["x_center_min_m"]),
-        "x_max_m": _round(cyl["x_center_max_m"]),
-        "depth_min_m": _round(cyl["depth_min_m"]),
-        "depth_max_m": _round(cyl["depth_max_m"]),
-        "radius_min_m": _round(cyl["radius_min_m"]),
-        "radius_max_m": _round(cyl["radius_max_m"]),
-    }
+def _is_static_range(obj: dict, pairs: list) -> bool:
+    return all(obj.get(lo) == obj.get(hi) for lo, hi in pairs)
+
+
+def _project_range_targets(store: Mapping[str, Any]) -> list:
+    """All buried-object ranges (canonical order: cylinders, then boxes) as
+    midpoint entries. x offsets are SIGNED distances from the domain center."""
+    tr = store.get("target_ranges") or {}
+    out = []
+    for cyl in tr.get("cylinders") or []:
+        out.append({
+            "kind": "cylinder",
+            "name": cyl.get("name") or "target",
+            "material": cyl.get("material") or "pec",
+            "static": _is_static_range(cyl, [
+                ("x_offset_min_m", "x_offset_max_m"),
+                ("depth_min_m", "depth_max_m"),
+                ("radius_min_m", "radius_max_m"),
+            ]),
+            "x_offset_mid_m": _round(_mid(cyl["x_offset_min_m"], cyl["x_offset_max_m"])),
+            "x_offset_min_m": _round(cyl["x_offset_min_m"]),
+            "x_offset_max_m": _round(cyl["x_offset_max_m"]),
+            "depth_mid_m": _round(_mid(cyl["depth_min_m"], cyl["depth_max_m"])),
+            "depth_min_m": _round(cyl["depth_min_m"]),
+            "depth_max_m": _round(cyl["depth_max_m"]),
+            "radius_mid_m": _round(_mid(cyl["radius_min_m"], cyl["radius_max_m"])),
+            "radius_min_m": _round(cyl["radius_min_m"]),
+            "radius_max_m": _round(cyl["radius_max_m"]),
+        })
+    for box in tr.get("boxes") or []:
+        out.append({
+            "kind": "box",
+            "name": box.get("name") or "target",
+            "material": box.get("material") or "pec",
+            "static": _is_static_range(box, [
+                ("x_offset_min_m", "x_offset_max_m"),
+                ("depth_min_m", "depth_max_m"),
+                ("width_min_m", "width_max_m"),
+                ("height_min_m", "height_max_m"),
+            ]),
+            "x_offset_mid_m": _round(_mid(box["x_offset_min_m"], box["x_offset_max_m"])),
+            "x_offset_min_m": _round(box["x_offset_min_m"]),
+            "x_offset_max_m": _round(box["x_offset_max_m"]),
+            "depth_mid_m": _round(_mid(box["depth_min_m"], box["depth_max_m"])),
+            "depth_min_m": _round(box["depth_min_m"]),
+            "depth_max_m": _round(box["depth_max_m"]),
+            "width_mid_m": _round(_mid(box["width_min_m"], box["width_max_m"])),
+            "width_min_m": _round(box["width_min_m"]),
+            "width_max_m": _round(box["width_max_m"]),
+            "height_mid_m": _round(_mid(box["height_min_m"], box["height_max_m"])),
+            "height_min_m": _round(box["height_min_m"]),
+            "height_max_m": _round(box["height_max_m"]),
+        })
+    return out
+
+
+def _target_half_extents_worst(t: dict) -> tuple:
+    """Worst-case (hx, hy) half extents of a range entry, for canvas sizing."""
+    if t["kind"] == "cylinder":
+        r = t.get("radius_max_m") or 0
+        return r, r
+    return (t.get("width_max_m") or 0) / 2.0, (t.get("height_max_m") or 0) / 2.0
 
 
 def _provisional_domain(ranges: Optional[dict]) -> dict:
-    """Rough canvas extents before global_derive fixes the real grid."""
+    """Rough canvas extents before global_derive fixes the real grid.
+
+    Targets use center-relative x offsets, so the width floor is symmetric:
+    2 * (worst |x_offset| + half extent + margin)."""
     depth = 0.0
     width = 1.0
     if ranges:
         for layer in ranges.get("layers") or []:
             depth += layer["thickness_mid_m"] or 0.0
         depth *= 1.2
-        target = ranges.get("target")
-        if target:
-            depth = max(depth, (target["depth_max_m"] or 0) + (target["radius_max_m"] or 0) + 0.1)
-            width = max(width, (target["x_max_m"] or 0) + (target["radius_max_m"] or 0) + 0.2)
+        for target in ranges.get("targets") or []:
+            hx, hy = _target_half_extents_worst(target)
+            off_worst = max(
+                abs(target.get("x_offset_min_m") or 0),
+                abs(target.get("x_offset_max_m") or 0),
+            )
+            depth = max(depth, (target.get("depth_max_m") or 0) + hy + 0.1)
+            width = max(width, 2.0 * (off_worst + hx + 0.2))
     return {
         "width_m": _round(max(width, 0.5)),
         "depth_m": _round(max(depth, 0.5)),
@@ -211,17 +263,25 @@ def _project_samples(
                 "eps_dry": _round(eps_dry, 3),
                 "eps_wet": _round(eps_wet, 3),
             })
-        target = sample.get("target")
+        targets = []
+        for target in sample.get("targets") or []:
+            entry = {
+                "kind": target.get("kind") or "cylinder",
+                "name": target.get("name") or "target",
+                "material": target.get("material") or "pec",
+                "x_offset_m": _round(target["x_offset_m"]),
+                "depth_m": _round(target["depth_m"]),
+            }
+            if entry["kind"] == "box":
+                entry["width_m"] = _round(target["width_m"])
+                entry["height_m"] = _round(target["height_m"])
+            else:
+                entry["radius_m"] = _round(target["radius_m"])
+            targets.append(entry)
         items.append({
             "sample_id": sid,
             "layers": layers,
-            "target": None if not target else {
-                "name": target.get("name") or "target",
-                "material": target.get("material") or "pec",
-                "x_m": _round(target["x_center_m"]),
-                "depth_m": _round(target["depth_m"]),
-                "radius_m": _round(target["radius_m"]),
-            },
+            "targets": targets,
         })
     return {
         "total": len(all_samples),
@@ -262,10 +322,10 @@ def build_scene(
         return None
 
     range_layers = _project_range_layers(store)
-    range_target = _project_range_target(store)
+    range_targets = _project_range_targets(store)
     ranges = None
-    if range_layers or range_target:
-        ranges = {"layers": range_layers or [], "target": range_target}
+    if range_layers or range_targets:
+        ranges = {"layers": range_layers or [], "targets": range_targets}
 
     samples = None
     grid = None

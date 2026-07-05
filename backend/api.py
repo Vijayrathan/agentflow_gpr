@@ -826,11 +826,12 @@ def _build_simulation_rows(
         if emitted is None:
             continue
 
-        cylinders = []
-        if sample.get("target"):
-            cylinders.append(sample["target"])
-        if adv and adv.cylinders:
-            cylinders.extend(c.model_dump() for c in adv.cylinders)
+        # Per-kind split of the sample's drawn objects (static objects are just
+        # degenerate ranges, so they appear here too). Advanced params no
+        # longer carry geometry.
+        tgts = sample.get("targets") or []
+        cylinders = [t for t in tgts if t.get("kind") == "cylinder"]
+        boxes = [t for t in tgts if t.get("kind") == "box"]
 
         rows.append({
             "id": uuid.uuid4(),
@@ -863,8 +864,8 @@ def _build_simulation_rows(
             "layers": sample.get("layers", []),
             "num_layers": len(sample.get("layers", [])),
             "cylinders": cylinders or None,
-            "boxes": [b.model_dump() for b in adv.boxes] if adv and adv.boxes else None,
-            "spheres": [s.model_dump() for s in adv.spheres] if adv and adv.spheres else None,
+            "boxes": boxes or None,
+            "spheres": None,  # spheres unsupported (2D thin-z); column kept for schema stability
             "surface_roughness": (
                 adv.surface_roughness.model_dump()
                 if adv and adv.surface_roughness
