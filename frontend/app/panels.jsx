@@ -374,6 +374,8 @@ function ModelTree({
   datasetFiles,
   onOpenFile,
   activeFile,
+  outFiles,
+  onOpenOutcome,
 }) {
   const [openL, setOpenL] = React.useState(true);
   const [openT, setOpenT] = React.useState(true);
@@ -468,6 +470,18 @@ function ModelTree({
               >
                 <Icon name="cpu" size={13} style={{ opacity: 0.6 }} />
                 <span className="tn-name">{f.filename}</span>
+                {outFiles && outFiles.has(f.filename) && (
+                  <button
+                    className="tn-out"
+                    title="View simulation outcome (A-scan)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenOutcome && onOpenOutcome(f.filename);
+                    }}
+                  >
+                    <Icon name="wave" size={12} />
+                  </button>
+                )}
                 <span className="tn-meta mono">#{f.sample_id}</span>
               </div>
             ))}
@@ -1204,7 +1218,7 @@ function ExportModal({ kind, model, onClose, toast }) {
 }
 
 /* ---------- generated .in file viewer (covers the canvas) ---------- */
-function DatasetFileView({ view, onClose }) {
+function DatasetFileView({ view, onClose, hasOutcome, onOpenOutcome }) {
   const html = String(view.content || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -1217,6 +1231,16 @@ function DatasetFileView({ view, onClose }) {
         <Icon name="cpu" size={15} style={{ color: "var(--accent)" }} />
         <span className="fileview-name mono">{view.filename}</span>
         <span className="badge mono">.in</span>
+        {hasOutcome && (
+          <button
+            className="hbtn outcome-btn"
+            title="View the simulated receiver waveform for this file"
+            onClick={() => onOpenOutcome && onOpenOutcome(view.filename)}
+          >
+            <Icon name="wave" size={13} />
+            View outcome
+          </button>
+        )}
         <div className="spacer" style={{ flex: 1 }} />
         <button className="hbtn" title="Close" onClick={onClose}>
           <Icon name="x" size={15} />
@@ -1233,6 +1257,218 @@ function DatasetFileView({ view, onClose }) {
   );
 }
 
+/* ---------- forward-model outcome viewer (A-scan, covers the canvas) ---- */
+function fmtAmp(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  if (a >= 1000 || a < 0.01) return v.toExponential(1);
+  return String(round(v, a >= 10 ? 1 : 3));
+}
+
+function AscanPlot({ samples, dt, component }) {
+  const W = 920;
+  const H = 430;
+  const padL = 70;
+  const padR = 16;
+  const padT = 16;
+  const padB = 42;
+  const n = samples.length;
+  // stride so the polyline stays light even for long time windows
+  const stride = Math.max(1, Math.ceil(n / 1600));
+  const pts = [];
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < n; i += stride) {
+    const v = samples[i];
+    if (v < min) min = v;
+    if (v > max) max = v;
+    pts.push([i, v]);
+  }
+  if (!isFinite(min)) {
+    min = -1;
+    max = 1;
+  }
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const head = (max - min) * 0.06;
+  min -= head;
+  max += head;
+  const tTotalNs = (n - 1) * dt * 1e9;
+  const x = (i) => padL + (i / Math.max(1, n - 1)) * (W - padL - padR);
+  const y = (v) => padT + ((max - v) / (max - min)) * (H - padT - padB);
+  const poly = pts
+    .map(([i, v]) => x(i).toFixed(1) + "," + y(v).toFixed(1))
+    .join(" ");
+  const unit = component && component[0] === "H" ? "A/m" : "V/m";
+  const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1].map((f) => ({
+    px: padL + f * (W - padL - padR),
+    label: round(f * tTotalNs, 2),
+  }));
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const v = min + f * (max - min);
+    return { py: y(v), label: fmtAmp(v) };
+  });
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ width: "100%", height: "100%", display: "block" }}
+    >
+      {yTicks.map((t, i) => (
+        <g key={"y" + i}>
+          <line
+            x1={padL}
+            x2={W - padR}
+            y1={t.py}
+            y2={t.py}
+            stroke="var(--line)"
+            strokeWidth="1"
+            opacity="0.5"
+          />
+          <text
+            x={padL - 8}
+            y={t.py + 3.5}
+            textAnchor="end"
+            fontSize="11"
+            fill="var(--muted)"
+            className="mono"
+          >
+            {t.label}
+          </text>
+        </g>
+      ))}
+      {xTicks.map((t, i) => (
+        <g key={"x" + i}>
+          <line
+            x1={t.px}
+            x2={t.px}
+            y1={padT}
+            y2={H - padB}
+            stroke="var(--line)"
+            strokeWidth="1"
+            opacity="0.35"
+          />
+          <text
+            x={t.px}
+            y={H - padB + 16}
+            textAnchor="middle"
+            fontSize="11"
+            fill="var(--muted)"
+            className="mono"
+          >
+            {t.label}
+          </text>
+        </g>
+      ))}
+      {min < 0 && max > 0 && (
+        <line
+          x1={padL}
+          x2={W - padR}
+          y1={y(0)}
+          y2={y(0)}
+          stroke="var(--muted)"
+          strokeWidth="1"
+          strokeDasharray="4 3"
+          opacity="0.6"
+        />
+      )}
+      <text
+        x={(padL + W - padR) / 2}
+        y={H - 8}
+        textAnchor="middle"
+        fontSize="11.5"
+        fill="var(--muted)"
+      >
+        time (ns)
+      </text>
+      <text
+        x={14}
+        y={(padT + H - padB) / 2}
+        textAnchor="middle"
+        fontSize="11.5"
+        fill="var(--muted)"
+        transform={`rotate(-90 14 ${(padT + H - padB) / 2})`}
+      >
+        {component} ({unit})
+      </text>
+      <polyline
+        points={poly}
+        fill="none"
+        stroke="var(--accent)"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function DatasetOutcomeView({ view, onClose }) {
+  const comps = view.data ? Object.keys(view.data.components || {}) : [];
+  const [comp, setComp] = React.useState(null);
+  // fall back gracefully when the chosen component isn't in this file
+  const active =
+    comp && comps.includes(comp)
+      ? comp
+      : comps.includes("Ez")
+        ? "Ez"
+        : comps[0];
+  const outName = view.data?.filename || view.filename;
+  return (
+    <div className="fileview">
+      <div className="fileview-head">
+        <Icon name="wave" size={15} style={{ color: "var(--accent)" }} />
+        <span className="fileview-name mono">{outName}</span>
+        <span className="badge mono">.out</span>
+        {comps.length > 1 && (
+          <select
+            className="vsel"
+            value={active}
+            onChange={(e) => setComp(e.target.value)}
+            title="Receiver field component"
+          >
+            {comps.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        )}
+        {view.data && (
+          <span className="tn-meta mono" style={{ marginLeft: 8 }}>
+            {view.data.iterations} it · Δt {round(view.data.dt * 1e12, 3)} ps ·{" "}
+            {round((view.data.iterations - 1) * view.data.dt * 1e9, 2)} ns
+          </span>
+        )}
+        <div className="spacer" style={{ flex: 1 }} />
+        <button className="hbtn" title="Close" onClick={onClose}>
+          <Icon name="x" size={15} />
+        </button>
+      </div>
+      <div className="fileview-body">
+        {view.loading ? (
+          <div className="fileview-empty">Loading {view.filename} output…</div>
+        ) : view.error ? (
+          <div className="fileview-empty">{view.error}</div>
+        ) : !active ? (
+          <div className="fileview-empty">
+            No receiver components found in {outName}.
+          </div>
+        ) : (
+          <div className="ascan-wrap">
+            <AscanPlot
+              samples={view.data.components[active]}
+              dt={view.data.dt}
+              component={active}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 Object.assign(window, {
   MenuBar,
   ModelTree,
@@ -1242,6 +1478,7 @@ Object.assign(window, {
   Toasts,
   ExportModal,
   DatasetFileView,
+  DatasetOutcomeView,
   generateGprMax,
   updLayer,
   updTarget,

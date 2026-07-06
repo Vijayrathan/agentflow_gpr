@@ -60,12 +60,36 @@ function App() {
   const [railTab, setRailTab] = useState("model");
   const [datasetFiles, setDatasetFiles] = useState([]);
   const [datasetView, setDatasetView] = useState(null); // {filename, content, loading, error}
+  // .in filenames whose forward-model .out exists (enables "View outcome");
+  // filled live from simulation_progress events + reconciled from the backend
+  const [outFiles, setOutFiles] = useState(() => new Set());
+  const [outcomeView, setOutcomeView] = useState(null); // {filename, data, loading, error}
 
-  const onDatasetReady = useCallback((result) => {
-    const files = (result && result.files) || [];
-    setDatasetFiles(files);
-    if (files.length) setRailTab("dataset");
+  const refreshOutputs = useCallback(async () => {
+    try {
+      const base = window.getApiHttpBase();
+      const sid = window.getSessionId();
+      const res = await fetch(`${base}/datasets/${sid}/outputs`);
+      if (!res.ok) return;
+      const body = await res.json();
+      setOutFiles(new Set(body.files || []));
+    } catch (e) {
+      /* no outputs yet / backend unreachable — keep whatever we have */
+    }
   }, []);
+
+  const onDatasetReady = useCallback(
+    (result) => {
+      const files = (result && result.files) || [];
+      setDatasetFiles(files);
+      if (files.length) setRailTab("dataset");
+      // a re-emitted dataset invalidates old outcomes in the UI
+      setOutFiles(new Set());
+      setOutcomeView(null);
+      if (files.length) refreshOutputs();
+    },
+    [refreshOutputs],
+  );
 
   const openDatasetFile = useCallback(async (filename) => {
     setDatasetView({ filename, content: "", loading: true });
@@ -84,6 +108,28 @@ function App() {
         content: "Could not load file — " + e.message,
         loading: false,
         error: true,
+      });
+    }
+  }, []);
+
+  // fetch the A-scan payload for one emitted file and show it on the canvas
+  const openDatasetOutcome = useCallback(async (filename) => {
+    setOutcomeView({ filename, data: null, loading: true });
+    try {
+      const base = window.getApiHttpBase();
+      const sid = window.getSessionId();
+      const res = await fetch(
+        `${base}/datasets/${sid}/outputs/${encodeURIComponent(filename)}`,
+      );
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      setOutcomeView({ filename, data, loading: false });
+    } catch (e) {
+      setOutcomeView({
+        filename,
+        data: null,
+        loading: false,
+        error: "Could not load output — " + e.message,
       });
     }
   }, []);
@@ -194,6 +240,14 @@ function App() {
         setSim({ done, total });
         setProgress(p);
         setScanFrac(0.06 + p * 0.88);
+        if (msg.event === "done" && msg.status === "ok" && msg.filename) {
+          // this file's .out just landed — enable its "View outcome" now
+          setOutFiles((s) => {
+            const next = new Set(s);
+            next.add(msg.filename);
+            return next;
+          });
+        }
         return;
       }
       if (msg.type === "simulation_complete") {
@@ -213,6 +267,7 @@ function App() {
             : `Forward model complete · <b>${ran}</b> simulation(s)`,
           r.failed ? "info" : "ok",
         );
+        refreshOutputs(); // authoritative reconciliation of "View outcome" state
         return;
       }
       if (msg.type === "session_restore") {
@@ -230,7 +285,7 @@ function App() {
         }
       }
     },
-    [toast],
+    [toast, refreshOutputs],
   );
 
   const onLoadPreset = useCallback((key) => {
@@ -374,6 +429,8 @@ function App() {
               datasetFiles={datasetFiles}
               onOpenFile={openDatasetFile}
               activeFile={datasetView?.filename}
+              outFiles={outFiles}
+              onOpenOutcome={openDatasetOutcome}
             />
 
             <div className="stage">
@@ -408,6 +465,16 @@ function App() {
                   <DatasetFileView
                     view={datasetView}
                     onClose={() => setDatasetView(null)}
+                    hasOutcome={outFiles.has(datasetView.filename)}
+                    onOpenOutcome={openDatasetOutcome}
+                  />
+                )}
+
+                {/* forward-model A-scan viewer — layers over the file view */}
+                {outcomeView && (
+                  <DatasetOutcomeView
+                    view={outcomeView}
+                    onClose={() => setOutcomeView(null)}
                   />
                 )}
 

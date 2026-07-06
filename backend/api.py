@@ -260,6 +260,47 @@ def get_dataset_file(session_id: str, filename: str) -> PlainTextResponse:
     return PlainTextResponse(path.read_text(encoding="utf-8"))
 
 
+def _out_files_dir(out_dir: Path) -> Path:
+    return out_dir / "out_files"
+
+
+@app.get("/datasets/{session_id}/outputs")
+def list_dataset_outputs(session_id: str) -> dict[str, Any]:
+    """List the .in filenames whose forward-model .out file exists on disk.
+    Availability is filesystem-derived so a page refresh — even mid-run —
+    restores the "view outcome" buttons."""
+    out_dir, manifest = _session_emitted_manifest(session_id)
+    outputs_dir = _out_files_dir(out_dir)
+    files = [
+        f["filename"]
+        for f in manifest.get("files", [])
+        if f.get("filename")
+        and (outputs_dir / (Path(f["filename"]).stem + ".out")).is_file()
+    ]
+    return {"files": files}
+
+
+@app.get("/datasets/{session_id}/outputs/{filename}")
+def get_dataset_output(session_id: str, filename: str) -> dict[str, Any]:
+    """A-scan payload for one emitted file: rx1 field components + time axis
+    read from the gprMax HDF5 output. `filename` is the .in name."""
+    out_dir, _manifest = _session_emitted_manifest(session_id)
+    # Only ever serve a bare filename's .out from the session's own dir.
+    out_path = _out_files_dir(out_dir) / (Path(Path(filename).name).stem + ".out")
+    if not out_path.is_file():
+        raise HTTPException(status_code=404, detail="Output file not found")
+    # Lazy import keeps h5py off the api import path.
+    from signal_extraction import read_ascan
+
+    try:
+        data = read_ascan(out_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Could not read output file: {exc}"
+        ) from exc
+    return {"filename": out_path.name, **data}
+
+
 @app.get("/datasets/{session_id}/download")
 def download_dataset_zip(session_id: str) -> StreamingResponse:
     out_dir, manifest = _session_emitted_manifest(session_id)

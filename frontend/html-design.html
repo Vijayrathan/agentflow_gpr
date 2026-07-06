@@ -577,6 +577,42 @@
         font-size: 12.5px;
         padding: 20px;
       }
+      .fileview-head .outcome-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--accent);
+        border: 1px solid var(--line-2);
+        border-radius: 6px;
+        padding: 3px 9px;
+        background: #fff;
+        cursor: pointer;
+        margin-left: 4px;
+      }
+      .fileview-head .outcome-btn:hover {
+        background: var(--panel-3);
+        border-color: var(--accent);
+      }
+      .fileview-head .vsel {
+        font: inherit;
+        font-size: 11px;
+        border: 1px solid var(--line-2);
+        border-radius: 5px;
+        padding: 2px 4px;
+        background: #fff;
+        color: var(--ink-2);
+      }
+      .ascan-wrap {
+        height: 100%;
+        min-height: 260px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+      }
 
       .tree-sec {
         margin-bottom: 6px;
@@ -701,6 +737,23 @@
       .tnode .vis.off {
         opacity: 1;
         color: var(--line-3);
+      }
+      .tnode .tn-out {
+        width: 18px;
+        height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        color: var(--accent);
+        border: none;
+        background: none;
+        border-radius: 4px;
+        cursor: pointer;
+        padding: 0;
+      }
+      .tnode .tn-out:hover {
+        background: var(--line);
       }
 
       /* ---------- stage ---------- */

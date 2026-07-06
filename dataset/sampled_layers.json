@@ -1,6 +1,8 @@
 {
-  "num_samples": 5,
-  "warnings": [],
+  "num_samples": 10,
+  "warnings": [
+    "[1/30 sample-layers] silt #% outside Peplinski calibration [#,#]%"
+  ],
   "samples": [
     {
       "sample_id": 1,
@@ -44,7 +46,7 @@
           "kind": "cylinder",
           "name": "metal_pipe_83",
           "material": "pec",
-          "x_offset_m": -0.061464,
+          "x_offset_m": -0.061452,
           "depth_m": 0.067743,
           "radius_m": 0.060695,
           "width_m": null,
@@ -94,8 +96,8 @@
           "kind": "cylinder",
           "name": "metal_pipe_83",
           "material": "pec",
-          "x_offset_m": 0.456138,
-          "depth_m": 0.608557,
+          "x_offset_m": 0.456047,
+          "depth_m": 0.608559,
           "radius_m": 0.060029,
           "width_m": null,
           "height_m": null
@@ -244,9 +246,259 @@
           "kind": "cylinder",
           "name": "metal_pipe_83",
           "material": "pec",
-          "x_offset_m": -0.43596,
-          "depth_m": 0.784657,
+          "x_offset_m": -0.435875,
+          "depth_m": 0.78466,
           "radius_m": 0.055316,
+          "width_m": null,
+          "height_m": null
+        }
+      ]
+    },
+    {
+      "sample_id": 6,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.186579,
+          "sand_pct": 48.13723,
+          "clay_pct": 8.960397,
+          "silt_pct": 42.902373,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.434432,
+          "particle_density_gcm3": 2.642541
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.31053,
+          "sand_pct": 34.961214,
+          "clay_pct": 13.174686,
+          "silt_pct": 51.8641,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.24,
+          "bulk_density_gcm3": 1.494216,
+          "particle_density_gcm3": 2.674431
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.381148,
+          "sand_pct": 22.207218,
+          "clay_pct": 18.726841,
+          "silt_pct": 59.06594,
+          "theta_v_min": 0.16,
+          "theta_v_max": 0.28,
+          "bulk_density_gcm3": 1.357394,
+          "particle_density_gcm3": 2.650673
+        }
+      ],
+      "targets": [
+        {
+          "kind": "cylinder",
+          "name": "metal_pipe_83",
+          "material": "pec",
+          "x_offset_m": -0.490859,
+          "depth_m": 0.80546,
+          "radius_m": 0.05603,
+          "width_m": null,
+          "height_m": null
+        }
+      ]
+    },
+    {
+      "sample_id": 7,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.207223,
+          "sand_pct": 49.76908,
+          "clay_pct": 9.379265,
+          "silt_pct": 40.851656,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.402678,
+          "particle_density_gcm3": 2.660023
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.294292,
+          "sand_pct": 34.126278,
+          "clay_pct": 15.223111,
+          "silt_pct": 50.65061,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.24,
+          "bulk_density_gcm3": 1.359689,
+          "particle_density_gcm3": 2.665558
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.440897,
+          "sand_pct": 16.528393,
+          "clay_pct": 19.050043,
+          "silt_pct": 64.421564,
+          "theta_v_min": 0.16,
+          "theta_v_max": 0.28,
+          "bulk_density_gcm3": 1.357876,
+          "particle_density_gcm3": 2.671145
+        }
+      ],
+      "targets": [
+        {
+          "kind": "cylinder",
+          "name": "metal_pipe_83",
+          "material": "pec",
+          "x_offset_m": 0.128954,
+          "depth_m": 0.641108,
+          "radius_m": 0.056122,
+          "width_m": null,
+          "height_m": null
+        }
+      ]
+    },
+    {
+      "sample_id": 8,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.181169,
+          "sand_pct": 49.645493,
+          "clay_pct": 9.393609,
+          "silt_pct": 40.960898,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.516333,
+          "particle_density_gcm3": 2.652301
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.284634,
+          "sand_pct": 33.780096,
+          "clay_pct": 15.681697,
+          "silt_pct": 50.538207,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.24,
+          "bulk_density_gcm3": 1.317131,
+          "particle_density_gcm3": 2.65944
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.386921,
+          "sand_pct": 22.606022,
+          "clay_pct": 19.063338,
+          "silt_pct": 58.330641,
+          "theta_v_min": 0.16,
+          "theta_v_max": 0.28,
+          "bulk_density_gcm3": 1.275678,
+          "particle_density_gcm3": 2.659011
+        }
+      ],
+      "targets": [
+        {
+          "kind": "cylinder",
+          "name": "metal_pipe_83",
+          "material": "pec",
+          "x_offset_m": -0.33138,
+          "depth_m": 0.164941,
+          "radius_m": 0.056296,
+          "width_m": null,
+          "height_m": null
+        }
+      ]
+    },
+    {
+      "sample_id": 9,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.205388,
+          "sand_pct": 46.058991,
+          "clay_pct": 7.69648,
+          "silt_pct": 46.244529,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.495986,
+          "particle_density_gcm3": 2.648046
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.304937,
+          "sand_pct": 34.951494,
+          "clay_pct": 13.899268,
+          "silt_pct": 51.149238,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.24,
+          "bulk_density_gcm3": 1.38762,
+          "particle_density_gcm3": 2.660703
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.3921,
+          "sand_pct": 17.246973,
+          "clay_pct": 17.352342,
+          "silt_pct": 65.400684,
+          "theta_v_min": 0.16,
+          "theta_v_max": 0.28,
+          "bulk_density_gcm3": 1.367662,
+          "particle_density_gcm3": 2.649205
+        }
+      ],
+      "targets": [
+        {
+          "kind": "cylinder",
+          "name": "metal_pipe_83",
+          "material": "pec",
+          "x_offset_m": 0.476065,
+          "depth_m": 0.214199,
+          "radius_m": 0.061311,
+          "width_m": null,
+          "height_m": null
+        }
+      ]
+    },
+    {
+      "sample_id": 10,
+      "layers": [
+        {
+          "name": "top_sandy_loam",
+          "thickness_m": 0.193737,
+          "sand_pct": 49.5271,
+          "clay_pct": 9.298177,
+          "silt_pct": 41.174723,
+          "theta_v_min": 0.08,
+          "theta_v_max": 0.18,
+          "bulk_density_gcm3": 1.364171,
+          "particle_density_gcm3": 2.64952
+        },
+        {
+          "name": "middle_silt_loam",
+          "thickness_m": 0.333518,
+          "sand_pct": 27.142368,
+          "clay_pct": 10.793871,
+          "silt_pct": 62.063761,
+          "theta_v_min": 0.12,
+          "theta_v_max": 0.24,
+          "bulk_density_gcm3": 1.487103,
+          "particle_density_gcm3": 2.662842
+        },
+        {
+          "name": "lower_clay_loam",
+          "thickness_m": 0.427267,
+          "sand_pct": 22.846194,
+          "clay_pct": 19.229988,
+          "silt_pct": 57.923818,
+          "theta_v_min": 0.16,
+          "theta_v_max": 0.28,
+          "bulk_density_gcm3": 1.288082,
+          "particle_density_gcm3": 2.643877
+        }
+      ],
+      "targets": [
+        {
+          "kind": "cylinder",
+          "name": "metal_pipe_83",
+          "material": "pec",
+          "x_offset_m": -0.013886,
+          "depth_m": 0.973697,
+          "radius_m": 0.055068,
           "width_m": null,
           "height_m": null
         }
