@@ -65,6 +65,16 @@ function App() {
   const [outFiles, setOutFiles] = useState(() => new Set());
   const [outcomeView, setOutcomeView] = useState(null); // {filename, data, loading, error}
 
+  // switching back to the Model tab returns to the canvas — the file/outcome
+  // overlays would otherwise keep covering it until closed via their x
+  const changeRailTab = useCallback((tab) => {
+    setRailTab(tab);
+    if (tab === "model") {
+      setDatasetView(null);
+      setOutcomeView(null);
+    }
+  }, []);
+
   const refreshOutputs = useCallback(async () => {
     try {
       const base = window.getApiHttpBase();
@@ -92,6 +102,9 @@ function App() {
   );
 
   const openDatasetFile = useCallback(async (filename) => {
+    // the outcome overlay sits on top — drop it so the newly opened
+    // input deck is actually visible
+    setOutcomeView(null);
     setDatasetView({ filename, content: "", loading: true });
     try {
       const base = window.getApiHttpBase();
@@ -425,7 +438,7 @@ function App() {
               collapsed={railCollapsed}
               toast={toast}
               railTab={railTab}
-              setRailTab={setRailTab}
+              setRailTab={changeRailTab}
               datasetFiles={datasetFiles}
               onOpenFile={openDatasetFile}
               activeFile={datasetView?.filename}
