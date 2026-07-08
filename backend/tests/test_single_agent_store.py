@@ -106,24 +106,38 @@ def test_dataset_config_defaults_complete():
     out = _save("dataset_config", {"num_samples": 5})
     assert out["status"] == "ok"
     assert sap._stage_done("dataset_config")
-    # Server-fixed fields land at their defaults without being collected.
-    assert sap._STORE["dataset_config"]["output_dir"] == "./dataset"
+    # Server-fixed fields land at their defaults without being collected;
+    # output_dir is the per-dataset dir named after the (default) basename.
+    assert sap._STORE["dataset_config"]["output_dir"] == "./dataset/soil_sample"
     assert sap._STORE["dataset_config"]["dimensionality"] == "2D"
 
 
 def test_dataset_config_server_fixed_fields_are_overridden():
     # Even if the agent passes user-supplied values through, the server-fixed
-    # fields are forced back to their defaults.
+    # fields are forced back; output_dir follows the model_basename.
     out = _save("dataset_config", {
         "num_samples": 5,
+        "model_basename": "clay_survey",
         "output_dir": "/somewhere/else",
         "dimensionality": "3D",
         "num_threads": 16,
     })
     assert out["status"] == "ok"
-    assert sap._STORE["dataset_config"]["output_dir"] == "./dataset"
+    assert sap._STORE["dataset_config"]["output_dir"] == "./dataset/clay_survey"
     assert sap._STORE["dataset_config"]["dimensionality"] == "2D"
     assert sap._STORE["dataset_config"]["num_threads"] is None
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("wet sand run 2", "wet_sand_run_2"),        # whitespace -> underscore
+    ("../../etc", "etc"),                        # traversal stripped
+    ("a/b\\c", "a_b_c"),                         # path separators collapsed
+    ("..", "soil_sample"),                       # nothing usable -> default
+    ("", "soil_sample"),
+    (None, "soil_sample"),
+])
+def test_dataset_dirname_sanitization(raw, expected):
+    assert sap._dataset_dirname(raw) == expected
 
 
 def test_optional_section_skip_completes():

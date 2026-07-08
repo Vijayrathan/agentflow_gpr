@@ -101,6 +101,50 @@ function App() {
     [refreshOutputs],
   );
 
+  // Upload a zip of gprMax .in files as this session's dataset. The backend
+  // syntax-checks every deck (gprMax's own command rules) and only stores the
+  // valid ones; per-file rejections come back in the response and are also
+  // reported in the chat (dataset_ready over the WS re-populates the tab too).
+  const uploadDatasetZip = useCallback(
+    async (file) => {
+      if (!file) return;
+      const esc = (s) =>
+        String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      toast(`Uploading <b>${esc(file.name)}</b> — validating…`, "info");
+      try {
+        const base = window.getApiHttpBase();
+        const sid = window.getSessionId();
+        const res = await fetch(
+          `${base}/datasets/${sid}/upload?filename=${encodeURIComponent(file.name)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/zip" },
+            body: file,
+          },
+        );
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(
+            typeof body.detail === "string" ? body.detail : "HTTP " + res.status,
+          );
+        }
+        const rejected = body.rejected || [];
+        toast(
+          rejected.length
+            ? `Imported <b>${body.n_written}</b> file(s) · ${rejected.length} failed the syntax check — see chat`
+            : `Imported <b>${body.n_written}</b> gprMax input file(s)`,
+          rejected.length ? "info" : "ok",
+        );
+        // The WS dataset_ready event does this too — calling directly keeps
+        // the tab correct even if the socket is reconnecting.
+        onDatasetReady(body);
+      } catch (e) {
+        toast("Upload failed — " + esc(e.message || e), "info");
+      }
+    },
+    [toast, onDatasetReady],
+  );
+
   const openDatasetFile = useCallback(async (filename) => {
     // the outcome overlay sits on top — drop it so the newly opened
     // input deck is actually visible
@@ -301,14 +345,6 @@ function App() {
     [toast, refreshOutputs],
   );
 
-  const onLoadPreset = useCallback((key) => {
-    const cur = modelRef.current;
-    if (key === "utility") setModel(makeUtilityModel());
-    else if (key === "rebar") setModel(scenarioRebar().patch(cur));
-    else if (key === "mine") setModel(scenarioMine().patch(cur));
-    setSelected(null);
-  }, []);
-
   // overview-tab caveats: assumptions that hold until derived truth exists.
   // Collapsed to a chip by default so the panel never sits over the plot
   // (the SVG fills the full canvas width when the dock is collapsed).
@@ -347,7 +383,7 @@ function App() {
           setDockTab("acq");
           setDockCollapsed(false);
         }}
-        onLoadPreset={onLoadPreset}
+        onUploadZip={uploadDatasetZip}
       />
 
       <div className="body">

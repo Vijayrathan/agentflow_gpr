@@ -13,7 +13,8 @@ Two entry points:
 - CLI: `python backend/simulate.py --input-dir <dir> [...]`.
 
 The output directory defaults to out_files/ as a sibling of the input
-directory, e.g. dataset/in_files -> dataset/out_files.
+directory, e.g. dataset/<name>/in_files -> dataset/<name>/out_files (each
+dataset lives in its own directory named after its model basename).
 
 Usage:
     python backend/simulate.py \\
@@ -110,9 +111,10 @@ def run_batch_simulation(
         progress: Optional per-file callback (see ProgressCallback above).
             Exceptions raised by it are swallowed — reporting must never
             kill the batch.
-        filenames: Optional restriction to these .in names. The dataset
-            in_files dir is shared across sessions/runs, so a batch must
-            run its own manifest's files — not everything on disk.
+        filenames: Optional restriction to these .in names. A dataset's
+            in_files dir can hold stale decks (re-emission, basename reuse),
+            so a batch must run its own manifest's files — not everything
+            on disk.
     """
     if gpu_ids:
         gpu = True

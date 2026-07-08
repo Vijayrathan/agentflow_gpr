@@ -61,6 +61,7 @@ This is the single most important design constraint. Violating it is never accep
 | `validation_tools_new.py` | Tiered validation (Tier 0–4) for physics constraints |
 | `viz_projection.py` | Pure projection of the section store + pipeline manifests into the `model_update` scene payload for the live frontend visualization (no FastAPI/LLM imports) |
 | `simulate.py` | Batch gprMax forward-model runner (deterministic; lazy gprMax import). Backs the UI "Run forward model" button via `POST /datasets/{sid}/simulate` and doubles as a CLI |
+| `deck_validation.py` | Syntax validation for user-uploaded gprMax `.in` decks: safe preprocessing (mirrors gprMax's line handling but NEVER `exec`s `#python:` blocks; `#include_file:` rejected too) + gprMax's own `check_cmd_names` rules (lazy gprMax import) |
 
 ### Single-Agent Extraction (ACTIVE — `backend/agentflow_single_agent.py`)
 
@@ -123,6 +124,17 @@ Executed after extraction, in strict order:
 6. `target_placement.py` — Per-sample target validation; redraw then drop if infeasible
 7. `emit.py` — Generate `.in` files (pure string assembly, no derivation)
 
+**Per-dataset directory layout**: `output_dir` is server-fixed in `save_section` to
+`./dataset/<model_basename>` (basename sanitized via `_dataset_dirname` — path
+separators/dots never survive), so each dataset's manifests, `in_files/` and
+`out_files/` live in their own directory keyed by the model basename; multiple
+datasets coexist side by side. Everything downstream (manifests, emission,
+simulation, viz projection, `/datasets/{sid}` endpoints, DB rows) resolves paths
+from `cfg.output_dir` — never hardcode `./dataset`. A mid-pipeline basename edit
+moves `output_dir`, which is safe because `dataset_config` is a sampling input:
+staleness detection re-runs `layer_sampling`, rewriting all manifests into the
+new directory before the derive chain reads them.
+
 ### Frontend (`frontend/`)
 
 Vanilla React/JSX (no build step; Babel-standalone, all components exported on
@@ -179,7 +191,8 @@ section store / manifests → viz_projection.build_scene() → ws `model_update 
 - **Frontend invariants**: `ws.onmessage` is bound once at mount, so callbacks
   passed into `ChatPane` must be read through a ref (stale-closure trap).
   `makeInitialModel()` is a BLANK scene — the demo model lives in
-  `makeUtilityModel()` (used by the presets menu); don't re-populate the initial
+  `makeUtilityModel()` (a data.jsx fixture; the Upload menu is zip-import only —
+  the scenario-presets menu was removed); don't re-populate the initial
   model. Backend sends physics only; material colors/patterns are a frontend
   display classification (`materialKeyForLayer`).
 - Key-free tests: `backend/tests/test_viz_projection.py` (store→scene,
@@ -231,8 +244,9 @@ conversation); the frontend handler remains for compatibility.
 once the dataset is emitted, the button runs `simulate.run_batch_simulation` (gprMax
 Python API, lazy import) on the session's `.in` files in a worker thread, writing
 `.out` files to `<output_dir>/out_files`. The batch is restricted to the emission
-manifest's filenames — the shared in_files dir may hold stale decks from earlier
-runs, which must never be simulated. Per-file progress streams as
+manifest's filenames — the per-dataset in_files dir can still hold stale decks
+(re-emission after a re-sample, basename reuse across sessions), which must never
+be simulated. Per-file progress streams as
 `simulation_progress` (transient; drives the run button/progress bar in `app.jsx`
 via `onSimulationEvent`); the recorded `simulation_complete` summary lands in the
 chat and `.out` paths are written onto the session's `Simulation` rows
@@ -240,6 +254,20 @@ chat and `.out` paths are written onto the session's `Simulation` rows
 endpoint 409s while a run or pipeline step is in flight; `simulating` +
 `simulation` ride along on `session_restore` so a refresh re-hydrates the run
 state. Key-free tests: `backend/tests/test_simulate.py` (solver stubbed).
+
+**Dataset upload** ("Upload → From file…" → `POST /datasets/{sid}/upload`, raw zip
+as the request body — no multipart dep): every `.in` member is syntax-checked by
+`deck_validation.py` BEFORE anything is written; valid decks land in
+`./dataset/<sanitized zip stem>/in_files` with an emission-style
+`emitted_files.json` (`"source": "upload"`), rejected files are reported per-file
+in the recorded `dataset_ready` chat message (and in the HTTP response's
+`rejected` list). `ChatSession.uploaded_output_dir` makes `_session_output_dir` —
+and therefore ALL dataset endpoints (files/content/simulate/outputs/download) —
+serve the upload exactly like a generated dataset; `_finish_dataset` clears the
+override when the pipeline emits its own. Uploads create no `Simulation` DB rows:
+`_record_simulation_outputs` skips `"upload"` manifests so positional sample ids
+never overwrite a generated dataset's rows. Key-free tests:
+`backend/tests/test_deck_validation.py`, `backend/tests/test_api_upload.py`.
 
 **Refresh/reconnect model** (`api.py` ↔ `chatbot.jsx`): every chat-visible event
 (`RECORDED_EVENT_TYPES` + user messages) is appended to `ChatSession.transcript`;

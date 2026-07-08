@@ -83,9 +83,15 @@ function getSessionId() {
 
 function getApiHost() {
   const isFile = window.location.protocol === "file:";
+  // Match any local loopback hostname — the page may be opened as localhost,
+  // 127.0.0.1, or [::1]; only 127.0.0.1 was matched before, so localhost/::1
+  // fell through and sent the WebSocket to the static dev server (→ 404).
+  const localHosts = ["127.0.0.1", "localhost", "::1", "[::1]"];
   const isStaticDevServer =
-    window.location.hostname === "127.0.0.1" &&
+    localHosts.includes(window.location.hostname) &&
     ["5173", "8001", "8080"].includes(window.location.port);
+  // Force 127.0.0.1 (IPv4) because uvicorn binds 127.0.0.1 — routing to
+  // localhost/::1 could resolve to IPv6 and fail to connect.
   return isFile || isStaticDevServer ? "127.0.0.1:8000" : window.location.host;
 }
 

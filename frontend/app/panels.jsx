@@ -97,6 +97,8 @@ function MenuBar(props) {
     onManual,
   } = props;
   const [open, setOpen] = React.useState(null);
+  // Hidden file input backing "Upload → From file…" (zip of gprMax .in decks).
+  const zipInputRef = React.useRef(null);
 
   // Download all generated gprMax .in files as a zip from the backend.
   const downloadInputDeck = () => {
@@ -154,80 +156,30 @@ function MenuBar(props) {
       </div>
 
       <div className="menu" onClick={stop}>
-        {/* Upload */}
+        {/* Upload — zip of gprMax .in files, straight to the file picker */}
         <div style={{ position: "relative" }}>
           <button
             className="mbtn"
-            onClick={() => setOpen(open === "up" ? null : "up")}
+            title="Import a .zip of gprMax .in files"
+            onClick={() => {
+              close();
+              if (zipInputRef.current) zipInputRef.current.click();
+            }}
           >
             <Icon name="upload" className="ic" />
             Upload
-            <Icon name="caret" className="caret" />
           </button>
-          {open === "up" && (
-            <div className="pop" onClick={stop}>
-              <div className="head">Import scenario</div>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  props.onLoadPreset("utility");
-                  toast("Loaded <b>utility_survey_01</b>", "ok");
-                }}
-              >
-                <Icon name="layers" className="ic" />
-                <div className="col">
-                  <span>Buried utility survey</span>
-                  <span className="sub">3 layers · 2 targets</span>
-                </div>
-              </button>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  props.onLoadPreset("rebar");
-                  toast("Loaded <b>slab_inspection_01</b>", "ok");
-                }}
-              >
-                <Icon name="grid" className="ic" />
-                <div className="col">
-                  <span>Concrete slab + rebar</span>
-                  <span className="sub">1.5 GHz inspection</span>
-                </div>
-              </button>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  props.onLoadPreset("mine");
-                  toast("Loaded <b>demining_01</b>", "ok");
-                }}
-              >
-                <Icon name="target" className="ic" />
-                <div className="col">
-                  <span>Landmine detection</span>
-                  <span className="sub">900 MHz · sandy soil</span>
-                </div>
-              </button>
-              <div className="sep"></div>
-              <button
-                className="item"
-                onClick={() => {
-                  close();
-                  toast(
-                    "Drop a <b>.json</b> or gprMax <b>.in</b> file to import",
-                    "info",
-                  );
-                }}
-              >
-                <Icon name="upload" className="ic" />
-                <div className="col">
-                  <span>From file…</span>
-                  <span className="sub">.json · .in</span>
-                </div>
-              </button>
-            </div>
-          )}
+          <input
+            ref={zipInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files && e.target.files[0];
+              e.target.value = ""; // allow re-selecting the same zip
+              if (f && props.onUploadZip) props.onUploadZip(f);
+            }}
+          />
         </div>
 
         {/* Download */}

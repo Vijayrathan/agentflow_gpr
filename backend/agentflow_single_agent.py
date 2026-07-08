@@ -64,6 +64,7 @@ Graph
 import copy
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -191,6 +192,24 @@ def _changed_sections(before: dict, after: dict) -> set:
     return {s for s in SECTION_SCHEMA if before.get(s) != after.get(s)}
 
 
+# Every dataset gets its own directory under this root, named after the
+# sanitized model_basename: manifests, in_files/ and out_files/ all land there,
+# so multiple datasets coexist side by side instead of overwriting a shared dir.
+DATASET_ROOT = "./dataset"
+
+
+def _dataset_dirname(basename: object) -> str:
+    """Filesystem-safe directory name for a dataset, from its model_basename.
+
+    The basename is user/LLM-supplied, so this is deliberately strict: only
+    [A-Za-z0-9_-] survive (everything else, including path separators and
+    dots, collapses to '_') — no traversal, no hidden dirs. Falls back to the
+    schema default when nothing usable remains.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(basename or "")).strip("_")
+    return safe or "soil_sample"
+
+
 def _section_is_complete(section: str, model) -> bool:
     """True only when `model` carries the ESSENTIAL data for `section`.
 
@@ -201,8 +220,9 @@ def _section_is_complete(section: str, model) -> bool:
     if section in OPTIONAL_SECTIONS:
         return True
     if section == "dataset_config":
-        # output_dir / dimensionality are server-fixed (./dataset, 2D) in
-        # save_section, so completeness only hinges on the user-collected core.
+        # output_dir / dimensionality are server-fixed
+        # (./dataset/<model_basename>, 2D) in save_section, so completeness
+        # only hinges on the user-collected core.
         return model.num_samples > 0 and model.center_freq_is_peak is not None
     if section == "layers":
         return model.num_layers > 0 and len(model.layers) > 0
@@ -241,11 +261,14 @@ def _make_section_tools(store: dict):
         except json.JSONDecodeError as e:
             return json.dumps({"error": "invalid_json", "detail": str(e)})
         if section == "dataset_config" and isinstance(data, dict):
-            # Server-fixed fields, never user-selected: output lands in the
-            # server-local ./dataset, only 2D runs are supported, and OpenMP
-            # threading is a deployment concern (None -> gprMax default). Any
-            # value the agent passes through is overridden here.
-            data["output_dir"] = "./dataset"
+            # Server-fixed fields, never user-selected: output lands in a
+            # per-dataset directory named after the model basename
+            # (./dataset/<model_basename>), only 2D runs are supported, and
+            # OpenMP threading is a deployment concern (None -> gprMax
+            # default). Any value the agent passes through is overridden here.
+            data["output_dir"] = (
+                f"{DATASET_ROOT}/{_dataset_dirname(data.get('model_basename'))}"
+            )
             data["dimensionality"] = "2D"
             data["num_threads"] = None
         try:

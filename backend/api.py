@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -58,11 +58,13 @@ for _p in (_backend_dir, _project_root, _ds_dir, _gprmax_root):
         sys.path.insert(0, _p)
 
 from agentflow_single_agent import (  # noqa: E402
+    DATASET_ROOT,
     RESAMPLE_SECTIONS,
     SAMPLING_INPUT_SECTIONS,
     SECTION_DISPLAY,
     SingleAgentSession,
     _changed_sections,
+    _dataset_dirname,
     _samples_stale,
     dataset_generation_node,
     global_derive_node,
@@ -77,6 +79,7 @@ from single_agent_prompts import (  # noqa: E402
     global_remediation_message,
     sample_remediation_message,
 )
+from deck_validation import extract_deck_members, validate_deck_bytes  # noqa: E402
 from viz_projection import build_scene  # noqa: E402
 from simulate import run_batch_simulation  # noqa: E402
 from db.db import (  # noqa: E402
@@ -146,6 +149,11 @@ class ChatSession:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     # Finalize result kept for replay: repopulates the dataset tab on refresh.
     dataset_result: Optional[dict[str, Any]] = None
+    # Set when the user imported a zip of .in decks (upload_dataset_zip): the
+    # dataset endpoints serve THIS directory instead of the pipeline's
+    # dataset_config.output_dir, until the pipeline emits its own dataset
+    # (_finish_dataset clears it).
+    uploaded_output_dir: Optional[str] = None
     # Forward-model (gprMax) run state. `simulating` guards against concurrent
     # runs and restores the run indicator on reconnect; the result is kept so
     # a refresh re-hydrates the "solved" state.
@@ -191,7 +199,41 @@ async def _send(chat: ChatSession, payload: dict[str, Any]) -> None:
         )
 
 
-app = FastAPI(title="GPR LangGraph Chat API")
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Warm up the RAG system in the BACKGROUND on startup so it's ready to serve
+    soon after boot WITHOUT blocking the server from accepting connections.
+
+    Loading the BGE-M3 encoder + reranker and connecting to Qdrant is slow, and if
+    Qdrant is unreachable the connection can hang — doing this inline would stall
+    (or deadlock) startup, so uvicorn would never finish "application startup" and
+    the frontend WebSocket couldn't connect. Instead we kick it off as a background
+    task and yield immediately. If a request arrives before warmup finishes,
+    `_get_rag()` builds the instance lazily. Failures are swallowed — chat/pipeline
+    still work and `rag_search` returns its error sentinel."""
+
+    async def _warmup() -> None:
+        try:
+            # Lazy import keeps the heavy RAG deps off the module import path (and
+            # out of key-free test imports); the model load runs in a worker thread.
+            from backend.rag import init_rag
+
+            logger.info("Warming up RAG system (encoder + reranker, Qdrant) in background...")
+            await asyncio.to_thread(init_rag)
+            logger.info("RAG ready.")
+        except Exception:
+            logger.exception("RAG warmup failed — lazy fallback on first use.")
+
+    warmup_task = asyncio.create_task(_warmup())
+    try:
+        yield
+    finally:
+        warmup_task.cancel()
+        with contextlib.suppress(Exception):
+            await warmup_task
+
+
+app = FastAPI(title="GPR LangGraph Chat API", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -212,14 +254,19 @@ async def finalize_dataset(payload: FinalizeDatasetPayload) -> dict[str, Any]:
 
 
 def _session_output_dir(session_id: str) -> Path:
-    """Resolve the on-disk dataset directory for an active chat session."""
+    """Resolve the on-disk dataset directory for an active chat session.
+    An uploaded deck zip takes precedence until the pipeline emits its own
+    dataset (see upload_dataset_zip / _finish_dataset)."""
     chat = sessions.get(session_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Unknown session")
-    cfg = chat.state.get("dataset_config")
-    if not cfg:
-        raise HTTPException(status_code=404, detail="Session has no dataset yet")
-    out_dir = _resolve_dataset_path(DatasetConfig.model_validate(cfg).output_dir)
+    if chat.uploaded_output_dir:
+        out_dir = Path(chat.uploaded_output_dir)
+    else:
+        cfg = chat.state.get("dataset_config")
+        if not cfg:
+            raise HTTPException(status_code=404, detail="Session has no dataset yet")
+        out_dir = _resolve_dataset_path(DatasetConfig.model_validate(cfg).output_dir)
     if not out_dir.exists():
         raise HTTPException(status_code=404, detail="Dataset directory not found")
     return out_dir
@@ -327,6 +374,134 @@ def download_dataset_zip(session_id: str) -> StreamingResponse:
     )
 
 
+MAX_UPLOAD_ZIP_BYTES = 50 * 1024 * 1024
+
+
+@app.post("/datasets/{session_id}/upload")
+async def upload_dataset_zip(
+    session_id: str, request: Request, filename: str = "uploaded_dataset.zip"
+) -> dict[str, Any]:
+    """Import a user zip of gprMax .in decks as the session's dataset
+    ("Upload → From file…"; the raw zip is the request body, no multipart).
+
+    Every deck must pass gprMax's own command-syntax rules (deck_validation)
+    before anything lands on disk. Valid decks are written under
+    ./dataset/<zip stem>/in_files with an emission-style manifest, so the
+    dataset tab, the file/outcome viewers, the forward model and the zip
+    download all treat the upload exactly like a generated dataset."""
+    chat = sessions.get(session_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    if chat.simulating:
+        raise HTTPException(
+            status_code=409, detail="Forward model is running — wait for it to finish"
+        )
+    if chat.busy:
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline step is still running — wait for it to finish",
+        )
+    data = await request.body()
+    if not data:
+        raise HTTPException(
+            status_code=422, detail="Empty upload — send the zip file as the request body"
+        )
+    if len(data) > MAX_UPLOAD_ZIP_BYTES:
+        raise HTTPException(status_code=413, detail="Zip exceeds the 50 MB upload limit")
+
+    result = await asyncio.to_thread(_import_deck_zip, chat, data, filename)
+    # Recorded chat event: repopulates the dataset tab live AND on reconnect.
+    await _send(chat, {
+        "type": "dataset_ready",
+        "content": _upload_summary(result),
+        "result": result,
+    })
+    return result
+
+
+def _import_deck_zip(chat: ChatSession, data: bytes, zip_name: str) -> dict[str, Any]:
+    """Validate every .in member and write the valid ones as the session's
+    uploaded dataset. Rejected files are reported per-file, never written."""
+    try:
+        members, rejected = extract_deck_members(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not members and not rejected:
+        raise HTTPException(status_code=422, detail="The zip contains no .in files")
+
+    decks: list[tuple[str, str]] = []
+    for name, blob in members:
+        errors = validate_deck_bytes(blob)
+        if errors:
+            rejected.append({"filename": name, "error": "; ".join(errors)})
+        else:
+            decks.append((name, blob.decode("utf-8")))
+
+    if not decks:
+        details = "; ".join(f"{r['filename']}: {r['error']}" for r in rejected[:10])
+        raise HTTPException(
+            status_code=422,
+            detail=f"No file passed the gprMax syntax check — {details}",
+        )
+
+    out_dir = _resolve_dataset_path(
+        f"{DATASET_ROOT}/{_dataset_dirname(Path(zip_name).stem)}"
+    )
+    in_dir = out_dir / "in_files"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    for i, (name, text) in enumerate(decks):
+        path = in_dir / name
+        path.write_text(text, encoding="utf-8")
+        files.append({"sample_id": i + 1, "filename": name, "path": str(path)})
+
+    manifest = {
+        "output_dir": str(out_dir),
+        "in_dir": str(in_dir),
+        "n_written": len(files),
+        # Gates DB output recording: uploads have no Simulation rows and their
+        # positional sample ids must never overwrite a generated dataset's.
+        "source": "upload",
+        "zip_name": zip_name,
+        "files": files,
+        "errors": [f"{r['filename']}: {r['error']}" for r in rejected],
+    }
+    with open(out_dir / "emitted_files.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    result = {
+        "status": "uploaded" if not rejected else "partial",
+        "session_id": chat.session_id,
+        "output_dir": str(out_dir),
+        "in_dir": str(in_dir),
+        "n_written": len(files),
+        "files": [
+            {"sample_id": x["sample_id"], "filename": x["filename"]} for x in files
+        ],
+        "rejected": rejected,
+    }
+    chat.uploaded_output_dir = str(out_dir)
+    chat.dataset_result = result  # replayed on reconnect → repopulates the tab
+    chat.simulation_result = None  # previous dataset's outcomes no longer apply
+    return result
+
+
+def _upload_summary(result: dict[str, Any]) -> str:
+    msg = (
+        f"Imported {result['n_written']} gprMax input file(s) from the uploaded "
+        "zip — they are in the Dataset tab, ready for the forward model."
+    )
+    rejected = result.get("rejected") or []
+    if rejected:
+        shown = "\n".join(f"- `{r['filename']}`: {r['error']}" for r in rejected[:10])
+        more = f"\n- … and {len(rejected) - 10} more" if len(rejected) > 10 else ""
+        msg += (
+            f"\n\n{len(rejected)} file(s) failed the gprMax syntax check "
+            f"and were skipped:\n{shown}{more}"
+        )
+    return msg
+
+
 @app.post("/datasets/{session_id}/simulate")
 async def start_forward_model(session_id: str) -> dict[str, Any]:
     """Kick off the gprMax forward model on the session's emitted .in files
@@ -337,8 +512,9 @@ async def start_forward_model(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Unknown session")
     out_dir, manifest = _session_emitted_manifest(session_id)
     in_dir = _in_files_dir(out_dir, manifest)
-    # Run ONLY this session's emitted files — the in_files dir is shared
-    # across sessions/runs and may hold stale decks from earlier datasets.
+    # Run ONLY this session's emitted files — the per-dataset in_files dir can
+    # still hold stale decks (re-emission after a re-sample, or another session
+    # reusing the same model basename).
     filenames = [
         Path(f["filename"]).name
         for f in manifest.get("files", [])
@@ -443,6 +619,10 @@ def _record_simulation_outputs(
 ) -> int:
     """Persist each sample's .out path onto its Simulation row. DB failures
     are logged and swallowed — the simulations themselves already ran."""
+    if manifest.get("source") == "upload":
+        # Uploaded decks have no Simulation rows; their positional sample ids
+        # must not overwrite a previously generated dataset's rows.
+        return 0
     sample_by_in = {
         f["filename"]: int(f["sample_id"])
         for f in manifest.get("files", [])
@@ -797,6 +977,8 @@ async def _finish_dataset(chat: ChatSession) -> None:
     chat.active_purpose = "collect"
     chat.active_section = None
     chat.remediation_snapshot = None
+    # The pipeline's own dataset takes over from any earlier upload.
+    chat.uploaded_output_dir = None
     # Kept for reconnect replay — repopulates the dataset tab after refresh.
     chat.dataset_result = result
     await _send(chat, {
