@@ -278,11 +278,32 @@ a started session replays `session_restore` (full transcript + `dataset` result 
 `busy`/`phase`/`complete`) followed by the last `model_update` scene; the frontend
 rebuilds the message list via `replayToMessage` (must mirror `handleServerEvent`
 rendering) and re-hydrates the dataset tab through `onDatasetReady`. `user_message`
-events are record-only (never echoed back). After `dataset_ready` the session stays
-conversational: `_handle_user_text` accepts phase `complete` and relays agent replies
-without advancing the pipeline. Every top-level turn ends with a `pipeline_busy:
-false` so a restored `busy: true` always converges. Sessions live in-memory only —
-an API-server restart still starts a fresh pipeline.
+events are record-only (never echoed back). Every top-level turn ends with a
+`pipeline_busy: false` so a restored `busy: true` always converges. Sessions live
+in-memory only — an API-server restart still starts a fresh pipeline.
+
+**Post-completion chat** (edit → regenerate, restart refused): after
+`dataset_ready` the session stays conversational, and each agent turn is diffed
+against `ChatSession.complete_snapshot` (the store at the last successful
+`_finish_dataset`) via `_check_regeneration`. No change ⇒ relay-only discussion.
+A change with every changed section `stage_done` ⇒ `_start_regeneration` clears
+`complete`, sets `regenerating`, syncs the store, and synchronously re-runs the
+deterministic tail in the CANONICAL order — sample gate, then inside
+`_run_derive_chain` a resample iff a `RESAMPLE_SECTIONS` member changed, then
+peplinski/global derive → global validation (remediation loops work because
+`complete` is off) → placement → emission → `_finish_dataset` (new
+`dataset_ready`, snapshot refreshed, stale `out_files/` purged — filenames repeat
+across regenerations — old `Simulation` rows deleted before re-insert via
+`delete_simulations_for_session`). An INCOMPLETE changed section never touches
+the existing dataset (diff persists to the next turn); `regenerating` 409s the
+simulate/upload endpoints between remediation turns. The one-way `regenerating`
+routing lives in `_run_sample_validation_gate`'s pass branch (derive chain, not
+`advanced_params` collection). Prompt side: `POST_COMPLETE_BRIEFING` is injected
+ONCE at the first `_finish_dataset`; the system prompt's "After the dataset is
+generated" section makes the agent show a bold disclaimer + get user confirmation
+before any post-complete save, and REFUSE restart/new-simulation requests (new
+sims = separate chats, future work). Key-free tests:
+`backend/tests/test_api_regeneration.py`.
 
 ## Physics Constraints
 

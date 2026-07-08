@@ -22,3 +22,24 @@ waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=700000000;
 ---
 
 antenna_kind=hertzian_dipole; antenna_axis=x; tx_rx_offset_m=0.12; resistance=null
+
+---------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------
+
+Layer 1 name=upper_loamy_sand; thickness_m_min=0.20; thickness_m_max=0.28; sand_pct_min=40; sand_pct_max=46; clay_pct_min=8; clay_pct_max=12; theta_v_min=0.06; theta_v_max=0.16; bulk_density_gcm3_min=1.40; bulk_density_gcm3_max=1.60; particle_density_gcm3_min=2.65; particle_density_gcm3_max=2.70.
+Layer 2 name=middle_loam; thickness_m_min=0.25; thickness_m_max=0.33; sand_pct_min=28; sand_pct_max=34; clay_pct_min=12; clay_pct_max=16; theta_v_min=0.10; theta_v_max=0.22; bulk_density_gcm3_min=1.35; bulk_density_gcm3_max=1.55; particle_density_gcm3_min=2.65; particle_density_gcm3_max=2.70.
+Layer 3 name=lower_silty_clay_loam; thickness_m_min=0.35; thickness_m_max=0.45; sand_pct_min=20; sand_pct_max=26; clay_pct_min=16; clay_pct_max=20; theta_v_min=0.14; theta_v_max=0.26; bulk_density_gcm3_min=1.30; bulk_density_gcm3_max=1.50; particle_density_gcm3_min=2.65; particle_density_gcm3_max=2.70.
+
+
+"name": "steel_conduit_54",
+"material": "pec",
+"x_center_min_m": 0.35,
+"x_center_max_m": 0.65,
+"depth_min_m": 0.25,
+"depth_max_m": 0.45,
+"radius_min_m": 0.040,
+"radius_max_m": 0.050,
+
+waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=750000000; waveform_name=ricker_750mhz_peak
+
+antenna_kind=hertzian_dipole; antenna_axis=x; tx_rx_offset_m=0.10; resistance=null

@@ -36,6 +36,7 @@ import io
 import json
 import logging
 import re
+import shutil
 import sys
 import uuid
 import zipfile
@@ -75,6 +76,7 @@ from agentflow_single_agent import (  # noqa: E402
     target_placement_node,
 )
 from single_agent_prompts import (  # noqa: E402
+    POST_COMPLETE_BRIEFING,
     SECTION_KICKOFF,
     global_remediation_message,
     sample_remediation_message,
@@ -85,6 +87,7 @@ from simulate import run_batch_simulation  # noqa: E402
 from db.db import (  # noqa: E402
     ExtractionSession,
     batch_insert_simulations,
+    delete_simulations_for_session,
     get_session,
     set_simulation_outputs,
 )
@@ -159,6 +162,16 @@ class ChatSession:
     # a refresh re-hydrates the "solved" state.
     simulating: bool = False
     simulation_result: Optional[dict[str, Any]] = None
+    # Post-completion edit → regenerate machinery. `complete_snapshot` is the
+    # store as of the last successful _finish_dataset; post-complete turns are
+    # diffed against it. `regenerating` survives remediation turns: it routes
+    # the sample gate's pass branch into the derive chain (advanced_params is
+    # already collected) and 409s the forward model for the whole regeneration.
+    complete_snapshot: Optional[dict[str, Any]] = None
+    regenerating: bool = False
+    post_complete_briefed: bool = False
+    # Dedup for the "section incomplete — regeneration blocked" notice.
+    regen_block_notice: Optional[frozenset] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -401,6 +414,11 @@ async def upload_dataset_zip(
             status_code=409,
             detail="A pipeline step is still running — wait for it to finish",
         )
+    if chat.regenerating:
+        raise HTTPException(
+            status_code=409,
+            detail="Dataset is regenerating — wait for it to finish",
+        )
     data = await request.body()
     if not data:
         raise HTTPException(
@@ -528,6 +546,13 @@ async def start_forward_model(session_id: str) -> dict[str, Any]:
         raise HTTPException(
             status_code=409,
             detail="A pipeline step is still running — wait for it to finish",
+        )
+    # `busy` is False between remediation turns mid-regeneration, but the old
+    # emitted manifest may still be on disk — never simulate it.
+    if chat.regenerating:
+        raise HTTPException(
+            status_code=409,
+            detail="Dataset is regenerating — wait for it to finish",
         )
 
     chat.simulating = True
@@ -810,7 +835,10 @@ async def _handle_agent_result(chat: ChatSession, result: dict) -> None:
     )
 
     if chat.complete:
-        return  # post-completion chat: relay only, nothing to advance
+        # Post-completion chat: relay only unless the agent edited a section
+        # (user-confirmed edit) — then the dataset regenerates synchronously.
+        await _check_regeneration(chat)
+        return
     if chat.active_purpose == "collect":
         await _maybe_resample_stale(chat)
         await _check_collect_done(chat)
@@ -838,6 +866,65 @@ async def _maybe_resample_stale(chat: ChatSession) -> None:
     # Still mid-collection on the active section: _run_deterministic left the
     # phase at "deterministic", which would reject the user's next chat turn.
     chat.phase = "agent"
+
+
+async def _check_regeneration(chat: ChatSession) -> None:
+    """Post-completion turns: diff the store against the snapshot taken at the
+    last successful generation. No change => pure discussion (relay only). A
+    change with every changed section complete => regenerate the dataset. An
+    incomplete change NEVER touches the existing dataset — the diff persists,
+    so regeneration fires on the turn that completes the section."""
+    changed = _changed_sections(
+        chat.complete_snapshot or {}, chat.agent_session.snapshot()
+    )
+    if not changed:
+        return
+    if chat.simulating:
+        # Never re-emit under a running forward model; the persistent diff
+        # re-triggers on the next turn after it finishes.
+        await _send(chat, {
+            "type": "agent_message",
+            "content": (
+                "The forward model is still running — the dataset will "
+                "regenerate after it finishes (send any message then)."
+            ),
+        })
+        return
+    incomplete = frozenset(
+        s for s in changed if not chat.agent_session.stage_done(s)
+    )
+    if incomplete:
+        if incomplete != chat.regen_block_notice:  # notify once per set
+            chat.regen_block_notice = incomplete
+            await _send(chat, {
+                "type": "progress",
+                "content": (
+                    f"Section(s) {', '.join(sorted(incomplete))} incomplete — "
+                    "the existing dataset is kept until they are complete."
+                ),
+            })
+        return
+    chat.regen_block_notice = None
+    await _start_regeneration(chat, changed)
+
+
+async def _start_regeneration(chat: ChatSession, changed: set) -> None:
+    """Synchronously re-run the deterministic tail after a post-complete edit.
+    Same node order as the first run: gate -> (resample iff a sampling input
+    changed, inside _run_derive_chain) -> derive chain -> placement ->
+    emission -> finalize -> dataset_ready."""
+    chat.complete = False  # remediation routing needs this off
+    chat.regenerating = True
+    chat.phase = "routing"
+    _sync_sections(chat)
+    await _send(chat, {
+        "type": "progress",
+        "content": (
+            f"Updated {', '.join(sorted(changed))} — re-validating and "
+            "regenerating the dataset."
+        ),
+    })
+    await _run_sample_validation_gate(chat)
 
 
 async def _check_collect_done(chat: ChatSession) -> None:
@@ -906,7 +993,13 @@ async def _advance_after_collect(chat: ChatSession, section: str) -> None:
 async def _run_sample_validation_gate(chat: ChatSession) -> None:
     await _run_deterministic(chat, "Sample Validation", sample_validation_node)
     if chat.state.get("sample_validation_passed"):
-        await _start_stage(chat, "advanced_params")
+        if chat.regenerating:
+            # Post-complete regeneration: advanced_params was already
+            # collected — go straight to the derive chain (which re-samples
+            # first iff a sampling input changed).
+            await _run_derive_chain(chat)
+        else:
+            await _start_stage(chat, "advanced_params")
         return
 
     errors = chat.state.get("sample_validation_errors") or []
@@ -981,6 +1074,18 @@ async def _finish_dataset(chat: ChatSession) -> None:
     chat.uploaded_output_dir = None
     # Kept for reconnect replay — repopulates the dataset tab after refresh.
     chat.dataset_result = result
+    # Post-completion edit machinery: baseline for the store diff, and the
+    # previous forward-model results no longer apply to the new samples.
+    chat.regenerating = False
+    chat.complete_snapshot = chat.agent_session.snapshot()
+    chat.regen_block_notice = None
+    chat.simulation_result = None
+    # Emitted filenames repeat across regenerations and the outputs listing is
+    # filesystem-derived — stale .out files would attach to the new decks.
+    cfg = DatasetConfig.model_validate(chat.state["dataset_config"])
+    shutil.rmtree(
+        _resolve_dataset_path(cfg.output_dir) / "out_files", ignore_errors=True
+    )
     await _send(chat, {
         "type": "dataset_ready",
         "content": (
@@ -989,6 +1094,12 @@ async def _finish_dataset(chat: ChatSession) -> None:
         ),
         "result": result,
     })
+    if not chat.post_complete_briefed:
+        # One-time switch into post-completion behavior (discussion, edits
+        # behind a disclaimer, restart refusal). Not re-injected after
+        # regenerations — the agent already has the rules.
+        chat.post_complete_briefed = True
+        await _invoke_and_handle(chat, POST_COMPLETE_BRIEFING)
 
 
 # Matches the CLI `_banner()` block: a ==== rule, the title line, another rule.
@@ -1160,6 +1271,9 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
         global_derive=global_derive,
         emitted_manifest=emitted_manifest,
     )
+    # A re-finalize (post-complete edit regeneration) replaces the session's
+    # rows — the old samples no longer exist.
+    delete_simulations_for_session(session_uuid)
     inserted = batch_insert_simulations(sim_rows) if sim_rows else 0
     return {
         "status": status,

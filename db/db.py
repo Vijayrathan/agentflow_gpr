@@ -380,6 +380,23 @@ def set_simulation_outputs(
     return total
 
 
+def delete_simulations_for_session(session_id: _uuid.UUID) -> int:
+    """Remove a session's Simulation rows (a re-finalize replaces them).
+
+    Returns the number of rows deleted.
+    """
+    from sqlmodel import select
+
+    with get_session() as db:
+        rows = db.exec(
+            select(Simulation).where(Simulation.session_id == session_id)
+        ).all()
+        for sim in rows:
+            db.delete(sim)
+        db.commit()
+        return len(rows)
+
+
 def get_completed_simulations(
     model_filter: Optional[str] = None,
     num_layers_filter: Optional[int] = None,

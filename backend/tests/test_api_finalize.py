@@ -130,7 +130,12 @@ def test_finalize_dataset_sync_upserts_session_and_batches_rows(tmp_path, monkey
 
     fake_db = FakeDb()
     inserted_rows = []
+    deleted_sessions = []
     monkeypatch.setattr(api, "get_session", lambda: fake_db)
+    monkeypatch.setattr(
+        api, "delete_simulations_for_session",
+        lambda session_id: deleted_sessions.append((session_id, len(inserted_rows))) or 0,
+    )
     monkeypatch.setattr(api, "batch_insert_simulations", lambda rows: inserted_rows.extend(rows) or len(rows))
 
     payload = api.FinalizeDatasetPayload(
@@ -165,3 +170,7 @@ def test_finalize_dataset_sync_upserts_session_and_batches_rows(tmp_path, monkey
     assert fake_db.row.num_samples_requested == 1
     assert fake_db.row.model_config_data["dataset_config"]["model_basename"] == "demo"
     assert inserted_rows[0]["input_file_path"].endswith("demo_1.in")
+    # Finalize is idempotent: the session's old rows are deleted BEFORE the
+    # new batch is inserted (a regeneration replaces them, never duplicates).
+    assert len(deleted_sessions) == 1
+    assert deleted_sessions[0] == (uuid.UUID(payload.session_id), 0)
