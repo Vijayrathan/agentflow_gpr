@@ -418,7 +418,7 @@ function parseCommand(text, model) {
       kind: "run",
       run: true,
       reply:
-        "Launching the gprMax forward model across the scan line. I'll preview the synthetic B-scan below — this configuration becomes a labelled sample in the dataset.",
+        "Launching the gprMax forward model across the scan line. Outputs will be attached to the generated dataset files as they finish.",
     };
   }
 
@@ -648,7 +648,7 @@ function scenarioUtility() {
   return {
     kind: "scenario",
     reply:
-      "Built a **buried-utility survey**: topsoil over dry sand over wet clay, with a PVC water main and a metal power conduit at different depths. Frequency set to 1.5 GHz for shallow utilities. Hit **Run** to preview the radargram.",
+      "Built a **buried-utility survey**: topsoil over dry sand over wet clay, with a PVC water main and a metal power conduit at different depths. Frequency set to 1.5 GHz for shallow utilities. Hit **Run** to execute the forward model.",
     actions: [
       { sw: MATERIALS.topsoil.color, label: "3 soil layers", v: "0.90 m" },
       { sw: TARGET_TYPES.pvcpipe.color, label: "PVC water main", v: "0.40 m" },
@@ -837,7 +837,7 @@ function localAnswer(text, model) {
   if (/hyperbola|why.*curve|reflection/.test(t))
     return "Each buried point target produces a diffraction hyperbola in the B-scan: directly above the object the travel-time is shortest, and it increases as the antenna moves away. The hyperbola's curvature encodes the wave velocity — and therefore the soil permittivity.";
   if (/dataset|training|ml|label/.test(t))
-    return 'Every scenario you configure here is a fully-labelled sample: the soil/target parameters are the ground truth, and a Run produces the synthetic B-scan input. Use **"generate 500 variations"** to sweep the parameters and mass-produce training data.';
+    return 'Every scenario you configure here is a fully-labelled sample: the soil/target parameters are the ground truth, and a Run produces solver outputs for the dataset. Use **"generate 500 variations"** to sweep the parameters and mass-produce training data.';
   if (/gprmax|solver/.test(t))
     return "gprMax is the open-source FDTD solver doing the forward electromagnetic modelling. NL2Sim translates your description into a gprMax input deck (#material, #cylinder, #box, #waveform…), runs it, and tags the output for the dataset. Use **Download** to export the .in file.";
   return 'I can build and tweak GPR scenarios, explain the physics, or mass-produce labelled training data. Try: "add a wet clay layer 0.4 m thick", "bury a metal pipe at 0.3 m", "set 900 MHz", or "generate 500 variations".';

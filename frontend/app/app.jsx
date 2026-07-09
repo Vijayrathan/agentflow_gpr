@@ -24,12 +24,10 @@ function App() {
 
   const [selected, setSelected] = useState(null);
   const [activeModel, setActiveModel] = useState("gprmax");
-  const [dataset, setDataset] = useState(12480);
 
   const [chatOpen, setChatOpen] = useState(true);
   const [railCollapsed, setRailCollapsed] = useState(false);
 
-  const [dockTab, setDockTab] = useState("inspector");
   const [dockCollapsed, setDockCollapsed] = useState(false);
 
   const [view, setView] = useState({
@@ -40,7 +38,6 @@ function App() {
   const [zoom, setZoom] = useState(1);
 
   const [solving, setSolving] = useState(false);
-  const [solved, setSolved] = useState(false);
   const [progress, setProgress] = useState(0);
   const [scanFrac, setScanFrac] = useState(0.12);
   // live gprMax run counters ({done, total} while a batch is running)
@@ -218,29 +215,9 @@ function App() {
   const onSelect = useCallback((sel) => {
     setSelected(sel);
     if (sel) {
-      setDockTab("inspector");
       setDockCollapsed(false);
     }
   }, []);
-
-  // invalidate solved B-scan when model changes — except for the single
-  // scene replay that follows a session restore (it re-renders the same
-  // model the restored "solved" state belongs to).
-  const keepSolvedOnceRef = useRef(false);
-  useEffect(() => {
-    if (keepSolvedOnceRef.current) {
-      keepSolvedOnceRef.current = false;
-      return;
-    }
-    setSolved(false);
-    setProgress(0);
-  }, [
-    model.layers,
-    model.targets,
-    model.domain,
-    model.acquisition.frequency,
-    model.acquisition.waveform,
-  ]);
 
   // Run the real gprMax forward model on the emitted dataset. The POST only
   // kicks the batch off; per-file progress and the final summary arrive as
@@ -262,12 +239,9 @@ function App() {
       );
       return;
     }
-    setSolved(false);
     setSolving(true);
     setProgress(0);
     setSim({ done: 0, total: datasetFiles.length });
-    setDockTab("radar");
-    setDockCollapsed(false);
     try {
       const base = window.getApiHttpBase();
       const sid = window.getSessionId();
@@ -293,7 +267,6 @@ function App() {
         const done = msg.event === "done" ? msg.index : msg.index - 1;
         const p = clamp(done / total, 0, 1);
         setSolving(true);
-        setSolved(false);
         setSim({ done, total });
         setProgress(p);
         setScanFrac(0.06 + p * 0.88);
@@ -313,10 +286,8 @@ function App() {
         setSim(null);
         const ran = (r.succeeded || 0) + (r.skipped || 0);
         if (ran > 0) {
-          setSolved(true);
           setProgress(1);
           setScanFrac(0.94);
-          setDataset((d) => d + (r.succeeded || 0));
         }
         toast(
           r.failed
@@ -328,17 +299,10 @@ function App() {
         return;
       }
       if (msg.type === "session_restore") {
-        // page refresh: re-hydrate the run indicator / solved state
+        // page refresh: re-hydrate the run indicator
         if (msg.simulating) {
           setSolving(true);
           setSim(null);
-        } else if (
-          msg.result &&
-          (msg.result.succeeded || 0) + (msg.result.skipped || 0) > 0
-        ) {
-          keepSolvedOnceRef.current = true;
-          setSolved(true);
-          setProgress(1);
         }
       }
     },
@@ -373,16 +337,11 @@ function App() {
         setModel={setModel}
         activeModel={activeModel}
         setActiveModel={setActiveModel}
-        dataset={dataset}
         datasetCount={datasetFiles.length}
         chatOpen={chatOpen}
         setChatOpen={setChatOpen}
         toast={toast}
         openModal={setModal}
-        onManual={() => {
-          setDockTab("acq");
-          setDockCollapsed(false);
-        }}
         onUploadZip={uploadDatasetZip}
       />
 
@@ -679,10 +638,6 @@ function App() {
                 setModel={setModel}
                 selected={selected}
                 onSelect={onSelect}
-                tab={dockTab}
-                setTab={setDockTab}
-                solved={solved}
-                progress={progress}
                 collapsed={dockCollapsed}
                 setCollapsed={setDockCollapsed}
                 height="clamp(170px, 30vh, 300px)"

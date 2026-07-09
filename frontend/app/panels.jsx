@@ -13,10 +13,6 @@ const updTarget = (setModel, id, patch) =>
     ...m,
     targets: m.targets.map((t) => (t.id === id ? { ...t, ...patch } : t)),
   }));
-const updAcq = (setModel, patch) =>
-  setModel((m) => ({ ...m, acquisition: { ...m.acquisition, ...patch } }));
-const updDomain = (setModel, patch) =>
-  setModel((m) => ({ ...m, domain: { ...m.domain, ...patch } }));
 
 /* ---------- gprMax input deck generator ---------- */
 function generateGprMax(model) {
@@ -88,13 +84,11 @@ function MenuBar(props) {
     setModel,
     activeModel,
     setActiveModel,
-    dataset,
     datasetCount,
     chatOpen,
     setChatOpen,
     toast,
     openModal,
-    onManual,
   } = props;
   const [open, setOpen] = React.useState(null);
   // Hidden file input backing "Upload → From file…" (zip of gprMax .in decks).
@@ -271,23 +265,6 @@ function MenuBar(props) {
           )}
         </div>
 
-        <div className="mdiv"></div>
-
-        {/* Manual input */}
-        <button
-          className="mbtn"
-          onClick={() => {
-            onManual();
-            toast(
-              "Manual input — edit any parameter in the <b>Parameters</b> panel",
-              "info",
-            );
-          }}
-        >
-          <Icon name="edit" className="ic" />
-          Manual Input
-        </button>
-
         {/* AI assistant */}
         <button
           className={"mbtn" + (chatOpen ? " on" : "")}
@@ -302,10 +279,6 @@ function MenuBar(props) {
 
       <div className="statuschip" title="Solver engine">
         <span className="dot"></span>gprMax&nbsp;<b>v3.1</b>&nbsp;ready
-      </div>
-      <div className="statuschip">
-        <Icon name="database" size={13} style={{ opacity: 0.6 }} />
-        Dataset&nbsp;<b>{dataset.toLocaleString()}</b>
       </div>
     </header>
   );
@@ -595,7 +568,7 @@ function ModelTree({
 }
 
 /* ============================================================
-   DOCK (inspector / parameters / radargram)
+   DOCK (inspector)
    ============================================================ */
 function NumField({ label, value, unit, step, onChange, disabled }) {
   return (
@@ -621,10 +594,6 @@ function Dock({
   setModel,
   selected,
   onSelect,
-  tab,
-  setTab,
-  solved,
-  progress,
   collapsed,
   setCollapsed,
   height,
@@ -642,45 +611,13 @@ function Dock({
     <div className="dock" style={{ height: collapsed ? 38 : height }}>
       <div className="dock-tabs">
         <button
-          className={"dtab" + (tab === "inspector" ? " on" : "")}
+          className="dtab on"
           onClick={() => {
-            setTab("inspector");
             setCollapsed(false);
           }}
         >
           <Icon name="edit" className="ic" />
           Inspector
-        </button>
-        <button
-          className={"dtab" + (tab === "acq" ? " on" : "")}
-          onClick={() => {
-            setTab("acq");
-            setCollapsed(false);
-          }}
-        >
-          <Icon name="settings" className="ic" />
-          Parameters
-        </button>
-        <button
-          className={"dtab" + (tab === "radar" ? " on" : "")}
-          onClick={() => {
-            setTab("radar");
-            setCollapsed(false);
-          }}
-        >
-          <Icon name="radar" className="ic" />
-          Radargram
-          {solved && (
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: "var(--green)",
-                marginLeft: 2,
-              }}
-            ></span>
-          )}
         </button>
         <button
           className="dock-collapse"
@@ -696,19 +633,13 @@ function Dock({
       </div>
       {!collapsed && (
         <div className="dock-body">
-          {tab === "inspector" && (
-            <Inspector
-              layer={layer}
-              target={target}
-              model={model}
-              setModel={setModel}
-              onSelect={onSelect}
-            />
-          )}
-          {tab === "acq" && <Acquisition model={model} setModel={setModel} />}
-          {tab === "radar" && (
-            <Radargram model={model} solved={solved} progress={progress} />
-          )}
+          <Inspector
+            layer={layer}
+            target={target}
+            model={model}
+            setModel={setModel}
+            onSelect={onSelect}
+          />
         </div>
       )}
     </div>
@@ -955,147 +886,6 @@ function Inspector({ layer, target, model, setModel, onSelect }) {
     <div className="insp-empty">
       <Icon name="edit" className="ic" />
       <div>Select a layer or target to edit its parameters</div>
-      <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
-        or open <b style={{ color: "var(--ink-3)" }}>Parameters</b> for
-        acquisition settings
-      </div>
-    </div>
-  );
-}
-
-function Acquisition({ model, setModel }) {
-  const a = model.acquisition,
-    d = model.domain;
-  return (
-    <div className="insp">
-      <div className="insp-title">
-        <Icon name="settings" size={16} style={{ color: "var(--accent)" }} />
-        <h4>Acquisition &amp; Domain</h4>
-        <span className="badge mono">manual input</span>
-      </div>
-      <div className="fld">
-        <label>GPR system</label>
-        <select
-          className="sel-ctl"
-          value={a.antenna}
-          onChange={(e) => {
-            const id = e.target.value;
-            const an = ANTENNAS.find((x) => x.id === id);
-            updAcq(setModel, {
-              antenna: id,
-              frequency: an.freq,
-              txrxSep: an.sep,
-            });
-          }}
-        >
-          {ANTENNAS.map((an) => (
-            <option key={an.id} value={an.id}>
-              {an.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <NumField
-        label="Centre frequency"
-        value={a.frequency}
-        unit="GHz"
-        step={0.05}
-        onChange={(v) =>
-          updAcq(setModel, { frequency: clamp(v || 0.1, 0.05, 5) })
-        }
-      />
-      <div className="fld">
-        <label>Source waveform</label>
-        <select
-          className="sel-ctl"
-          value={a.waveform}
-          onChange={(e) => updAcq(setModel, { waveform: e.target.value })}
-        >
-          {WAVEFORMS.map((w) => (
-            <option key={w} value={w}>
-              {w}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="fld">
-        <label>Survey mode</label>
-        <div className="seg">
-          {["A-scan", "B-scan"].map((s) => (
-            <button
-              key={s}
-              className={a.surveyMode === s ? "on" : ""}
-              onClick={() => updAcq(setModel, { surveyMode: s })}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      </div>
-      <NumField
-        label="Time window"
-        value={a.timeWindow}
-        unit="ns"
-        step={0.5}
-        onChange={(v) =>
-          updAcq(setModel, { timeWindow: clamp(v || 1, 1, 200) })
-        }
-      />
-      <NumField
-        label="Trace step"
-        value={a.traceStep}
-        unit="m"
-        step={0.005}
-        onChange={(v) =>
-          updAcq(setModel, { traceStep: clamp(v || 0.005, 0.002, 0.2) })
-        }
-      />
-      <NumField
-        label="Tx–Rx separation"
-        value={a.txrxSep}
-        unit="m"
-        step={0.01}
-        onChange={(v) => updAcq(setModel, { txrxSep: clamp(v || 0, 0, 0.5) })}
-      />
-      <div className="insp-title" style={{ marginTop: 6 }}>
-        <Icon name="fit" size={15} style={{ color: "var(--ink-3)" }} />
-        <h4 style={{ fontSize: 12.5 }}>Domain</h4>
-      </div>
-      <NumField
-        label="Width"
-        value={d.width}
-        unit="m"
-        step={0.05}
-        onChange={(v) =>
-          updDomain(setModel, { width: clamp(v || 0.2, 0.2, 10) })
-        }
-      />
-      <NumField
-        label="Depth"
-        value={d.depth}
-        unit="m"
-        step={0.05}
-        onChange={(v) =>
-          updDomain(setModel, { depth: clamp(v || 0.2, 0.2, 10) })
-        }
-      />
-      <div className="fld">
-        <label>Spatial step Δx</label>
-        <div className="ctl">
-          <input
-            className="inp"
-            type="number"
-            step={0.0005}
-            value={d.dx}
-            onChange={(e) =>
-              updDomain(setModel, {
-                dx: clamp(parseFloat(e.target.value) || 0.002, 0.0005, 0.02),
-              })
-            }
-          />
-          <span className="unit">m</span>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1426,7 +1216,6 @@ Object.assign(window, {
   ModelTree,
   Dock,
   Inspector,
-  Acquisition,
   Toasts,
   ExportModal,
   DatasetFileView,
@@ -1434,6 +1223,4 @@ Object.assign(window, {
   generateGprMax,
   updLayer,
   updTarget,
-  updAcq,
-  updDomain,
 });
