@@ -68,17 +68,16 @@ function replayToMessage(ev) {
   return null;
 }
 
+// The CURRENT chat id. Chats are minted server-side (POST /users/{uid}/chats)
+// and selected in App; every HTTP dataset call reads this at call time, so
+// switching chats re-scopes all of them automatically. Null until a chat is
+// selected (the user gate / chat bootstrap is still running).
 function getSessionId() {
-  const key = "nl2sim_chat_session_id";
-  let id = localStorage.getItem(key);
-  if (!id) {
-    id =
-      window.crypto && crypto.randomUUID
-        ? crypto.randomUUID()
-        : "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-    localStorage.setItem(key, id);
-  }
-  return id;
+  return localStorage.getItem("nl2sim_current_chat_id") || null;
+}
+
+function getUserId() {
+  return localStorage.getItem("nl2sim_user_id") || null;
 }
 
 function getApiHost() {
@@ -95,10 +94,11 @@ function getApiHost() {
   return isFile || isStaticDevServer ? "127.0.0.1:8000" : window.location.host;
 }
 
-function getWsUrl(sessionId) {
-  if (window.NL2SIM_WS_URL) return window.NL2SIM_WS_URL + "/" + sessionId;
+function getWsUrl(userId, sessionId) {
+  const path = `${encodeURIComponent(userId)}/${sessionId}`;
+  if (window.NL2SIM_WS_URL) return window.NL2SIM_WS_URL + "/" + path;
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${getApiHost()}/ws/${sessionId}`;
+  return `${proto}://${getApiHost()}/ws/${path}`;
 }
 
 // HTTP base for REST calls (dataset file listing / content / zip download).
@@ -116,6 +116,12 @@ function ChatPane({
   onModelUpdate,
   onDatasetReady,
   onSimulationEvent,
+  sessionId,
+  userId,
+  chats,
+  onSelectChat,
+  onNewChat,
+  onSwitchUser,
 }) {
   const [messages, setMessages] = React.useState([
     {
@@ -185,8 +191,23 @@ function ChatPane({
   }, [messages, typing, chips]);
 
   React.useEffect(() => {
-    const sessionId = getSessionId();
-    const ws = new WebSocket(getWsUrl(sessionId));
+    if (!sessionId || !userId) return undefined;
+    // Chat switch or first mount: reset the pane, then let the new socket's
+    // session_restore repaint the selected chat's conversation.
+    setMessages([
+      {
+        id: uid("m"),
+        role: "bot",
+        html: mdToHtml("Connecting to **NL2Sim** Agent..."),
+      },
+    ]);
+    setChips([]);
+    setBusy(false);
+    setTyping(false);
+    setSending(false);
+    setStatus("connecting");
+
+    const ws = new WebSocket(getWsUrl(userId, sessionId));
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -220,9 +241,14 @@ function ChatPane({
     };
 
     return () => {
+      // Silence the handlers first: the deliberate close on a chat switch
+      // must not push a "Connection closed" bubble into the NEXT chat.
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
       ws.close();
     };
-  }, []);
+  }, [sessionId, userId]);
 
   function pushBot(html, card) {
     setMessages((m) => [...m, { id: uid("m"), role: "bot", html, card }]);
@@ -380,6 +406,14 @@ function ChatPane({
         onDoubleClick={() => setChatW(null)}
         title="Drag to resize · double-click to reset"
       />
+      <ChatStrip
+        chats={chats || []}
+        currentChatId={sessionId}
+        userId={userId}
+        onSelect={onSelectChat}
+        onNew={onNewChat}
+        onSwitchUser={onSwitchUser}
+      />
       <div className="chat-head">
         <div className="chat-av">
           <Icon name="sparkles" size={17} style={{ color: "#fff" }} />
@@ -500,5 +534,6 @@ Object.assign(window, {
   mdToHtml,
   nextChips,
   getSessionId,
+  getUserId,
   getApiHttpBase,
 });

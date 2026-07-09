@@ -59,14 +59,13 @@ for _p in (_backend_dir, _project_root, _ds_dir, _gprmax_root):
         sys.path.insert(0, _p)
 
 from agentflow_single_agent import (  # noqa: E402
-    DATASET_ROOT,
     RESAMPLE_SECTIONS,
     SAMPLING_INPUT_SECTIONS,
     SECTION_DISPLAY,
     SingleAgentSession,
     _changed_sections,
-    _dataset_dirname,
     _samples_stale,
+    _scoped_output_dir,
     dataset_generation_node,
     global_derive_node,
     global_validation_node,
@@ -87,10 +86,15 @@ from simulate import run_batch_simulation  # noqa: E402
 from db.db import (  # noqa: E402
     ExtractionSession,
     batch_insert_simulations,
+    create_chat_stub,
     delete_simulations_for_session,
+    get_chat_session,
     get_session,
+    list_chat_sessions,
     set_simulation_outputs,
+    upsert_chat_session,
 )
+from checkpointer import get_checkpointer  # noqa: E402
 from schema import (  # noqa: E402
     DatasetConfig,
     ExtractedAdvancedParams,
@@ -270,7 +274,7 @@ def _session_output_dir(session_id: str) -> Path:
     """Resolve the on-disk dataset directory for an active chat session.
     An uploaded deck zip takes precedence until the pipeline emits its own
     dataset (see upload_dataset_zip / _finish_dataset)."""
-    chat = sessions.get(session_id)
+    chat = _resolve_chat_sync(session_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Unknown session")
     if chat.uploaded_output_dir:
@@ -402,7 +406,7 @@ async def upload_dataset_zip(
     ./dataset/<zip stem>/in_files with an emission-style manifest, so the
     dataset tab, the file/outcome viewers, the forward model and the zip
     download all treat the upload exactly like a generated dataset."""
-    chat = sessions.get(session_id)
+    chat = await _resolve_chat(session_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Unknown session")
     if chat.simulating:
@@ -434,6 +438,7 @@ async def upload_dataset_zip(
         "content": _upload_summary(result),
         "result": result,
     })
+    await _persist_chat(chat)
     return result
 
 
@@ -462,8 +467,10 @@ def _import_deck_zip(chat: ChatSession, data: bytes, zip_name: str) -> dict[str,
             detail=f"No file passed the gprMax syntax check — {details}",
         )
 
+    # Same per-user/per-chat scoping as generated datasets — identical zip
+    # names across chats or users never share a directory.
     out_dir = _resolve_dataset_path(
-        f"{DATASET_ROOT}/{_dataset_dirname(Path(zip_name).stem)}"
+        _scoped_output_dir(chat.user_id, chat.session_id, Path(zip_name).stem)
     )
     in_dir = out_dir / "in_files"
     in_dir.mkdir(parents=True, exist_ok=True)
@@ -525,7 +532,7 @@ async def start_forward_model(session_id: str) -> dict[str, Any]:
     """Kick off the gprMax forward model on the session's emitted .in files
     ("Run forward model" button). Returns immediately; per-file progress and
     the final summary stream over the session's WebSocket."""
-    chat = sessions.get(session_id)
+    chat = await _resolve_chat(session_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Unknown session")
     out_dir, manifest = _session_emitted_manifest(session_id)
@@ -603,6 +610,7 @@ async def _run_forward_model(
             "result": {"succeeded": 0, "failed": 0, "skipped": 0, "total": 0,
                        "errors": [{"error": str(exc)}]},
         })
+        await _persist_chat(chat)
         return
 
     rows_updated = await asyncio.to_thread(
@@ -635,6 +643,8 @@ async def _run_forward_model(
         "content": content,
         "result": summary,
     })
+    # Runs outside any user turn — persist the summary + transcript event.
+    await _persist_chat(chat)
 
 
 def _record_simulation_outputs(
@@ -669,10 +679,20 @@ def _record_simulation_outputs(
         return 0
 
 
-@app.websocket("/ws/{session_id}")
-async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
+@app.websocket("/ws/{user_id}/{session_id}")
+async def websocket_endpoint(ws: WebSocket, user_id: str, session_id: str) -> None:
     await ws.accept()
-    state = sessions.setdefault(session_id, _new_chat_session(session_id))
+    try:
+        uid = _validate_user_id(user_id)
+    except HTTPException:
+        await ws.close(code=4400, reason="invalid user_id")
+        return
+    # In-memory chat, hydrated from the DB (restart / other browser), or brand
+    # new (client-minted id — legacy path; new chats normally come from
+    # POST /users/{uid}/chats which stubs the row first).
+    state = await _resolve_chat(session_id) or sessions.setdefault(
+        session_id, _new_chat_session(session_id, uid)
+    )
     # Route ALL pipeline output (including a turn already in flight) here.
     state.ws = ws
 
@@ -685,6 +705,9 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
                     "content": "Connected to the single-agent dataset pipeline.",
                 })
                 await _start_stage(state, "dataset_config")
+                # Persist AFTER the kickoff: the LLM thread now holds the
+                # kickoff message, so a restart never replays it.
+                await _persist_chat(state)
                 # Converge the client busy flag (a refresh during this first
                 # kickoff restores `busy: true` on the new socket).
                 await _send(state, {"type": "pipeline_busy", "busy": False})
@@ -725,43 +748,211 @@ async def websocket_endpoint(ws: WebSocket, session_id: str) -> None:
         # Only clear the routing target if a newer socket hasn't replaced it.
         if state.ws is ws:
             state.ws = None
+        # Safety-net persist; may capture a mid-turn snapshot (hydration
+        # coerces busy/simulating/phase back to a consistent state).
+        await _persist_chat(state)
 
 
-def _new_chat_session(session_id: str) -> ChatSession:
-    return ChatSession(session_id=session_id, user_id=session_id)
+def _new_chat_session(session_id: str, user_id: Optional[str] = None) -> ChatSession:
+    user_id = user_id or session_id
+    return ChatSession(
+        session_id=session_id,
+        user_id=user_id,
+        agent_session=SingleAgentSession(
+            user_id=user_id,
+            session_id=session_id,
+            checkpointer_factory=get_checkpointer,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chat persistence: every ChatSession JSON field rides in one JSONB blob so a
+# chat survives browser close AND backend restart. The LLM message history is
+# NOT here — it lives in the LangGraph Postgres checkpointer, keyed by the
+# persisted thread_id.
+# ---------------------------------------------------------------------------
+
+_PERSISTED_CHAT_FIELDS = (
+    "started", "complete", "busy", "simulating", "regenerating",
+    "post_complete_briefed", "phase", "active_purpose", "active_section",
+    "remediation_snapshot", "complete_snapshot", "viz_flags", "last_scene",
+    "transcript", "dataset_result", "simulation_result", "uploaded_output_dir",
+    "state",
+)
+
+
+def _chat_title(chat: ChatSession) -> str:
+    cfg = chat.agent_session.store.get("dataset_config") or {}
+    if cfg.get("model_basename"):
+        return str(cfg["model_basename"])[:60]
+    for ev in chat.transcript:
+        if ev.get("type") == "user_message" and ev.get("content"):
+            return str(ev["content"])[:60]
+    return "New chat"
+
+
+def _chat_row_payload(chat: ChatSession) -> dict[str, Any]:
+    blob: dict[str, Any] = {f: getattr(chat, f) for f in _PERSISTED_CHAT_FIELDS}
+    blob["regen_block_notice"] = (
+        sorted(chat.regen_block_notice) if chat.regen_block_notice else None
+    )
+    blob["store"] = chat.agent_session.store
+    blob["seen"] = chat.agent_session.seen
+    return {
+        "session_id": chat.session_id,
+        "user_id": chat.user_id,
+        "title": _chat_title(chat),
+        "thread_id": chat.agent_session.thread_id,
+        "complete": chat.complete,
+        "has_dataset": bool(chat.dataset_result),
+        "session_state": blob,
+    }
+
+
+async def _persist_chat(chat: ChatSession) -> None:
+    """Whole-row rewrite of the chat's durable state. Failure-swallowed —
+    persistence must never break the chat loop (mirrors _send_model_update)."""
+    try:
+        payload = _chat_row_payload(chat)
+        await asyncio.to_thread(upsert_chat_session, **payload)
+    except Exception:
+        logger.exception("persisting chat session %s failed", chat.session_id)
+
+
+def _chat_from_row(row) -> ChatSession:
+    """Rebuild a live ChatSession from its persisted row (backend restart)."""
+    chat = ChatSession(
+        session_id=row.id,
+        user_id=row.user_id,
+        agent_session=SingleAgentSession(
+            user_id=row.user_id,
+            session_id=row.id,
+            thread_id=row.thread_id,  # durable checkpointer resumes this thread
+            checkpointer_factory=get_checkpointer,
+        ),
+    )
+    blob = row.session_state or {}
+    for f in _PERSISTED_CHAT_FIELDS:
+        if f in blob:
+            setattr(chat, f, blob[f])
+    # In-flight flags can never be true after a process restart; a
+    # disconnect-persist may also have captured a mid-turn phase.
+    chat.busy = False
+    chat.simulating = False
+    if chat.phase in {"deterministic", "routing"}:
+        chat.phase = "complete" if chat.complete else "agent"
+    rb = blob.get("regen_block_notice")
+    chat.regen_block_notice = frozenset(rb) if rb else None
+    # Mutate the store IN PLACE — save_section/get_section are closures over
+    # this exact dict object; rebinding would orphan the tools.
+    for k, v in (blob.get("store") or {}).items():
+        chat.agent_session.store[k] = v
+    chat.agent_session.seen = int(blob.get("seen") or 0)
+    return chat
+
+
+async def _resolve_chat(session_id: str) -> Optional[ChatSession]:
+    """In-memory chat, or hydrate it from the DB, or None if unknown."""
+    chat = sessions.get(session_id)
+    if chat is not None:
+        return chat
+    try:
+        row = await asyncio.to_thread(get_chat_session, session_id)
+    except Exception:
+        logger.exception("chat hydration lookup failed for %s", session_id)
+        return None
+    if row is None:
+        return None
+    return sessions.setdefault(session_id, _chat_from_row(row))
+
+
+def _resolve_chat_sync(session_id: str) -> Optional[ChatSession]:
+    """Sync twin of _resolve_chat for endpoints running in the threadpool."""
+    chat = sessions.get(session_id)
+    if chat is not None:
+        return chat
+    try:
+        row = get_chat_session(session_id)
+    except Exception:
+        logger.exception("chat hydration lookup failed for %s", session_id)
+        return None
+    if row is None:
+        return None
+    return sessions.setdefault(session_id, _chat_from_row(row))
+
+
+_USER_ID_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
+
+
+def _validate_user_id(raw: str) -> str:
+    """Plain-string identity (no auth): trimmed, 1-64 chars, at least one
+    letter/digit. The raw value is stored in the DB (ORM parametrizes); only
+    the _dataset_dirname-sanitized form ever touches the filesystem."""
+    value = (raw or "").strip()
+    if not (1 <= len(value) <= 64) or not _USER_ID_ALNUM_RE.search(value):
+        raise HTTPException(
+            status_code=422,
+            detail="user_id must be 1-64 characters with at least one letter or digit",
+        )
+    return value
+
+
+@app.get("/users/{user_id}/chats")
+async def list_user_chats(user_id: str) -> dict[str, Any]:
+    """The DB-backed chat list — the same user id on any browser recovers it."""
+    uid = _validate_user_id(user_id)
+    chats = await asyncio.to_thread(list_chat_sessions, uid)
+    return {"chats": chats}
+
+
+@app.post("/users/{user_id}/chats")
+async def create_user_chat(user_id: str) -> dict[str, Any]:
+    """Mint a new chat: server-side session_id + thread_id, stub row inserted
+    so the chat is listable before its first WebSocket connect."""
+    uid = _validate_user_id(user_id)
+    session_id = str(uuid.uuid4())
+    thread_id = f"single-agent-{uuid.uuid4()}"
+    await asyncio.to_thread(create_chat_stub, session_id, uid, thread_id)
+    return {"session_id": session_id}
 
 
 async def _handle_user_text(chat: ChatSession, text: str) -> None:
     # Record only — the client already rendered its own message locally;
     # the transcript copy is for the reconnect replay.
     chat.transcript.append({"type": "user_message", "content": text})
-    if chat.busy:
-        await _send(chat, {
-            "type": "agent_message",
-            "content": "A pipeline step is still running. Please wait for it to finish.",
-        })
-        return
-    # "complete" still chats: the agent can answer questions about the
-    # finished dataset — only pipeline advancement stops.
-    if chat.phase not in {"agent", "complete"}:
-        await _send(chat, {
-            "type": "agent_message",
-            "content": "The pipeline is not waiting for a chat reply right now.",
-        })
-        return
-    if chat.phase == "agent" and text.lower() in {"quit", "exit"}:
-        chat.phase = "halted"
-        chat.state["halted"] = True
-        chat.state["halt_reason"] = f"user exited during {chat.active_purpose}"
-        await _send(chat, {"type": "agent_message", "content": "Pipeline halted."})
-        return
-
     try:
-        await _invoke_and_handle(chat, text)
+        if chat.busy:
+            await _send(chat, {
+                "type": "agent_message",
+                "content": "A pipeline step is still running. Please wait for it to finish.",
+            })
+            return
+        # "complete" still chats: the agent can answer questions about the
+        # finished dataset — only pipeline advancement stops.
+        if chat.phase not in {"agent", "complete"}:
+            await _send(chat, {
+                "type": "agent_message",
+                "content": "The pipeline is not waiting for a chat reply right now.",
+            })
+            return
+        if chat.phase == "agent" and text.lower() in {"quit", "exit"}:
+            chat.phase = "halted"
+            chat.state["halted"] = True
+            chat.state["halt_reason"] = f"user exited during {chat.active_purpose}"
+            await _send(chat, {"type": "agent_message", "content": "Pipeline halted."})
+            return
+
+        try:
+            await _invoke_and_handle(chat, text)
+        finally:
+            # The turn (agent + any deterministic chain) is over; converge the
+            # client's busy flag — needed when a refresh restored `busy: true`.
+            await _send(chat, {"type": "pipeline_busy", "busy": False})
     finally:
-        # The turn (agent + any deterministic chain) is over; converge the
-        # client's busy flag — needed when a refresh restored `busy: true`.
-        await _send(chat, {"type": "pipeline_busy", "busy": False})
+        # Durable write once per turn — covers collection, remediation,
+        # regeneration, _finish_dataset and the halt branch alike.
+        await _persist_chat(chat)
 
 
 async def _invoke_and_handle(chat: ChatSession, message: str) -> None:

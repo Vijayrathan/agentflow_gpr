@@ -5,6 +5,7 @@ override) and that the existing dataset endpoints serve the uploaded files
 exactly like a generated dataset.
 """
 
+import hashlib
 import io
 import json
 import sys
@@ -40,16 +41,24 @@ def _zip(files: dict[str, str]) -> bytes:
     return buf.getvalue()
 
 
+SID = "upload-session"
+# Upload dirs are scoped per user/chat: <root>/<user>/<zip stem>__<sid8>.
+SID8 = hashlib.sha1(SID.encode()).hexdigest()[:8]
+
+
 @contextmanager
 def _session(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "DATASET_ROOT", str(tmp_path))
-    sid = "upload-session"
-    chat = api._new_chat_session(sid)
-    api.sessions[sid] = chat
+    # _scoped_output_dir reads DATASET_ROOT from its own module — patch the
+    # module object api actually imported (top-level `agentflow_single_agent`,
+    # not `backend.agentflow_single_agent`).
+    sap_mod = sys.modules[api._scoped_output_dir.__module__]
+    monkeypatch.setattr(sap_mod, "DATASET_ROOT", str(tmp_path))
+    chat = api._new_chat_session(SID)
+    api.sessions[SID] = chat
     try:
-        yield sid, chat
+        yield SID, chat
     finally:
-        api.sessions.pop(sid, None)
+        api.sessions.pop(SID, None)
 
 
 def test_import_writes_valid_rejects_invalid(tmp_path, monkeypatch):
@@ -64,7 +73,8 @@ def test_import_writes_valid_rejects_invalid(tmp_path, monkeypatch):
         assert "#not_a_command" in result["rejected"][0]["error"]
 
         out_dir = Path(result["output_dir"])
-        assert out_dir == tmp_path / "My_Decks"  # sanitized zip stem
+        # Sanitized zip stem, scoped under the user dir + chat hash.
+        assert out_dir == tmp_path / SID / f"My_Decks__{SID8}"
         assert (out_dir / "in_files" / "good.in").read_text() == VALID_DECK
         assert not (out_dir / "in_files" / "bad.in").exists()
 
@@ -115,7 +125,7 @@ def test_uploaded_dir_takes_precedence_over_pipeline_config(tmp_path, monkeypatc
             "output_dir": str(pipeline_dir),
         }
         api._import_deck_zip(chat, _zip({"good.in": VALID_DECK}), "up.zip")
-        assert api._session_output_dir(sid) == tmp_path / "up"
+        assert api._session_output_dir(sid) == tmp_path / SID / f"up__{SID8}"
 
         # The pipeline emitting its own dataset clears the override.
         chat.uploaded_output_dir = None

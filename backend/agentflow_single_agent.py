@@ -62,6 +62,7 @@ Graph
 """
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -237,9 +238,28 @@ def _section_is_complete(section: str, model) -> bool:
     return True
 
 
-def _make_section_tools(store: dict):
+def _default_output_dir(basename) -> str:
+    """Legacy/CLI dataset path: keyed by the model basename only."""
+    return f"{DATASET_ROOT}/{_dataset_dirname(basename)}"
+
+
+def _scoped_output_dir(user_id: str, session_id: str, basename) -> str:
+    """Per-user/per-chat dataset path. The 8-char session hash is
+    deterministic, so re-saves within a chat keep the same directory while
+    identical basenames across chats/users never collide."""
+    sid8 = hashlib.sha1(session_id.encode()).hexdigest()[:8]
+    return (
+        f"{DATASET_ROOT}/{_dataset_dirname(user_id)}/"
+        f"{_dataset_dirname(basename)}__{sid8}"
+    )
+
+
+def _make_section_tools(store: dict, output_dir_fn=None):
     """Build the save/get tools as closures over `store`, so every session's
-    agent reads and writes its own parameters."""
+    agent reads and writes its own parameters. `output_dir_fn(basename)`
+    authors the server-fixed dataset directory (defaults to the legacy
+    basename-only path; API sessions pass a user/chat-scoped variant)."""
+    output_dir_fn = output_dir_fn or _default_output_dir
 
     @tool
     def save_section(
@@ -262,13 +282,11 @@ def _make_section_tools(store: dict):
             return json.dumps({"error": "invalid_json", "detail": str(e)})
         if section == "dataset_config" and isinstance(data, dict):
             # Server-fixed fields, never user-selected: output lands in a
-            # per-dataset directory named after the model basename
-            # (./dataset/<model_basename>), only 2D runs are supported, and
-            # OpenMP threading is a deployment concern (None -> gprMax
+            # per-dataset directory derived from the model basename (scoped
+            # per user/chat for API sessions), only 2D runs are supported,
+            # and OpenMP threading is a deployment concern (None -> gprMax
             # default). Any value the agent passes through is overridden here.
-            data["output_dir"] = (
-                f"{DATASET_ROOT}/{_dataset_dirname(data.get('model_basename'))}"
-            )
+            data["output_dir"] = output_dir_fn(data.get("model_basename"))
             data["dimensionality"] = "2D"
             data["num_threads"] = None
         try:
@@ -318,14 +336,43 @@ class SingleAgentSession:
     flows. The CLI uses a module-level default session; the WebSocket API
     (`backend/api.py`) creates one per chat session."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        checkpointer_factory=None,
+    ):
         self.store: dict[str, Optional[dict]] = {s: None for s in SECTION_SCHEMA}
-        self.thread_config = {"configurable": {"thread_id": f"single-agent-{uuid.uuid4()}"}}
+        # A persisted thread_id (chat hydration after a backend restart) makes
+        # the durable checkpointer resume the SAME conversation; without one a
+        # fresh thread is minted.
+        self.thread_config = {
+            "configurable": {"thread_id": thread_id or f"single-agent-{uuid.uuid4()}"}
+        }
         # Messages accumulate on the one thread for the whole run; consumers
         # track what they have already relayed via this counter.
         self.seen = 0
         self._agent = None
-        self.save_section, self.get_section = _make_section_tools(self.store)
+        # None -> InMemorySaver (CLI + key-free tests). The API passes the
+        # shared Postgres checkpointer factory for durable LLM resume.
+        self._checkpointer_factory = checkpointer_factory
+        # API sessions scope the dataset dir per user/chat so identical
+        # basenames across chats or users never share a directory; the CLI
+        # keeps the legacy ./dataset/<basename> path.
+        output_dir_fn = None
+        if user_id and session_id:
+            def output_dir_fn(basename, _u=user_id, _s=session_id):
+                return _scoped_output_dir(_u, _s, basename)
+
+        self.save_section, self.get_section = _make_section_tools(
+            self.store, output_dir_fn
+        )
+
+    @property
+    def thread_id(self) -> str:
+        return self.thread_config["configurable"]["thread_id"]
 
     def agent(self):
         """Build the agent on first use so the module imports (and the graph
@@ -349,11 +396,16 @@ class SingleAgentSession:
                 "tools": [rag_search],
             }
 
+            checkpointer = (
+                self._checkpointer_factory()
+                if self._checkpointer_factory is not None
+                else InMemorySaver()
+            )
             self._agent = create_deep_agent(
                 model=ChatOpenAI(model="gpt-4.1-mini", api_key=os.getenv("OPENAI_API_KEY")),
                 subagents=[rag_subagent],
                 system_prompt=SINGLE_AGENT_SYSTEM_PROMPT,
-                checkpointer=InMemorySaver(),
+                checkpointer=checkpointer,
                 tools=[self.save_section, self.get_section],
             )
         return self._agent

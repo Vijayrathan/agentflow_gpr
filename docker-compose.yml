@@ -9,6 +9,8 @@ services:
       POSTGRES_DB: my_app
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
 
   qdrant:
     image: qdrant/qdrant:v1.17.0
@@ -22,3 +24,4 @@ services:
 
 volumes:
   qdrant_storage:
+  pgdata:

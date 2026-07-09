@@ -22,6 +22,35 @@ function App() {
     modelRef.current = model;
   }, [model]);
 
+  // ── Identity + per-user chat list (multi-chat, DB-backed) ──────────────
+  // user id: plain string identity (no auth), remembered locally; the chat
+  // LIST always comes from the backend so the same id on another browser
+  // recovers everything.
+  const [userId, setUserId] = useState(() =>
+    localStorage.getItem("nl2sim_user_id"),
+  );
+  const [chats, setChats] = useState([]);
+  const [currentChatId, setCurrentChatId] = useState(() =>
+    localStorage.getItem("nl2sim_current_chat_id"),
+  );
+
+  const fetchChats = useCallback(async (uid) => {
+    const u = uid || localStorage.getItem("nl2sim_user_id");
+    if (!u) return [];
+    try {
+      const res = await fetch(
+        `${window.getApiHttpBase()}/users/${encodeURIComponent(u)}/chats`,
+      );
+      if (!res.ok) return [];
+      const body = await res.json();
+      const list = body.chats || [];
+      setChats(list);
+      return list;
+    } catch (e) {
+      return [];
+    }
+  }, []);
+
   const [selected, setSelected] = useState(null);
   const [activeModel, setActiveModel] = useState("gprmax");
 
@@ -76,9 +105,13 @@ function App() {
     try {
       const base = window.getApiHttpBase();
       const sid = window.getSessionId();
+      if (!sid) return;
       const res = await fetch(`${base}/datasets/${sid}/outputs`);
+      // a chat switch mid-flight: never write another chat's outputs here
+      if (sid !== window.getSessionId()) return;
       if (!res.ok) return;
       const body = await res.json();
+      if (sid !== window.getSessionId()) return;
       setOutFiles(new Set(body.files || []));
     } catch (e) {
       /* no outputs yet / backend unreachable — keep whatever we have */
@@ -94,8 +127,10 @@ function App() {
       setOutFiles(new Set());
       setOutcomeView(null);
       if (files.length) refreshOutputs();
+      // the chat's title may have changed (basename now known)
+      fetchChats();
     },
-    [refreshOutputs],
+    [refreshOutputs, fetchChats],
   );
 
   // Upload a zip of gprMax .in files as this session's dataset. The backend
@@ -111,6 +146,7 @@ function App() {
       try {
         const base = window.getApiHttpBase();
         const sid = window.getSessionId();
+        if (!sid) throw new Error("no chat selected");
         const res = await fetch(
           `${base}/datasets/${sid}/upload?filename=${encodeURIComponent(file.name)}`,
           {
@@ -125,6 +161,8 @@ function App() {
             typeof body.detail === "string" ? body.detail : "HTTP " + res.status,
           );
         }
+        // switched chats while uploading — the result belongs to the old one
+        if (sid !== window.getSessionId()) return;
         const rejected = body.rejected || [];
         toast(
           rejected.length
@@ -153,8 +191,10 @@ function App() {
       const res = await fetch(
         `${base}/datasets/${sid}/files/${encodeURIComponent(filename)}`,
       );
+      if (sid !== window.getSessionId()) return; // switched chats mid-fetch
       if (!res.ok) throw new Error("HTTP " + res.status);
       const text = await res.text();
+      if (sid !== window.getSessionId()) return;
       setDatasetView({ filename, content: text, loading: false });
     } catch (e) {
       setDatasetView({
@@ -175,8 +215,10 @@ function App() {
       const res = await fetch(
         `${base}/datasets/${sid}/outputs/${encodeURIComponent(filename)}`,
       );
+      if (sid !== window.getSessionId()) return; // switched chats mid-fetch
       if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
+      if (sid !== window.getSessionId()) return;
       setOutcomeView({ filename, data, loading: false });
     } catch (e) {
       setOutcomeView({
@@ -210,6 +252,108 @@ function App() {
     setToasts((t) => [...t, { id, msg, kind }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);
   }, []);
+
+  // ── Chat switching ──────────────────────────────────────────────────────
+  // One reset for everything server-derived; the selected chat's
+  // session_restore + model_update then repaint the pane, tab and canvas.
+  const resetForChatSwitch = useCallback(() => {
+    setScene(null);
+    setModel(makeInitialModel());
+    setDatasetFiles([]);
+    setDatasetView(null);
+    setOutcomeView(null);
+    setOutFiles(new Set());
+    setSim(null);
+    setSolving(false);
+    setProgress(0);
+    setSelected(null);
+    setRailTab("model");
+    setVizTab("overview");
+    setSampleIdx(0);
+  }, []);
+
+  const selectChat = useCallback(
+    (id) => {
+      if (!id || id === localStorage.getItem("nl2sim_current_chat_id")) {
+        setCurrentChatId(id || null);
+        return;
+      }
+      localStorage.setItem("nl2sim_current_chat_id", id);
+      resetForChatSwitch();
+      setCurrentChatId(id);
+    },
+    [resetForChatSwitch],
+  );
+
+  const newChat = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetch(
+        `${window.getApiHttpBase()}/users/${encodeURIComponent(userId)}/chats`,
+        { method: "POST" },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "HTTP " + res.status);
+      await fetchChats(userId);
+      selectChat(body.session_id);
+    } catch (e) {
+      toast("Could not create a new chat — " + (e.message || e), "info");
+    }
+  }, [userId, fetchChats, selectChat, toast]);
+
+  const switchUser = useCallback(() => {
+    localStorage.removeItem("nl2sim_user_id");
+    localStorage.removeItem("nl2sim_current_chat_id");
+    resetForChatSwitch();
+    setChats([]);
+    setCurrentChatId(null);
+    setUserId(null);
+  }, [resetForChatSwitch]);
+
+  const onUserSubmit = useCallback((uid_) => {
+    localStorage.setItem("nl2sim_user_id", uid_);
+    // Never carry another user's chat pointer across the gate.
+    localStorage.removeItem("nl2sim_current_chat_id");
+    setCurrentChatId(null);
+    setUserId(uid_);
+  }, []);
+
+  // Bootstrap per user: load the chat list, then keep the stored pointer if
+  // it belongs to this user, else most-recent chat, else mint the first one.
+  useEffect(() => {
+    if (!userId) return undefined;
+    let cancelled = false;
+    (async () => {
+      const list = await fetchChats(userId);
+      if (cancelled) return;
+      const stored = localStorage.getItem("nl2sim_current_chat_id");
+      if (stored && list.some((c) => c.id === stored)) {
+        setCurrentChatId(stored);
+        return;
+      }
+      if (list.length) {
+        selectChat(list[0].id);
+        return;
+      }
+      try {
+        const res = await fetch(
+          `${window.getApiHttpBase()}/users/${encodeURIComponent(userId)}/chats`,
+          { method: "POST" },
+        );
+        const body = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok && body.session_id) {
+          await fetchChats(userId);
+          selectChat(body.session_id);
+        }
+      } catch (e) {
+        /* backend unreachable — the gate stays open, retry by re-submitting */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   // selecting an item opens inspector
   const onSelect = useCallback((sel) => {
@@ -245,6 +389,7 @@ function App() {
     try {
       const base = window.getApiHttpBase();
       const sid = window.getSessionId();
+      if (!sid) throw new Error("no chat selected");
       const res = await fetch(`${base}/datasets/${sid}/simulate`, {
         method: "POST",
       });
@@ -661,6 +806,12 @@ function App() {
             setChatOpen(typeof v === "function" ? !v(!chatOpen) : !v)
           }
           toast={toast}
+          sessionId={currentChatId}
+          userId={userId}
+          chats={chats}
+          onSelectChat={selectChat}
+          onNewChat={newChat}
+          onSwitchUser={switchUser}
         />
       </div>
 
@@ -702,6 +853,7 @@ function App() {
         />
       )}
       <Toasts items={toasts} />
+      {!userId && <UserGate onSubmit={onUserSubmit} />}
     </div>
   );
 }

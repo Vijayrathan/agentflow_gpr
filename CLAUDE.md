@@ -34,7 +34,7 @@ pytest backend/tests/test_api_finalize.py -v
 pytest backend/tests/test_api_finalize.py::test_name -v
 ```
 
-**Environment variables** (`.env`): `OPENAI_API_KEY`, `HF_TOKEN`, `GPR_WORKSPACE_DIR` (default `../gpr_workspace`).
+**Environment variables** (`.env`): `OPENAI_API_KEY`, `HF_TOKEN`, `GPR_WORKSPACE_DIR` (default `../gpr_workspace`), `DATABASE_URL` (optional — overrides the docker-compose Postgres default in `db/db.py` and Alembic).
 
 ## Architecture
 
@@ -50,7 +50,7 @@ This is the single most important design constraint. Violating it is never accep
 
 | File | Role |
 |------|------|
-| `api.py` | FastAPI server; WebSocket endpoint (`/ws/{sessionId}`) bridges frontend to the **single-agent** pipeline (one isolated `SingleAgentSession` per chat) |
+| `api.py` | FastAPI server; WebSocket endpoint (`/ws/{userId}/{sessionId}`) bridges frontend to the **single-agent** pipeline (one isolated `SingleAgentSession` per chat; chats persist per user — see Multi-chat persistence) |
 | `agentflow_single_agent.py` | **ACTIVE** extraction pipeline: ONE deep agent on ONE thread collects all six sections; also the CLI entry (`python backend/agentflow_single_agent.py`) |
 | `single_agent_prompts.py` | Slim system prompt + per-section `SECTION_KICKOFF` injection messages + remediation message builders for the single agent |
 | `agentflow_langgraph.py` | LEGACY multi-agent LangGraph pipeline (6 agents + parameter server). No longer imported by `api.py`; kept as CLI reference |
@@ -124,16 +124,21 @@ Executed after extraction, in strict order:
 6. `target_placement.py` — Per-sample target validation; redraw then drop if infeasible
 7. `emit.py` — Generate `.in` files (pure string assembly, no derivation)
 
-**Per-dataset directory layout**: `output_dir` is server-fixed in `save_section` to
-`./dataset/<model_basename>` (basename sanitized via `_dataset_dirname` — path
-separators/dots never survive), so each dataset's manifests, `in_files/` and
-`out_files/` live in their own directory keyed by the model basename; multiple
-datasets coexist side by side. Everything downstream (manifests, emission,
-simulation, viz projection, `/datasets/{sid}` endpoints, DB rows) resolves paths
-from `cfg.output_dir` — never hardcode `./dataset`. A mid-pipeline basename edit
+**Per-dataset directory layout**: `output_dir` is server-fixed in `save_section`.
+API sessions author `./dataset/<user_id>/<model_basename>__<sid8>` via
+`_scoped_output_dir` (`sid8` = first 8 chars of sha1(session_id) — deterministic,
+so re-saves within a chat never move the dataset, while identical basenames
+across chats/users never collide); the CLI keeps the legacy
+`./dataset/<model_basename>` path (`_default_output_dir`). Both segments are
+sanitized via `_dataset_dirname` — path separators/dots never survive, so a
+malicious user_id cannot traverse. Uploaded zips get the same scoping in
+`_import_deck_zip`. Everything downstream (manifests, emission, simulation, viz
+projection, `/datasets/{sid}` endpoints, DB rows) resolves paths from
+`cfg.output_dir` — never hardcode `./dataset`. A mid-pipeline basename edit
 moves `output_dir`, which is safe because `dataset_config` is a sampling input:
 staleness detection re-runs `layer_sampling`, rewriting all manifests into the
-new directory before the derive chain reads them.
+new directory before the derive chain reads them. Pre-scoping
+`./dataset/<basename>` dirs are orphaned legacy — safe to delete manually.
 
 ### Frontend (`frontend/`)
 
@@ -279,8 +284,49 @@ a started session replays `session_restore` (full transcript + `dataset` result 
 rebuilds the message list via `replayToMessage` (must mirror `handleServerEvent`
 rendering) and re-hydrates the dataset tab through `onDatasetReady`. `user_message`
 events are record-only (never echoed back). Every top-level turn ends with a
-`pipeline_busy: false` so a restored `busy: true` always converges. Sessions live
-in-memory only — an API-server restart still starts a fresh pipeline.
+`pipeline_busy: false` so a restored `busy: true` always converges.
+
+**Multi-chat persistence** (user_id identity, no auth): chats belong to a typed
+`user_id` (1–64 chars, ≥1 alnum — `_validate_user_id`; the raw value goes to the
+DB, only the sanitized form touches the filesystem). The WS route is
+`/ws/{user_id}/{session_id}`; `GET/POST /users/{user_id}/chats` list and mint
+chats (POST creates the `chat_sessions` stub row with a server-minted
+session_id + thread_id, so the chat is listable before its first connect).
+Every ChatSession JSON field rides in one JSONB blob (`chat_sessions.session_state`,
+`_PERSISTED_CHAT_FIELDS` + store + seen; promoted columns `title`/`complete`/
+`has_dataset`/`updated_at` exist only for the list query). Written failure-swallowed
+by `_persist_chat` at: end of every `_handle_user_text` turn, post-kickoff on
+first connect (MUST be after `_start_stage`, or a restart would replay the
+kickoff into a thread that already has it), after upload, after a forward-model
+run, and on WS disconnect (safety net — may capture a mid-turn snapshot).
+The LLM message history is NOT in the blob: it lives in LangGraph's
+`langgraph-checkpoint-postgres` tables (shared sync `PostgresSaver` singleton,
+`backend/checkpointer.py`, psycopg3 pool; `saver.setup()` manages its own
+schema — deliberately outside Alembic), keyed by the persisted `thread_id` —
+that's what makes the agent resume its exact conversation after a restart.
+Hydration (`_resolve_chat`/`_resolve_chat_sync` — used by the WS route AND all
+dataset endpoints, hydrate-or-404): rebuild `ChatSession` +
+`SingleAgentSession(thread_id=row.thread_id, checkpointer_factory=get_checkpointer)`,
+apply the blob, coerce in-flight state (`busy`/`simulating` → False, phase
+`deterministic|routing` → `complete`/`agent`; `regenerating` deliberately
+survives), and mutate `agent_session.store` IN PLACE — the save/get tools are
+closures over that exact dict. `SingleAgentSession()` without a factory keeps
+`InMemorySaver` (CLI + key-free tests never touch Postgres; the agent stays
+lazy). A server crash mid-turn loses that turn's session-side output; the LLM
+checkpoint may be one turn ahead — the next invoke relays the orphaned AI texts
+once (benign). Single-worker assumption: the in-memory `sessions` dict + WS
+affinity mean ONE uvicorn worker. `DATABASE_URL` env var overrides the
+hardcoded default in `db/db.py` and `db/alembic/env.py`; docker-compose mounts
+the `pgdata` volume so Postgres survives container recreation. Frontend:
+localStorage keys `nl2sim_user_id` + `nl2sim_current_chat_id` (chat LIST always
+from the GET endpoint, never localStorage); `UserGate`/`ChatStrip` in
+`frontend/app/chats.jsx`; `getSessionId()` returns the current chat pointer so
+every HTTP call re-scopes on switch; the ChatPane WS effect re-keys on
+`[sessionId, userId]` and `session_restore` repaints the switched-to chat;
+`resetForChatSwitch()` + stale-fetch guards in `app.jsx` keep one chat's
+responses out of another's UI. Chat deletion is deferred (no endpoint/UI).
+Key-free tests: `backend/tests/test_chat_persistence.py`, `test_chats_api.py`,
+`test_dataset_scoping.py`.
 
 **Post-completion chat** (edit → regenerate, restart refused): after
 `dataset_ready` the session stays conversational, and each agent turn is diffed

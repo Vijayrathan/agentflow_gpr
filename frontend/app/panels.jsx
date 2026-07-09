@@ -102,6 +102,10 @@ function MenuBar(props) {
     }
     const base = window.getApiHttpBase ? window.getApiHttpBase() : "";
     const sid = window.getSessionId ? window.getSessionId() : "";
+    if (!sid) {
+      toast("Select a chat first", "info");
+      return;
+    }
     const a = document.createElement("a");
     a.href = `${base}/datasets/${sid}/download`;
     a.rel = "noopener";

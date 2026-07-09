@@ -7,6 +7,7 @@ Provides:
 - CRUD helpers: create sessions, batch-insert simulations, update signals, bulk-read for training
 """
 
+import os
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
@@ -30,7 +31,16 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 # Database connection
 # ---------------------------------------------------------------------------
 
-DATABASE_URL = "postgresql+psycopg2://myuser:mypassword@localhost:5432/my_app"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://myuser:mypassword@localhost:5432/my_app",
+)
+
+
+def pg_dsn() -> str:
+    """The plain-libpq form of DATABASE_URL (no SQLAlchemy driver suffix) —
+    used by psycopg3 consumers like the LangGraph Postgres checkpointer."""
+    return DATABASE_URL.replace("postgresql+psycopg2://", "postgresql://")
 
 engine = create_engine(
     DATABASE_URL,
@@ -240,6 +250,45 @@ class Simulation(SQLModel, table=True):
     )
 
 
+class ChatSessionRow(SQLModel, table=True):
+    """One row = one chat (= one simulation). Persists the whole WebSocket
+    ChatSession as a JSONB blob so a chat survives browser close and backend
+    restart; the promoted columns exist only for the per-user chat list.
+
+    The LLM message history is NOT in the blob — it lives in the LangGraph
+    Postgres checkpointer tables, keyed by `thread_id`.
+    """
+
+    __tablename__ = "chat_sessions"
+
+    # Raw session-id string (frontend-minted uuid or legacy "session-..." form).
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    user_id: str = Field(sa_column=Column(Text, nullable=False))
+    title: str = Field(default="New chat", sa_column=Column(Text, nullable=False))
+    thread_id: str = Field(sa_column=Column(Text, nullable=False))
+    complete: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
+    )
+    has_dataset: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=func.now()),
+    )
+    session_state: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    )
+
+
+Index("ix_chat_sessions_user_updated", ChatSessionRow.user_id, ChatSessionRow.updated_at.desc())  # type: ignore[union-attr]
+
+
 # ---------------------------------------------------------------------------
 # Table creation (for use outside Alembic, e.g. quick dev setup)
 # ---------------------------------------------------------------------------
@@ -395,6 +444,84 @@ def delete_simulations_for_session(session_id: _uuid.UUID) -> int:
             db.delete(sim)
         db.commit()
         return len(rows)
+
+
+# ── Chat session persistence ───────────────────────────────────────────────
+
+def get_chat_session(session_id: str) -> Optional[ChatSessionRow]:
+    """Fetch one chat row (full blob) for hydration; None if unknown."""
+    with get_session() as db:
+        return db.get(ChatSessionRow, session_id)
+
+
+def list_chat_sessions(user_id: str) -> List[dict]:
+    """The per-user chat list — promoted columns only, newest first."""
+    from sqlmodel import select
+
+    with get_session() as db:
+        rows = db.exec(
+            select(
+                ChatSessionRow.id,
+                ChatSessionRow.title,
+                ChatSessionRow.created_at,
+                ChatSessionRow.updated_at,
+                ChatSessionRow.complete,
+                ChatSessionRow.has_dataset,
+            )
+            .where(ChatSessionRow.user_id == user_id)
+            .order_by(ChatSessionRow.updated_at.desc())  # type: ignore[union-attr]
+        ).all()
+        return [
+            {
+                "id": r[0],
+                "title": r[1],
+                "created_at": r[2].isoformat() if r[2] else None,
+                "updated_at": r[3].isoformat() if r[3] else None,
+                "complete": r[4],
+                "has_dataset": r[5],
+            }
+            for r in rows
+        ]
+
+
+def create_chat_stub(session_id: str, user_id: str, thread_id: str) -> None:
+    """Insert the empty row for a freshly minted chat (visible in the list
+    before its first WebSocket connect)."""
+    with get_session() as db:
+        db.add(ChatSessionRow(id=session_id, user_id=user_id, thread_id=thread_id))
+        db.commit()
+
+
+def upsert_chat_session(
+    session_id: str,
+    user_id: str,
+    title: str,
+    thread_id: str,
+    complete: bool,
+    has_dataset: bool,
+    session_state: Dict[str, Any],
+) -> None:
+    """Whole-row rewrite of a chat's persisted state (once per turn)."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    values = {
+        "id": session_id,
+        "user_id": user_id,
+        "title": title,
+        "thread_id": thread_id,
+        "complete": complete,
+        "has_dataset": has_dataset,
+        "session_state": session_state,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    stmt = pg_insert(ChatSessionRow).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[ChatSessionRow.id],
+        set_={k: v for k, v in values.items() if k != "id"},
+    )
+    with get_session() as db:
+        db.exec(stmt)  # type: ignore[arg-type]
+        db.commit()
 
 
 def get_completed_simulations(
