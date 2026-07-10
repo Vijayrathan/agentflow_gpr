@@ -11,15 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-# Disable transformers' *advisory* warnings only — specifically the
-# XLMRobertaTokenizerFast "use the `__call__` method instead of encode + pad"
-# advice (emitted via logger.warning_advice per BGE-M3 encode batch). That
-# encode-then-pad is intentional inside FlagEmbedding's m3.py: it tokenizes
-# without padding, length-sorts the batches to minimize padding, then pads — a
-# speed optimization we don't control and shouldn't undo. This toggle silences
-# just that advisory category while leaving genuine warnings/errors visible.
-# Must be set BEFORE transformers is imported — FlagEmbedding pulls it in below.
-os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+# Quiet transformers' WARNING-level chatter (e.g. the XLMRobertaTokenizerFast
+# "use the `__call__` method" advice emitted per BGE-M3 encode batch). Must be
+# set BEFORE transformers is imported — FlagEmbedding pulls it in below.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 # 1. Parsing & Chunking Libraries
 #    MinerU (PDF OCR parsing) is imported lazily inside parse_and_chunk so that

@@ -43,3 +43,147 @@ Layer 3 name=lower_silty_clay_loam; thickness_m_min=0.35; thickness_m_max=0.45; 
 waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=750000000; waveform_name=ricker_750mhz_peak
 
 antenna_kind=hertzian_dipole; antenna_axis=x; tx_rx_offset_m=0.10; resistance=null
+
+
+
+
+
+
+Connecting to NL2Sim Agent...
+Connected to the single-agent dataset pipeline.
+Stage: Dataset Configuration
+How many data samples would you like to generate? (This is the number of input files, must be greater than 0.)
+YOU
+10
+What base name would you like to use for the model and output filenames? The default is "soil_sample".
+YOU
+diff_1
+How many in-plane PML absorbing boundary cells should be used? The default is 10.
+YOU
+default for all in this section
+Dataset config set: 10 samples, model base name "diff_1", and all other parameters at their defaults.
+Dataset Configuration complete.
+Stage: Layer Extraction
+How many soil layers would you like to define?
+YOU
+3
+For layer 1, please provide the thickness range in meters: minimum thickness?
+YOU
+0.5-0.7
+Please give the minimum and maximum thickness separately (in meters) for layer 1. What are the min and max?
+YOU
+0.5 min, 0.7 max
+For layer 1, what is the minimum and maximum sand percentage?
+YOU
+30-45
+For layer 1, please provide the minimum and maximum clay percentage.
+YOU
+55-70
+The sum of minimum sand and clay percentages must be no more than 100%. For layer 1, your clay minimum is 55%, sand minimum is 30%, total 85% min which is allowed, but your maximum clay is 70% which, with 45% max sand, sums to 115% max and exceeds 100%.
+
+Please provide clay max for layer 1 that, when added to sand max 45%, does not exceed 100%.
+YOU
+reduce max to 60
+For layer 1, please provide the minimum and maximum volumetric water content (theta_v), between 0.0 and 1.0.
+YOU
+0.2-0.6
+For layer 1, please provide the minimum and maximum bulk density (g/cm³).
+YOU
+2.82 -2.92
+Bulk density must be less than particle density, and typical bulk density values range roughly from 1.1 to 1.8 g/cm³. Your bulk density of 2.82 to 2.92 g/cm³ is too high. Please provide bulk_density values lower than particle density and within typical ranges. What are bulk_density_gcm3_min and max for layer 1?
+YOU
+2.90
+Please provide both minimum and maximum bulk density for layer 1, each less than your particle density minimum.
+Also, typical bulk densities for soil layers range between about 1.1 and 1.8 g/cm³, so please provide values within that range and less than the particle density minimum (which you should also provide).
+YOU
+1.7-1.8
+For layer 1, please provide the minimum and maximum particle density (g/cm³). The particle density must be greater than the bulk density max (1.8 g/cm³) and typically around 2.66 g/cm³. What are your values?
+YOU
+2.4-2.6
+For layer 2, please provide the thickness range in meters: minimum thickness?
+YOU
+0.8-1.2
+For layer 2, please provide the minimum and maximum sand percentage.
+YOU
+20-40
+For layer 2, please provide the minimum and maximum clay percentage.
+YOU
+40-60
+The sum of minimum sand and clay percentages must be no more than 100%. For layer 2, your clay minimum is 40%, sand minimum is 20%, total 60% minimum which is allowed, but your maximum clay is 60%, which together with 40% sand max sums to 100%, which is acceptable.
+
+Please confirm this is okay or provide adjusted clay max for layer 2.
+YOU
+okay
+For layer 2, please provide the minimum and maximum volumetric water content (theta_v), between 0.0 and 1.0.
+YOU
+0.8-0.9
+The maximum volumetric water content must not exceed the loosest porosity, calculated as 1 - (bulk_density_min / particle_density_max). We do not yet have bulk and particle densities for layer 2. Please provide the minimum and maximum bulk density (g/cm³) for layer 2.
+YOU
+1.2-1.5
+For layer 2, please provide the minimum and maximum particle density (g/cm³). The particle density must be greater than the bulk density max (1.5 g/cm³). What are your values?
+YOU
+2.1-2.4
+For layer 3, please provide the thickness range in meters: minimum thickness?
+YOU
+1.2 - 1.6
+For layer 3, please provide the minimum and maximum sand percentage.
+YOU
+50-70
+The minimum sand plus minimum clay percentage must be ≤ 100%. For layer 3, you gave sand min 50%, but no clay yet. Please provide the minimum and maximum clay percentages for layer 3.
+YOU
+5-15
+For layer 3, please provide the minimum and maximum volumetric water content (theta_v), between 0.0 and 1.0.
+YOU
+0.1-0.3
+For layer 3, please provide the minimum and maximum bulk density (g/cm³).
+YOU
+0.9-1.1
+For layer 3, please provide the minimum and maximum particle density (g/cm³). The particle density must be greater than the bulk density max (1.1 g/cm³). What are your values?
+YOU
+1.9-2.5
+The maximum volumetric water content for layer 2 (0.9) exceeds the loosest porosity limit of about 0.5, calculated from bulk_density_min (1.2) and particle_density_max (2.4). Water content cannot exceed the pore space.
+
+Please provide a lower theta_v_max for layer 2, up to about 0.5.
+YOU
+0.4
+The minimum volumetric water content for layer 2 (0.8) cannot be greater than its maximum (0.4). Please provide a consistent theta_v_min and theta_v_max for layer 2 where min ≤ max.
+YOU
+0.2
+Three soil layers defined with the thickness, sand, clay, moisture, and densities ranges you provided.
+Layer Extraction complete.
+Stage: Buried-Target Range Extraction
+Do you want to include any buried objects in the dataset? If yes, would you like to start with cylinders or boxes? If none, please say so.
+YOU
+yes
+Would you like to define a cylinder or a box buried object first?
+YOU
+yes
+Please specify if you want to define a cylinder or a box buried object first.
+YOU
+cylinder
+For the cylinder, please provide the name for this object (or say skip if you want the default).
+YOU
+tennis-ball
+For the 'tennis-ball' cylinder, please provide the horizontal offset range of the object center from the survey center (x_offset_min_m and x_offset_max_m in meters).
+YOU
+what is the range
+The x_offset range is any horizontal distance the object's center can have from the survey center (0 means directly under the antenna midpoint). You need to specify minimum and maximum values in meters (can be negative for left, positive for right).
+
+For example, you could say: min -0.5 m, max 0.5 m to have it vary within half a meter left or right. What range would you like?
+YOU
+-0.2-0.2
+Please confirm the x_offset_min_m is -0.2 m and x_offset_max_m is 0.2 m for the tennis-ball cylinder?
+YOU
+yep
+For the tennis-ball cylinder, please provide the depth range of the object's center below the ground surface (depth_min_m and depth_max_m in meters).
+YOU
+0.5-1.5
+For the tennis-ball cylinder, please provide the radius range in meters (radius_min_m and radius_max_m). The minimum radius must be greater than 0.
+YOU
+0.8
+Please specify both minimum and maximum radius in meters for the tennis-ball cylinder (min and max, both > 0). For example: min 0.8 m, max 0.8 m for a fixed radius.
+YOU
+0.8 - 1.2
+Cylinder object named "tennis-ball" defined with x offset -0.2 to 0.2 m, depth 0.5 to 1.5 m, radius 0.8 to 1.2 m. No boxes included.
+Buried-Target Range Extraction complete.
+Stage: Layer + Target Sampling

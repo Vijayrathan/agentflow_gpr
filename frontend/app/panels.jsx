@@ -280,10 +280,6 @@ function MenuBar(props) {
       </div>
 
       <div className="spacer"></div>
-
-      <div className="statuschip" title="Solver engine">
-        <span className="dot"></span>gprMax&nbsp;<b>v3.1</b>&nbsp;ready
-      </div>
     </header>
   );
 }
@@ -574,30 +570,30 @@ function ModelTree({
 /* ============================================================
    DOCK (inspector)
    ============================================================ */
-function NumField({ label, value, unit, step, onChange, disabled }) {
+function ReadField({ label, value, unit }) {
+  const displayValue = value ?? "not available";
   return (
     <div className="fld">
       <label>{label}</label>
-      <div className="ctl">
-        <input
-          className="inp"
-          type="number"
-          step={step || 0.01}
-          value={value}
-          disabled={disabled}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
-        />
-        {unit && <span className="unit">{unit}</span>}
+      <div className="ctl read-ctl">
+        <div className="readout">{displayValue}</div>
+        {unit && displayValue !== "not available" && (
+          <span className="unit">{unit}</span>
+        )}
       </div>
     </div>
   );
 }
 
+function formatReadNumber(value, digits = 2) {
+  return value == null || Number.isNaN(Number(value))
+    ? "not available"
+    : fmt(Number(value), digits);
+}
+
 function Dock({
   model,
-  setModel,
   selected,
-  onSelect,
   collapsed,
   setCollapsed,
   height,
@@ -620,7 +616,7 @@ function Dock({
             setCollapsed(false);
           }}
         >
-          <Icon name="edit" className="ic" />
+          <Icon name="info" className="ic" />
           Inspector
         </button>
         <button
@@ -637,120 +633,69 @@ function Dock({
       </div>
       {!collapsed && (
         <div className="dock-body">
-          <Inspector
-            layer={layer}
-            target={target}
-            model={model}
-            setModel={setModel}
-            onSelect={onSelect}
-          />
+          <Inspector layer={layer} target={target} />
         </div>
       )}
     </div>
   );
 }
 
-function Inspector({ layer, target, model, setModel, onSelect }) {
+function Inspector({ layer, target }) {
   if (layer) {
-    const mat = MATERIALS[layer.material];
+    const mat = MATERIALS[layer.material] || {
+      color: "#ccc",
+      label: layer.material,
+    };
+    const velocity =
+      layer.epsilon == null || Number(layer.epsilon) <= 0
+        ? null
+        : 0.3 / Math.sqrt(Number(layer.epsilon));
     return (
       <div className="insp">
         <div className="insp-title">
           <span className="sw" style={{ background: mat.color }}></span>
           <h4>{layer.name}</h4>
           <span className="badge">soil layer</span>
-          <button
-            className="del"
-            onClick={() => {
-              setModel((m) => ({
-                ...m,
-                layers: m.layers.filter((l) => l.id !== layer.id),
-              }));
-              onSelect(null);
-            }}
-          >
-            <Icon name="trash" size={13} />
-            Delete
-          </button>
         </div>
-        <div className="fld">
-          <label>Name</label>
-          <input
-            className="inp"
-            style={{ fontFamily: "var(--sans)" }}
-            value={layer.name}
-            onChange={(e) =>
-              updLayer(setModel, layer.id, { name: e.target.value })
-            }
-          />
-        </div>
-        <div className="fld">
-          <label>Material</label>
-          <select
-            className="sel-ctl"
-            value={layer.material}
-            onChange={(e) => {
-              const k = e.target.value;
-              const mm = MATERIALS[k];
-              updLayer(setModel, layer.id, {
-                material: k,
-                epsilon: mm.epsilon,
-                sigma: mm.sigma,
-                name: mm.label.split(" / ")[0],
-              });
-            }}
-          >
-            {MAT_KEYS.map((k) => (
-              <option key={k} value={k}>
-                {MATERIALS[k].label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <NumField
+        <ReadField label="Name" value={layer.name} />
+        <ReadField label="Material" value={mat.label || layer.material} />
+        <ReadField
           label="Thickness"
-          value={layer.thickness}
+          value={formatReadNumber(layer.thickness, 3)}
           unit="m"
-          step={0.01}
-          onChange={(v) =>
-            updLayer(setModel, layer.id, {
-              thickness: clamp(v || 0.01, 0.01, 5),
-            })
-          }
         />
-        <NumField
+        {(layer.thicknessMin != null || layer.thicknessMax != null) && (
+          <ReadField
+            label="Thickness range"
+            value={`${formatReadNumber(layer.thicknessMin, 3)} - ${formatReadNumber(layer.thicknessMax, 3)}`}
+            unit="m"
+          />
+        )}
+        <ReadField
           label="Permittivity εr"
-          value={layer.epsilon}
-          step={0.5}
-          onChange={(v) =>
-            updLayer(setModel, layer.id, { epsilon: clamp(v || 1, 1, 90) })
-          }
+          value={formatReadNumber(layer.epsilon, 1)}
         />
-        <NumField
+        <ReadField
           label="Conductivity σ"
-          value={layer.sigma}
+          value={formatReadNumber(layer.sigma, 4)}
           unit="S/m"
-          step={0.001}
-          onChange={(v) =>
-            updLayer(setModel, layer.id, { sigma: clamp(v || 0, 0, 10) })
-          }
         />
-        <div className="fld">
-          <label>Wave velocity</label>
-          <div className="ctl">
-            <input
-              className="inp"
-              disabled
-              value={fmt(0.3 / Math.sqrt(layer.epsilon), 3)}
-            />
-            <span className="unit">m/ns</span>
-          </div>
-        </div>
+        <ReadField
+          label="Wave velocity"
+          value={formatReadNumber(velocity, 3)}
+          unit="m/ns"
+        />
       </div>
     );
   }
   if (target) {
-    const tt = TARGET_TYPES[target.type];
+    const tt = TARGET_TYPES[target.type] || {
+      color: "#ccc",
+      label: target.type,
+      kind: target.material === "pec" ? "pec" : "diel",
+      epsilon: target.material === "pec" ? 0 : null,
+    };
+    const isBox = target.kind === "box" || target.shape === "rect";
     return (
       <div className="insp">
         <div className="insp-title">
@@ -765,131 +710,55 @@ function Inspector({ layer, target, model, setModel, onSelect }) {
           <span className="badge">
             {tt.kind === "pec" ? "conductor" : "dielectric"}
           </span>
-          <button
-            className="del"
-            onClick={() => {
-              setModel((m) => ({
-                ...m,
-                targets: m.targets.filter((t) => t.id !== target.id),
-              }));
-              onSelect(null);
-            }}
-          >
-            <Icon name="trash" size={13} />
-            Delete
-          </button>
         </div>
-        <div className="fld">
-          <label>Name</label>
-          <input
-            className="inp"
-            style={{ fontFamily: "var(--sans)" }}
-            value={target.name}
-            onChange={(e) =>
-              updTarget(setModel, target.id, { name: e.target.value })
-            }
-          />
-        </div>
-        <div className="fld">
-          <label>Object type</label>
-          <select
-            className="sel-ctl"
-            value={target.type}
-            onChange={(e) => {
-              const k = e.target.value;
-              updTarget(setModel, target.id, {
-                type: k,
-                name: TARGET_TYPES[k].label,
-              });
-            }}
-          >
-            {TARGET_KEYS.map((k) => (
-              <option key={k} value={k}>
-                {TARGET_TYPES[k].label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <NumField
+        <ReadField label="Name" value={target.name} />
+        <ReadField label="Object type" value={tt.label || target.type} />
+        <ReadField label="Geometry" value={isBox ? "box" : "cylinder"} />
+        <ReadField
           label="Offset x"
-          value={target.x}
+          value={formatReadNumber(target.x, 3)}
           unit="m"
-          step={0.01}
-          onChange={(v) =>
-            updTarget(setModel, target.id, {
-              x: clamp(v || 0, 0, model.domain.width),
-            })
-          }
         />
-        <NumField
+        <ReadField
           label="Depth"
-          value={target.depth}
+          value={formatReadNumber(target.depth, 3)}
           unit="m"
-          step={0.01}
-          onChange={(v) =>
-            updTarget(setModel, target.id, {
-              depth: clamp(v || 0.02, 0.02, model.domain.depth),
-            })
-          }
         />
-        {target.kind === "box" ? (
+        {isBox ? (
           <React.Fragment>
-            <NumField
+            <ReadField
               label="Width"
-              value={target.width}
+              value={formatReadNumber(target.width, 3)}
               unit="m"
-              step={0.005}
-              onChange={(v) =>
-                updTarget(setModel, target.id, {
-                  width: clamp(v || 0.01, 0.005, 2),
-                  diameter: clamp(v || 0.01, 0.005, 2),
-                })
-              }
             />
-            <NumField
+            <ReadField
               label="Height"
-              value={target.height}
+              value={formatReadNumber(target.height, 3)}
               unit="m"
-              step={0.005}
-              onChange={(v) =>
-                updTarget(setModel, target.id, {
-                  height: clamp(v || 0.01, 0.005, 2),
-                })
-              }
             />
           </React.Fragment>
         ) : (
-          <NumField
+          <ReadField
             label="Diameter"
-            value={target.diameter}
+            value={formatReadNumber(target.diameter, 3)}
             unit="m"
-            step={0.005}
-            onChange={(v) =>
-              updTarget(setModel, target.id, {
-                diameter: clamp(v || 0.01, 0.005, 1),
-              })
-            }
           />
         )}
-        <div className="fld">
-          <label>EM property</label>
-          <div className="ctl">
-            <input
-              className="inp"
-              disabled
-              value={
-                tt.kind === "pec" ? "perfect conductor" : "εr " + tt.epsilon
-              }
-            />
-          </div>
-        </div>
+        <ReadField
+          label="EM property"
+          value={
+            tt.kind === "pec"
+              ? "perfect conductor"
+              : "εr " + formatReadNumber(tt.epsilon, 1)
+          }
+        />
       </div>
     );
   }
   return (
     <div className="insp-empty">
-      <Icon name="edit" className="ic" />
-      <div>Select a layer or target to edit its parameters</div>
+      <Icon name="info" className="ic" />
+      <div>Select a layer or target to view its properties</div>
     </div>
   );
 }

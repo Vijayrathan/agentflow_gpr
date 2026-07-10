@@ -452,6 +452,42 @@ you have re-saved a corrected section — the pipeline re-validates afterwards.\
 """
 
 
+def layer_sampling_remediation_message(errors, store):
+    err_lines = "\n".join(f"  - {e}" for e in errors)
+    return f"""\
+VALIDATION FAILED — Layer + Target Sampling.
+
+The deterministic sampler could not draw the requested sample set from the
+current ranges:
+{err_lines}
+
+This is corrected by changing one or more of:
+  dataset_config  (usually num_samples if the request itself is invalid)
+  layers          (soil texture, moisture, thickness, or density ranges)
+  target_ranges   (buried-object ranges, if the error mentions targets)
+
+For layer feasibility, use these rules when explaining the fix:
+  - sand + clay must be able to stay <= 100 for ordinary draws, not only at a
+    tiny corner of the range.
+  - theta_v_max must fit inside pore space for the drawn densities:
+    theta_v_max <= 1 - bulk_density / particle_density.
+  - If porosity is the issue, lower theta_v_max, lower/tighten bulk density,
+    raise/tighten particle density, or widen the density ranges toward values
+    that provide enough pore space.
+  - If texture closure is the issue, reduce sand and/or clay ranges so valid
+    sand+clay combinations are common.
+
+The currently stored sampling inputs are:
+
+{_dump_sections(store, ["dataset_config", "layers", "target_ranges"])}
+
+Please: (1) explain the problem to the user in plain language; (2) agree the
+smallest correction that makes sampling feasible; (3) re-save the FULL
+corrected section(s) with save_section. Do not stop until you have re-saved a
+corrected section — the sampler runs again afterwards.\
+"""
+
+
 def global_remediation_message(errors, store):
     err_lines = "\n".join(f"  - {e}" for e in errors)
     return f"""\

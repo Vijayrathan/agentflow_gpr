@@ -214,33 +214,6 @@
         flex: 1;
       }
 
-      .statuschip {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        height: 28px;
-        padding: 0 11px;
-        background: var(--panel-2);
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        font-size: 11.5px;
-        color: var(--ink-2);
-        font-weight: 500;
-        white-space: nowrap;
-      }
-      .statuschip .dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--green);
-        box-shadow: 0 0 0 3px var(--green-soft);
-      }
-      .statuschip b {
-        font-family: var(--mono);
-        color: var(--ink);
-        font-weight: 600;
-      }
-
       /* ---------- dropdown menus ---------- */
       .pop {
         position: absolute;
@@ -1168,6 +1141,22 @@
         display: flex;
         align-items: center;
         gap: 6px;
+      }
+      .fld .read-ctl {
+        align-items: center;
+      }
+      .readout {
+        min-height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel-3);
+        padding: 7px 9px;
+        font-family: var(--mono);
+        font-size: 12px;
+        line-height: 1.25;
+        color: var(--ink-2);
+        width: 100%;
+        overflow-wrap: anywhere;
       }
       .inp {
         height: 30px;

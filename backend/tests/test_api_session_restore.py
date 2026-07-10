@@ -143,3 +143,105 @@ def test_incomplete_edit_defers_resample(monkeypatch):
     chat.agent_session.store["layers"] = {"num_layers": "not-an-int"}
     asyncio.run(api._maybe_resample_stale(chat))
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Layer-sampling failures: route to agent remediation, not a dead websocket.
+# ---------------------------------------------------------------------------
+
+def test_layer_sampling_failure_routes_to_remediation(monkeypatch):
+    ws = FakeWS()
+    chat = _chat(ws)
+
+    async def broken_run(chat, stage_name, fn):
+        raise ValueError(
+            "Could not draw a feasible sample for layer (unnamed) after 200 retries"
+        )
+
+    remediations = []
+
+    async def fake_start_remediation(chat, purpose, message):
+        remediations.append((purpose, message))
+        chat.phase = "agent"
+        chat.active_purpose = purpose
+
+    monkeypatch.setattr(api, "_run_deterministic", broken_run)
+    monkeypatch.setattr(api, "_start_remediation", fake_start_remediation)
+
+    ok = asyncio.run(api._run_layer_sampling_or_remediate(
+        chat, {"kind": "start_stage", "section": "waveform"}
+    ))
+
+    assert ok is False
+    assert chat.active_purpose == "sampling_remediation"
+    assert chat.state["sampling_remediation_resume"] == {
+        "kind": "start_stage",
+        "section": "waveform",
+    }
+    assert remediations and remediations[0][0] == "sampling_remediation"
+    assert "Layer + Target Sampling" in remediations[0][1]
+    failed = [m for m in ws.sent if m["type"] == "validation_failed"]
+    assert failed and failed[0]["stage_name"] == "Layer + Target Sampling"
+    assert "theta_v_max" in "\n".join(failed[0]["errors"])
+
+
+def test_sampling_remediation_reruns_sampler_then_resumes(monkeypatch):
+    ws = FakeWS()
+    chat = _chat(ws)
+    chat.active_purpose = "sampling_remediation"
+    chat.remediation_snapshot = chat.agent_session.snapshot()
+    chat.state["sampling_remediation_resume"] = {
+        "kind": "start_stage",
+        "section": "waveform",
+    }
+    # Empty target_ranges is a complete optional section and gives the
+    # remediation diff a valid changed section without needing an LLM/tool call.
+    chat.agent_session.store["target_ranges"] = {}
+
+    sampling_resumes = []
+    stage_calls = []
+
+    async def fake_sampling(chat, resume):
+        sampling_resumes.append(resume)
+        return True
+
+    async def fake_start_stage(chat, section):
+        stage_calls.append(section)
+
+    monkeypatch.setattr(api, "_run_layer_sampling_or_remediate", fake_sampling)
+    monkeypatch.setattr(api, "_start_stage", fake_start_stage)
+
+    asyncio.run(api._check_remediation_done(chat))
+
+    assert sampling_resumes == [{"kind": "start_stage", "section": "waveform"}]
+    assert stage_calls == ["waveform"]
+    assert "sampling_remediation_resume" not in chat.state
+
+
+def test_handle_user_text_unhandled_error_keeps_chat_open(monkeypatch):
+    ws = FakeWS()
+    chat = _chat(ws)
+    chat.phase = "agent"
+
+    async def broken_invoke(chat, text):
+        chat.phase = "deterministic"
+        raise RuntimeError("unexpected backend failure")
+
+    persist_calls = []
+
+    async def fake_persist(chat):
+        persist_calls.append(chat.session_id)
+
+    monkeypatch.setattr(api, "_invoke_and_handle", broken_invoke)
+    monkeypatch.setattr(api, "_persist_chat", fake_persist)
+
+    asyncio.run(api._handle_user_text(chat, "continue"))
+
+    assert chat.phase == "agent"
+    assert chat.busy is False
+    assert persist_calls == ["test-session"]
+    assert any(
+        "chat is still open" in m.get("content", "")
+        for m in ws.sent
+        if m["type"] == "agent_message"
+    )

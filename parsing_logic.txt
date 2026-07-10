@@ -1,0 +1,1 @@
+PDF page → layout parsing → detect tables/equations/images → crop assets → Mini-VLM inference → Markdown reconstruction → chunking → embedding → vector-store insertion

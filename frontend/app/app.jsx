@@ -885,9 +885,7 @@ function App() {
 
               <Dock
                 model={model}
-                setModel={setModel}
                 selected={selected}
-                onSelect={onSelect}
                 collapsed={dockCollapsed}
                 setCollapsed={setDockCollapsed}
                 height="clamp(170px, 30vh, 300px)"

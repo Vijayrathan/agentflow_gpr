@@ -79,6 +79,7 @@ from single_agent_prompts import (  # noqa: E402
     POST_COMPLETE_BRIEFING,
     SECTION_KICKOFF,
     global_remediation_message,
+    layer_sampling_remediation_message,
     sample_remediation_message,
 )
 from deck_validation import extract_deck_members, validate_deck_bytes  # noqa: E402
@@ -1306,6 +1307,23 @@ async def _handle_user_text(chat: ChatSession, text: str) -> None:
             # The turn (agent + any deterministic chain) is over; converge the
             # client's busy flag — needed when a refresh restored `busy: true`.
             await _send(chat, {"type": "pipeline_busy", "busy": False})
+    except Exception:
+        logger.exception(
+            "chat turn failed for session %s; keeping websocket alive",
+            chat.session_id,
+        )
+        chat.busy = False
+        if chat.phase in {"deterministic", "routing"}:
+            chat.phase = "complete" if chat.complete else "agent"
+        await _send(chat, {
+            "type": "agent_message",
+            "content": (
+                "I hit a backend problem while processing that turn. The chat "
+                "is still open; adjust the last simulation values and send "
+                "them again so I can continue."
+            ),
+        })
+        await _send(chat, {"type": "pipeline_busy", "busy": False})
     finally:
         # Durable write once per turn — covers collection, remediation,
         # regeneration, _finish_dataset and the halt branch alike.
@@ -1388,13 +1406,14 @@ async def _handle_agent_result(chat: ChatSession, result: dict) -> None:
         await _check_regeneration(chat)
         return
     if chat.active_purpose == "collect":
-        await _maybe_resample_stale(chat)
+        if not await _maybe_resample_stale(chat):
+            return
         await _check_collect_done(chat)
     else:
         await _check_remediation_done(chat)
 
 
-async def _maybe_resample_stale(chat: ChatSession) -> None:
+async def _maybe_resample_stale(chat: ChatSession) -> bool:
     """Eagerly re-draw samples when a cross-edit changed a sampling input
     after layer_sampling ran (e.g. the user adds the buried target during
     the waveform stage). Without this the stale draws sit on disk and on
@@ -1402,18 +1421,28 @@ async def _maybe_resample_stale(chat: ChatSession) -> None:
     advanced_params."""
     snap = chat.state.get("sampling_snapshot")
     if snap is None:
-        return  # sampling hasn't run yet
+        return True  # sampling hasn't run yet
     store = chat.agent_session.store
     changed = {s for s in SAMPLING_INPUT_SECTIONS if store.get(s) != snap.get(s)}
     if not changed:
-        return
+        return True
     if not all(chat.agent_session.stage_done(s) for s in changed):
-        return  # mid-edit; _run_derive_chain's deferred check still covers it
+        return True  # mid-edit; _run_derive_chain's deferred check still covers it
     _sync_sections(chat)
-    await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
+    ok = await _run_layer_sampling_or_remediate(
+        chat,
+        {
+            "kind": "return_to_agent",
+            "active_purpose": chat.active_purpose,
+            "active_section": chat.active_section,
+        },
+    )
+    if not ok:
+        return False
     # Still mid-collection on the active section: _run_deterministic left the
     # phase at "deterministic", which would reject the user's next chat turn.
     chat.phase = "agent"
+    return True
 
 
 async def _check_regeneration(chat: ChatSession) -> None:
@@ -1504,13 +1533,26 @@ async def _check_remediation_done(chat: ChatSession) -> None:
     purpose = chat.active_purpose
     chat.remediation_snapshot = None
     chat.phase = "routing"
+    progress_tail = (
+        "re-running layer sampling."
+        if purpose == "sampling_remediation"
+        else "re-validating."
+    )
     await _send(chat, {
         "type": "progress",
-        "content": f"Updated {', '.join(sorted(changed))} — re-validating.",
+        "content": f"Updated {', '.join(sorted(changed))} — {progress_tail}",
     })
 
     if purpose == "sample_remediation":
         await _run_sample_validation_gate(chat)
+    elif purpose == "sampling_remediation":
+        resume = chat.state.pop("sampling_remediation_resume", None) or {
+            "kind": "start_stage",
+            "section": "waveform",
+        }
+        ok = await _run_layer_sampling_or_remediate(chat, resume)
+        if ok:
+            await _resume_after_layer_sampling(chat, resume)
     else:
         chat.state["resample_after_global"] = bool(changed & RESAMPLE_SECTIONS)
         await _run_derive_chain(chat)
@@ -1528,8 +1570,11 @@ async def _advance_after_collect(chat: ChatSession, section: str) -> None:
     elif section == "layers":
         await _start_stage(chat, "target_ranges")
     elif section == "target_ranges":
-        await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
-        await _start_stage(chat, "waveform")
+        ok = await _run_layer_sampling_or_remediate(
+            chat, {"kind": "start_stage", "section": "waveform"}
+        )
+        if ok:
+            await _start_stage(chat, "waveform")
     elif section == "waveform":
         await _start_stage(chat, "antenna")
     elif section == "antenna":
@@ -1579,10 +1624,88 @@ async def _start_remediation(
     await _invoke_and_handle(chat, message)
 
 
+def _sampling_failure_errors(exc: Exception) -> list[str]:
+    """User-facing diagnostics for failures while drawing per-sample inputs."""
+    detail = str(exc).strip() or type(exc).__name__
+    errors = [f"[layers] {detail}"]
+    lowered = detail.lower()
+    if "feasible sample" in lowered or "theta_v" in lowered or "pore space" in lowered:
+        errors.append(
+            "[layers] Make the valid region larger: lower theta_v_max, lower "
+            "bulk density, raise particle density, or widen density ranges "
+            "toward values with enough porosity."
+        )
+    if "sand+clay" in lowered or "silt" in lowered:
+        errors.append(
+            "[layers] Adjust sand/clay ranges so sand + clay <= 100 is common, "
+            "not only barely possible."
+        )
+    return errors
+
+
+async def _run_layer_sampling_or_remediate(
+    chat: ChatSession,
+    resume: dict[str, Any],
+) -> bool:
+    """Run layer/target sampling, or route data-related failures back into
+    the single-agent remediation loop without breaking the websocket turn.
+
+    `resume` records where the pipeline should continue after the user and
+    agent correct the sampling inputs."""
+    try:
+        await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
+        return True
+    except Exception as exc:
+        logger.exception(
+            "layer sampling failed for session %s; routing to remediation",
+            chat.session_id,
+        )
+        errors = _sampling_failure_errors(exc)
+        chat.state["sampling_remediation_resume"] = dict(resume or {})
+        await _send(chat, {
+            "type": "validation_failed",
+            "stage_name": "Layer + Target Sampling",
+            "errors": errors,
+        })
+        await _start_remediation(
+            chat,
+            "sampling_remediation",
+            layer_sampling_remediation_message(errors, chat.agent_session.store),
+        )
+        return False
+
+
+async def _resume_after_layer_sampling(
+    chat: ChatSession,
+    resume: dict[str, Any],
+) -> None:
+    """Continue the path that was interrupted by sampling remediation."""
+    kind = (resume or {}).get("kind")
+    if kind == "start_stage":
+        await _start_stage(chat, str(resume.get("section") or "waveform"))
+        return
+    if kind == "derive_chain":
+        await _run_derive_chain(chat)
+        return
+    if kind == "return_to_agent":
+        chat.active_purpose = str(resume.get("active_purpose") or "collect")
+        chat.active_section = resume.get("active_section")
+        chat.phase = "agent"
+        if chat.active_purpose == "collect":
+            await _check_collect_done(chat)
+        return
+    # Defensive default: the first sampling pass normally resumes at waveform.
+    await _start_stage(chat, "waveform")
+
+
 async def _run_derive_chain(chat: ChatSession) -> None:
     """Re-sample if needed, then derive the grid and run the global gate."""
     if chat.state.pop("resample_after_global", None) or _samples_stale(chat.state):
-        await _run_deterministic(chat, "Layer + Target Sampling", layer_sampling_node)
+        ok = await _run_layer_sampling_or_remediate(
+            chat, {"kind": "derive_chain"}
+        )
+        if not ok:
+            return
 
     await _run_deterministic(chat, "Peplinski Derive", peplinski_derive_node)
     await _run_deterministic(chat, "Global Derive", global_derive_node)
