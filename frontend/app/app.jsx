@@ -71,6 +71,9 @@ function App() {
   const [scanFrac, setScanFrac] = useState(0.12);
   // live gprMax run counters ({done, total} while a batch is running)
   const [sim, setSim] = useState(null);
+  // pending forward-model reuse recommendation (the /simulate response was
+  // "reuse_recommended"): drives the compact Reuse / Simulate-anyway bar
+  const [reuseRec, setReuseRec] = useState(null);
 
   // live scene streamed by the backend agent (model_update events);
   // vizTab: "overview" = range midpoints + uncertainty bands,
@@ -265,6 +268,7 @@ function App() {
     setOutFiles(new Set());
     setSim(null);
     setSolving(false);
+    setReuseRec(null);
     setProgress(0);
     setSelected(null);
     setRailTab("model");
@@ -366,7 +370,10 @@ function App() {
   // Run the real gprMax forward model on the emitted dataset. The POST only
   // kicks the batch off; per-file progress and the final summary arrive as
   // simulation_* events on the chat WebSocket (onSimulationEvent below).
-  const runForward = useCallback(async () => {
+  const runForward = useCallback(async (force) => {
+    // `force === true` only when passed explicitly ("Simulate anyway") —
+    // the toolbar onClick hands us a click event, which must not count.
+    const forced = force === true;
     if (!datasetFiles.length) {
       toast(
         "Generate the dataset first — the forward model runs the emitted gprMax files",
@@ -383,6 +390,7 @@ function App() {
       );
       return;
     }
+    setReuseRec(null);
     setSolving(true);
     setProgress(0);
     setSim({ done: 0, total: datasetFiles.length });
@@ -390,12 +398,18 @@ function App() {
       const base = window.getApiHttpBase();
       const sid = window.getSessionId();
       if (!sid) throw new Error("no chat selected");
-      const res = await fetch(`${base}/datasets/${sid}/simulate`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || "HTTP " + res.status);
+      const res = await fetch(
+        `${base}/datasets/${sid}/simulate${forced ? "?force=true" : ""}`,
+        { method: "POST" },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "HTTP " + res.status);
+      if (body.status === "reuse_recommended") {
+        // A ≥threshold-similar simulated dataset exists — the run was NOT
+        // started. Offer Reuse / Simulate-anyway instead of a progress bar.
+        setSolving(false);
+        setSim(null);
+        setReuseRec(body.recommendation || {});
       }
     } catch (e) {
       setSolving(false);
@@ -403,6 +417,37 @@ function App() {
       toast("Could not start the forward model — " + e.message, "info");
     }
   }, [datasetFiles.length, activeModel, toast]);
+
+  // Execute the pending reuse recommendation: the backend copies the source
+  // session's samples + signals into this session (no gprMax run). The
+  // resulting dataset_ready / simulation_complete WS events refresh the tab
+  // and outcome buttons through their existing handlers.
+  const adoptDataset = useCallback(async () => {
+    if (!reuseRec || !reuseRec.source_session_id) return;
+    setSolving(true);
+    setSim(null);
+    try {
+      const base = window.getApiHttpBase();
+      const sid = window.getSessionId();
+      if (!sid) throw new Error("no chat selected");
+      const res = await fetch(`${base}/datasets/${sid}/adopt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_session_id: reuseRec.source_session_id }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "HTTP " + res.status);
+      setReuseRec(null);
+      toast(
+        `Reused <b>${body.num_generated}</b> simulated sample(s) — no run needed`,
+        "ok",
+      );
+    } catch (e) {
+      toast("Could not reuse the dataset — " + e.message, "info");
+    } finally {
+      setSolving(false);
+    }
+  }, [reuseRec, toast]);
 
   // simulation_* events from the backend (routed through the chat WS)
   const onSimulationEvent = useCallback(
@@ -444,11 +489,12 @@ function App() {
         return;
       }
       if (msg.type === "session_restore") {
-        // page refresh: re-hydrate the run indicator
+        // page refresh: re-hydrate the run indicator + pending recommendation
         if (msg.simulating) {
           setSolving(true);
           setSim(null);
         }
+        setReuseRec(msg.reuse || null);
       }
     },
     [toast, refreshOutputs],
@@ -591,6 +637,65 @@ function App() {
                 {solving && (
                   <div className="solving-bar">
                     <i style={{ width: progress * 100 + "%" }}></i>
+                  </div>
+                )}
+
+                {/* forward-model reuse offer — compact overlay (never a
+                    permanent panel; the SVG fills the full canvas width) */}
+                {reuseRec && !solving && (
+                  <div className="reuse-bar">
+                    <div className="rb-head">
+                      <Icon name="info" size={12} />
+                      <b>
+                        {reuseRec.similarity_pct}% similar dataset already
+                        simulated
+                      </b>
+                      <button
+                        className="rb-x"
+                        onClick={() => setReuseRec(null)}
+                        title="Dismiss"
+                      >
+                        <Icon name="x" size={11} />
+                      </button>
+                    </div>
+                    <div className="rb-meta">
+                      {reuseRec.num_samples} sample(s)
+                      {reuseRec.requested_samples != null &&
+                      Number(reuseRec.requested_samples) !==
+                        Number(reuseRec.num_samples)
+                        ? ` — you requested ${reuseRec.requested_samples}`
+                        : ""}
+                      {reuseRec.simulated_at
+                        ? ` · simulated ${String(reuseRec.simulated_at).slice(0, 10)}`
+                        : ""}
+                      {reuseRec.source_user_id
+                        ? ` · by ${reuseRec.source_user_id}`
+                        : ""}
+                    </div>
+                    {(reuseRec.params_diff || []).length > 0 && (
+                      <details className="rb-diffs">
+                        <summary>closest differences</summary>
+                        {(reuseRec.params_diff || [])
+                          .slice(0, 5)
+                          .map((d, i) => (
+                            <div className="rb-diff" key={i}>
+                              <code>{d.param}</code>{" "}
+                              {Math.round((d.sim || 0) * 100)}% match
+                            </div>
+                          ))}
+                      </details>
+                    )}
+                    <div className="rb-actions">
+                      <button className="rb-btn primary" onClick={adoptDataset}>
+                        Reuse results
+                      </button>
+                      <button
+                        className="rb-btn"
+                        onClick={() => runForward(true)}
+                      >
+                        Simulate anyway
+                      </button>
+                    </div>
                   </div>
                 )}
                 <div

@@ -41,6 +41,7 @@ import sys
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -83,13 +84,18 @@ from single_agent_prompts import (  # noqa: E402
 from deck_validation import extract_deck_members, validate_deck_bytes  # noqa: E402
 from viz_projection import build_scene  # noqa: E402
 from simulate import run_batch_simulation  # noqa: E402
+import sim_similarity  # noqa: E402  (light import; qdrant_client stays lazy inside)
 from db.db import (  # noqa: E402
     ExtractionSession,
     batch_insert_simulations,
+    bulk_update_signals,
+    count_incomplete_simulations,
     create_chat_stub,
     delete_simulations_for_session,
     get_chat_session,
+    get_extraction_session,
     get_session,
+    get_simulations_for_session,
     list_chat_sessions,
     set_simulation_outputs,
     upsert_chat_session,
@@ -166,6 +172,12 @@ class ChatSession:
     # a refresh re-hydrates the "solved" state.
     simulating: bool = False
     simulation_result: Optional[dict[str, Any]] = None
+    # Pending forward-model reuse recommendation (similar past session found
+    # by sim_similarity). Set when /simulate returns "reuse_recommended";
+    # cleared on adoption, on a forced run's completion path being irrelevant
+    # (a new recommendation replaces it), and whenever the dataset itself is
+    # replaced (_finish_dataset / upload).
+    reuse_recommendation: Optional[dict[str, Any]] = None
     # Post-completion edit → regenerate machinery. `complete_snapshot` is the
     # store as of the last successful _finish_dataset; post-complete turns are
     # diffed against it. `regenerating` survives remediation turns: it routes
@@ -193,6 +205,7 @@ RECORDED_EVENT_TYPES = {
     "validation_failed",
     "dataset_ready",
     "simulation_complete",
+    "reuse_recommendation",
 }
 
 
@@ -508,6 +521,7 @@ def _import_deck_zip(chat: ChatSession, data: bytes, zip_name: str) -> dict[str,
     chat.uploaded_output_dir = str(out_dir)
     chat.dataset_result = result  # replayed on reconnect → repopulates the tab
     chat.simulation_result = None  # previous dataset's outcomes no longer apply
+    chat.reuse_recommendation = None  # recommendation was for the replaced dataset
     return result
 
 
@@ -528,10 +542,15 @@ def _upload_summary(result: dict[str, Any]) -> str:
 
 
 @app.post("/datasets/{session_id}/simulate")
-async def start_forward_model(session_id: str) -> dict[str, Any]:
+async def start_forward_model(session_id: str, force: bool = False) -> dict[str, Any]:
     """Kick off the gprMax forward model on the session's emitted .in files
     ("Run forward model" button). Returns immediately; per-file progress and
-    the final summary stream over the session's WebSocket."""
+    the final summary stream over the session's WebSocket.
+
+    Unless `force=true`, a similarity check against previously simulated
+    sessions runs first: on a >=threshold match the run is NOT started and
+    the response is `reuse_recommended` (the frontend offers Reuse /
+    Simulate-anyway; "Simulate anyway" re-POSTs with force=true)."""
     chat = await _resolve_chat(session_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Unknown session")
@@ -561,6 +580,22 @@ async def start_forward_model(session_id: str) -> dict[str, Any]:
             status_code=409,
             detail="Dataset is regenerating — wait for it to finish",
         )
+
+    # Reuse gate: uploads have no comparable config, and `force` is the
+    # explicit "simulate anyway" escape hatch. Any failure inside the check
+    # yields None — the run must proceed normally when the similarity stack
+    # is down.
+    if not force and manifest.get("source") != "upload":
+        rec = await asyncio.to_thread(_find_reuse_candidate, chat)
+        if rec is not None:
+            chat.reuse_recommendation = rec
+            await _send(chat, {
+                "type": "reuse_recommendation",
+                "content": _reuse_summary_md(rec),
+                "recommendation": rec,
+            })
+            await _persist_chat(chat)
+            return {"status": "reuse_recommended", "recommendation": rec}
 
     chat.simulating = True
     # The event loop keeps only a weak ref to tasks — hold one until done.
@@ -613,7 +648,7 @@ async def _run_forward_model(
         await _persist_chat(chat)
         return
 
-    rows_updated = await asyncio.to_thread(
+    rows_updated, signals_updated = await asyncio.to_thread(
         _record_simulation_outputs, chat, manifest, result
     )
     summary = {
@@ -623,6 +658,7 @@ async def _run_forward_model(
         "total": result["total"],
         "output_dir": result["output_dir"],
         "rows_updated": rows_updated,
+        "signals_updated": signals_updated,
         # Full tracebacks stay in the server log; the chat gets one line each.
         "errors": [
             {"filename": e["filename"],
@@ -643,6 +679,23 @@ async def _run_forward_model(
         "content": content,
         "result": summary,
     })
+    # Index this session's config for future reuse recommendations — only a
+    # fully successful generated run represents a complete, adoptable dataset.
+    # Never breaks the run (suppress + failure-swallowing inside).
+    if (
+        manifest.get("source") != "upload"
+        and result["total"] > 0
+        and result["failed"] == 0
+    ):
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                sim_similarity.index_completed_session,
+                dict(chat.state),
+                session_id=str(_coerce_uuid(chat.session_id)),
+                user_id=chat.user_id,
+                num_samples=result["total"],
+                output_dir=str(out_dir.parent),
+            )
     # Runs outside any user turn — persist the summary + transcript event.
     await _persist_chat(chat)
 
@@ -651,13 +704,16 @@ def _record_simulation_outputs(
     chat: ChatSession,
     manifest: dict[str, Any],
     result: dict[str, Any],
-) -> int:
-    """Persist each sample's .out path onto its Simulation row. DB failures
-    are logged and swallowed — the simulations themselves already ran."""
+) -> tuple[int, int]:
+    """Persist each sample's .out path AND its extracted signal arrays onto
+    its Simulation rows; returns (rows_updated, signals_updated). DB/HDF5
+    failures are logged and swallowed — the simulations themselves already
+    ran. The signal arrays are what make this dataset adoptable by future
+    sessions (reuse copies them instead of re-simulating)."""
     if manifest.get("source") == "upload":
         # Uploaded decks have no Simulation rows; their positional sample ids
         # must not overwrite a previously generated dataset's rows.
-        return 0
+        return (0, 0)
     sample_by_in = {
         f["filename"]: int(f["sample_id"])
         for f in manifest.get("files", [])
@@ -669,14 +725,314 @@ def _record_simulation_outputs(
         if o["filename"] in sample_by_in
     }
     if not outputs:
-        return 0
+        return (0, 0)
+    session_uuid = _coerce_uuid(chat.session_id)
     try:
-        return set_simulation_outputs(_coerce_uuid(chat.session_id), outputs)
+        rows_updated = set_simulation_outputs(session_uuid, outputs)
     except Exception:
         logger.exception(
             "recording simulation outputs failed for session %s", chat.session_id
         )
-        return 0
+        return (0, 0)
+    signals_updated = 0
+    try:
+        # Lazy import keeps h5py off the api import path.
+        from signal_extraction import extract_and_prepare_batch
+
+        batch = extract_and_prepare_batch(Path(result["output_dir"]), session_uuid)
+        if batch.get("updates"):
+            signals_updated = bulk_update_signals(batch["updates"])
+    except Exception:
+        logger.exception(
+            "signal extraction failed for session %s", chat.session_id
+        )
+    return (rows_updated, signals_updated)
+
+
+# ---------------------------------------------------------------------------
+# Forward-model reuse: recommend a >=threshold-similar past session's dataset
+# and, on user agreement, adopt it wholesale (files + Simulation rows +
+# signals) so nothing about the current session is desynchronized.
+# ---------------------------------------------------------------------------
+
+
+def _find_reuse_candidate(chat: ChatSession) -> Optional[dict[str, Any]]:
+    """Best ADOPTABLE >=threshold match for this session's config, or None.
+    Sync (runs in a worker thread); wraps everything — a broken similarity
+    stack must never block the forward model."""
+    try:
+        sid = str(_coerce_uuid(chat.session_id))
+        matches = sim_similarity.find_similar_session(dict(chat.state), session_id=sid)
+        for match in matches:
+            if _reuse_candidate_adoptable(match):
+                cfg = chat.state.get("dataset_config") or {}
+                match["requested_samples"] = cfg.get("num_samples")
+                return match
+    except Exception:
+        logger.exception(
+            "reuse-candidate lookup failed for session %s", chat.session_id
+        )
+    return None
+
+
+def _reuse_candidate_adoptable(match: dict[str, Any]) -> bool:
+    """Stale index points must never surface: the source session's rows must
+    all be simulated and its dataset directory still intact on disk."""
+    try:
+        src_uuid = _coerce_uuid(str(match.get("source_session_id")))
+        total, incomplete = count_incomplete_simulations(src_uuid)
+        if total == 0 or incomplete > 0:
+            return False
+        src_dir = Path(str(match.get("source_output_dir") or ""))
+        return (
+            src_dir.is_dir()
+            and (src_dir / "emitted_files.json").is_file()
+            and (src_dir / "out_files").is_dir()
+        )
+    except Exception:
+        return False
+
+
+def _reuse_summary_md(rec: dict[str, Any]) -> str:
+    sid = str(rec.get("source_session_id") or "")
+    when = str(rec.get("simulated_at") or "")[:10]
+    requested = rec.get("requested_samples")
+    n = rec.get("num_samples")
+    count_note = f"{n} simulated samples"
+    if requested is not None and n is not None and int(n) != int(requested):
+        count_note += f" (you requested {requested})"
+    lines = [
+        f"**Found an existing dataset {rec['similarity_pct']}% similar to this "
+        f"configuration** — session `{sid[:8]}` by `{rec.get('source_user_id')}`, "
+        f"{count_note}, simulated {when or 'earlier'}.",
+        "",
+        "You can **reuse its samples and signals** instead of re-running the "
+        "forward model, or simulate anyway (buttons next to the Run control).",
+    ]
+    diffs = rec.get("params_diff") or []
+    if diffs:
+        lines += ["", "Closest differences:"]
+        for d in diffs[:5]:
+            lines.append(
+                f"- `{d['param']}`: yours {d['current']} vs theirs "
+                f"{d['candidate']} ({round(d['sim'] * 100)}% match)"
+            )
+    return "\n".join(lines)
+
+
+class AdoptDatasetPayload(BaseModel):
+    source_session_id: str
+
+
+@app.post("/datasets/{session_id}/adopt")
+async def adopt_dataset(session_id: str, payload: AdoptDatasetPayload) -> dict[str, Any]:
+    """Execute a pending reuse recommendation: replace this session's dataset
+    (files, manifests, Simulation rows, signals) with a copy of the source
+    session's. Only ever adopts the exact recommendation the simulate gate
+    issued — never an arbitrary session id."""
+    chat = await _resolve_chat(session_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    if chat.simulating:
+        raise HTTPException(
+            status_code=409, detail="Forward model is running — wait for it to finish"
+        )
+    if chat.busy:
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline step is still running — wait for it to finish",
+        )
+    if chat.regenerating:
+        raise HTTPException(
+            status_code=409, detail="Dataset is regenerating — wait for it to finish"
+        )
+    rec = chat.reuse_recommendation
+    if not rec or str(rec.get("source_session_id")) != payload.source_session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="No matching reuse recommendation is pending for this session",
+        )
+
+    chat.simulating = True  # same 409 umbrella as a real run for simulate/upload
+    try:
+        result = await asyncio.to_thread(_adopt_dataset_sync, chat, rec)
+    finally:
+        chat.simulating = False
+    await _send(chat, {
+        "type": "dataset_ready",
+        "content": (
+            f"Adopted the {rec['similarity_pct']}% similar dataset from session "
+            f"`{payload.source_session_id[:8]}` — {result['num_generated']} "
+            "sample(s) with their simulated signals now belong to this session. "
+            "No forward-model run was needed."
+        ),
+        "result": chat.dataset_result,
+    })
+    await _send(chat, {
+        "type": "simulation_complete",
+        "content": (
+            f"Forward model skipped — reused {result['num_generated']} existing "
+            "simulated output(s). The outcomes are ready in the Dataset tab."
+        ),
+        "result": chat.simulation_result,
+    })
+    await _send_model_update(chat, stage="Dataset Adoption")
+    await _persist_chat(chat)
+    return result
+
+
+def _adopt_dataset_sync(chat: ChatSession, rec: dict[str, Any]) -> dict[str, Any]:
+    """Copy the source session's dataset into this session. ALL verification
+    happens before anything is deleted — a failing precondition leaves the
+    current dataset untouched."""
+    source_session_id = str(rec["source_session_id"])
+    src_uuid = _coerce_uuid(source_session_id)
+    cur_uuid = _coerce_uuid(chat.session_id)
+    if src_uuid == cur_uuid:
+        raise HTTPException(status_code=409, detail="Cannot adopt this session's own dataset")
+
+    cfg_dict = chat.state.get("dataset_config")
+    if not cfg_dict:
+        raise HTTPException(status_code=409, detail="Session has no dataset configuration")
+    cfg = DatasetConfig.model_validate(cfg_dict)
+    cur_dir = _resolve_dataset_path(cfg.output_dir)
+
+    # --- verify the source end to end (DB rows + files) -------------------
+    src_dir = Path(str(rec.get("source_output_dir") or ""))
+    src_row = get_extraction_session(src_uuid)
+    if src_row is not None:
+        recorded = ((src_row.model_config_data or {}).get("artifacts") or {}).get(
+            "output_dir"
+        )
+        if recorded:
+            src_dir = Path(recorded)
+    manifest_path = src_dir / "emitted_files.json"
+    if not src_dir.is_dir() or not manifest_path.is_file():
+        raise HTTPException(
+            status_code=409, detail="Source dataset directory no longer exists"
+        )
+    src_manifest = _read_json(manifest_path)
+    if src_manifest.get("source") == "upload":
+        raise HTTPException(
+            status_code=409, detail="Source dataset is an upload — nothing to reuse"
+        )
+    src_in_dir = _in_files_dir(src_dir, src_manifest)
+    src_out_dir = _out_files_dir(src_dir)
+    files = [f for f in src_manifest.get("files", []) if f.get("filename")]
+    if not files:
+        raise HTTPException(status_code=409, detail="Source dataset has no input files")
+    for f in files:
+        name = Path(f["filename"]).name
+        if not (src_in_dir / name).is_file() or not (
+            src_out_dir / (Path(name).stem + ".out")
+        ).is_file():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Source dataset is missing files for {name}",
+            )
+    src_rows = get_simulations_for_session(src_uuid)
+    if not src_rows or any(r.simulation_completed_at is None for r in src_rows):
+        raise HTTPException(
+            status_code=409,
+            detail="Source session's simulations are not fully complete",
+        )
+
+    # --- replace files (the adopted dataset REPLACES the drawn one) --------
+    cur_in_dir = cur_dir / "in_files"
+    cur_out_dir = _out_files_dir(cur_dir)
+    shutil.rmtree(cur_in_dir, ignore_errors=True)
+    shutil.rmtree(cur_out_dir, ignore_errors=True)
+    cur_in_dir.mkdir(parents=True, exist_ok=True)
+    cur_out_dir.mkdir(parents=True, exist_ok=True)
+    new_files = []
+    for f in files:
+        name = Path(f["filename"]).name
+        shutil.copy2(src_in_dir / name, cur_in_dir / name)
+        out_name = Path(name).stem + ".out"
+        shutil.copy2(src_out_dir / out_name, cur_out_dir / out_name)
+        entry = dict(f)
+        entry["path"] = str(cur_in_dir / name)
+        new_files.append(entry)
+    # These manifests contain no absolute paths — copied verbatim they make
+    # the samples viz and any regeneration bookkeeping consistent on disk.
+    for m in ("sampled_layers.json", "derived_layers.json", "global_derive.json"):
+        if (src_dir / m).is_file():
+            shutil.copy2(src_dir / m, cur_dir / m)
+    new_manifest = dict(src_manifest)
+    new_manifest.update({
+        "output_dir": str(cur_dir),
+        "in_dir": str(cur_in_dir),
+        "files": new_files,
+        "adopted_from": source_session_id,
+    })
+    with open(cur_dir / "emitted_files.json", "w", encoding="utf-8") as fh:
+        json.dump(new_manifest, fh, indent=2)
+
+    # --- replace Simulation rows (signals ride along) -----------------------
+    row_dicts = []
+    for r in src_rows:
+        d = r.model_dump()
+        d["id"] = uuid.uuid4()
+        d["session_id"] = cur_uuid
+        d["user_id"] = chat.user_id
+        d["created_at"] = datetime.now(timezone.utc)
+        d["output_dir"] = cfg.output_dir
+        in_name = Path(r.input_file_path).name if r.input_file_path else None
+        if in_name:
+            d["input_file_path"] = str(cur_in_dir / in_name)
+        out_name = Path(r.output_file_path).name if r.output_file_path else None
+        if out_name:
+            d["output_file_path"] = str(cur_out_dir / out_name)
+        row_dicts.append(d)
+    delete_simulations_for_session(cur_uuid)
+    inserted = batch_insert_simulations(row_dicts) if row_dicts else 0
+    # Healing: sessions simulated before signal extraction landed have .out
+    # paths but no arrays — extract from the freshly copied outputs.
+    if any(r.signal_length is None for r in src_rows):
+        try:
+            from signal_extraction import extract_and_prepare_batch
+
+            batch = extract_and_prepare_batch(cur_out_dir, cur_uuid)
+            if batch.get("updates"):
+                bulk_update_signals(batch["updates"])
+        except Exception:
+            logger.exception(
+                "signal healing failed after adoption for session %s",
+                chat.session_id,
+            )
+
+    # --- session state -------------------------------------------------------
+    result = {
+        "status": "adopted",
+        "session_id": chat.session_id,
+        "adopted_from": source_session_id,
+        "similarity_pct": rec.get("similarity_pct"),
+        "rows_inserted": inserted,
+        "num_generated": len(new_files),
+        "output_dir": str(cur_dir),
+        "in_dir": str(cur_in_dir),
+        "files": [
+            {"sample_id": f.get("sample_id"), "filename": f.get("filename")}
+            for f in new_files
+        ],
+    }
+    chat.dataset_result = result
+    chat.simulation_result = {
+        "succeeded": len(new_files),
+        "failed": 0,
+        "skipped": 0,
+        "total": len(new_files),
+        "output_dir": str(cur_out_dir),
+        "rows_updated": inserted,
+        "adopted_from": source_session_id,
+        "errors": [],
+    }
+    chat.uploaded_output_dir = None
+    chat.reuse_recommendation = None
+    # The copied manifests are now this session's products — the scene
+    # projection may read all of them.
+    chat.viz_flags.update({k: True for k in chat.viz_flags})
+    return result
 
 
 @app.websocket("/ws/{user_id}/{session_id}")
@@ -724,6 +1080,7 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, session_id: str) -> No
                 "dataset": state.dataset_result,
                 "simulating": state.simulating,
                 "simulation": state.simulation_result,
+                "reuse": state.reuse_recommendation,
             })
             if state.last_scene:
                 await ws.send_json({"type": "model_update", "scene": state.last_scene})
@@ -778,7 +1135,7 @@ _PERSISTED_CHAT_FIELDS = (
     "post_complete_briefed", "phase", "active_purpose", "active_section",
     "remediation_snapshot", "complete_snapshot", "viz_flags", "last_scene",
     "transcript", "dataset_result", "simulation_result", "uploaded_output_dir",
-    "state",
+    "reuse_recommendation", "state",
 )
 
 
@@ -1271,6 +1628,8 @@ async def _finish_dataset(chat: ChatSession) -> None:
     chat.complete_snapshot = chat.agent_session.snapshot()
     chat.regen_block_notice = None
     chat.simulation_result = None
+    # A new dataset invalidates any pending reuse recommendation.
+    chat.reuse_recommendation = None
     # Emitted filenames repeat across regenerations and the outputs listing is
     # filesystem-derived — stale .out files would attach to the new decks.
     cfg = DatasetConfig.model_validate(chat.state["dataset_config"])

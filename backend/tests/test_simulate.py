@@ -190,7 +190,8 @@ def test_record_simulation_outputs_maps_samples(monkeypatch):
     monkeypatch.setattr(api, "set_simulation_outputs", fake_set)
     updated = api._record_simulation_outputs(chat, manifest, result)
 
-    assert updated == 1
+    # result has no output_dir -> signal extraction fails and is swallowed
+    assert updated == (1, 0)
     assert captured["outputs"] == {1: "/abs/demo_1.out"}
     assert captured["session"] == api._coerce_uuid("session-x")
 
@@ -204,7 +205,7 @@ def test_record_simulation_outputs_swallows_db_errors(monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(api, "set_simulation_outputs", broken)
-    assert api._record_simulation_outputs(chat, manifest, result) == 0
+    assert api._record_simulation_outputs(chat, manifest, result) == (0, 0)
 
 
 def test_simulate_endpoint_rejects_unknown_session():
@@ -241,3 +242,417 @@ def test_simulate_endpoint_guards_running_states(tmp_path, monkeypatch):
         assert exc.value.status_code == 409
     finally:
         api.sessions.pop("guard-session", None)
+
+
+# ---------------------------------------------------------------------------
+# Forward-model reuse: signal extraction, recommendation gate, adoption
+# ---------------------------------------------------------------------------
+
+import json
+import types
+from datetime import datetime, timezone
+
+from db.db import Simulation
+
+
+async def _noop_persist(chat):
+    return None
+
+
+def _stub_signal_extraction(monkeypatch, extract):
+    monkeypatch.setitem(
+        sys.modules, "signal_extraction",
+        types.SimpleNamespace(extract_and_prepare_batch=extract),
+    )
+
+
+def test_record_simulation_outputs_extracts_signals(monkeypatch):
+    chat = api._new_chat_session("session-x")
+    manifest = {"files": [{"sample_id": 1, "filename": "demo_1.in"}]}
+    result = {
+        "output_dir": "/abs/out_files",
+        "outputs": [{"filename": "demo_1.in", "out_file": "/abs/demo_1.out"}],
+    }
+    monkeypatch.setattr(api, "set_simulation_outputs", lambda *a: 1)
+    seen = {}
+
+    def fake_extract(out_dir, session_uuid):
+        seen["out_dir"] = str(out_dir)
+        seen["session"] = session_uuid
+        return {"updates": [{"id": "row-1", "signal_ez": [0.1], "signal_length": 1}]}
+
+    _stub_signal_extraction(monkeypatch, fake_extract)
+    monkeypatch.setattr(api, "bulk_update_signals", lambda updates: len(updates))
+
+    assert api._record_simulation_outputs(chat, manifest, result) == (1, 1)
+    assert seen["out_dir"] == "/abs/out_files"
+    assert seen["session"] == api._coerce_uuid("session-x")
+
+
+def test_record_simulation_outputs_signal_failure_swallowed(monkeypatch):
+    chat = api._new_chat_session("session-x")
+    manifest = {"files": [{"sample_id": 1, "filename": "demo_1.in"}]}
+    result = {
+        "output_dir": "/abs/out_files",
+        "outputs": [{"filename": "demo_1.in", "out_file": "/abs/demo_1.out"}],
+    }
+    monkeypatch.setattr(api, "set_simulation_outputs", lambda *a: 1)
+
+    def broken_extract(out_dir, session_uuid):
+        raise RuntimeError("h5py exploded")
+
+    _stub_signal_extraction(monkeypatch, broken_extract)
+    assert api._record_simulation_outputs(chat, manifest, result) == (1, 0)
+
+
+def _dataset_chat(tmp_path, session_id, manifest_extra=None):
+    """A chat session with an on-disk emitted dataset (mirrors the guard test)."""
+    chat = api._new_chat_session(session_id)
+    api.sessions[session_id] = chat
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["demo_1.in"])
+    manifest = {
+        "n_written": 1,
+        "in_dir": str(in_dir),
+        "output_dir": str(tmp_path),
+        "files": [{"sample_id": 1, "filename": "demo_1.in"}],
+    }
+    manifest.update(manifest_extra or {})
+    (tmp_path / "emitted_files.json").write_text(json.dumps(manifest))
+    chat.state["dataset_config"] = {
+        "num_samples": 1,
+        "model_basename": "demo",
+        "output_dir": str(tmp_path),
+    }
+    return chat
+
+
+def test_simulate_gate_recommends_and_does_not_start(tmp_path, monkeypatch):
+    chat = _dataset_chat(tmp_path, "gate-session")
+    try:
+        rec = {"source_session_id": "src-1", "similarity_pct": 97.0,
+               "num_samples": 5, "requested_samples": 1,
+               "source_user_id": "u1", "params_diff": []}
+        monkeypatch.setattr(api, "_find_reuse_candidate", lambda c: rec)
+        monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+        resp = asyncio.run(api.start_forward_model("gate-session"))
+
+        assert resp["status"] == "reuse_recommended"
+        assert resp["recommendation"] == rec
+        assert chat.reuse_recommendation == rec
+        assert chat.simulating is False  # run never started
+        recorded = [e for e in chat.transcript if e["type"] == "reuse_recommendation"]
+        assert len(recorded) == 1
+        assert recorded[0]["recommendation"] == rec
+    finally:
+        api.sessions.pop("gate-session", None)
+
+
+def test_simulate_force_bypasses_gate(tmp_path, monkeypatch):
+    chat = _dataset_chat(tmp_path, "force-session")
+    try:
+        def must_not_run(c):
+            raise AssertionError("gate must be skipped with force=true")
+
+        monkeypatch.setattr(api, "_find_reuse_candidate", must_not_run)
+        monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+        async def fake_run(*a, **k):
+            chat.simulating = False
+
+        monkeypatch.setattr(api, "_run_forward_model", fake_run)
+        resp = asyncio.run(api.start_forward_model("force-session", force=True))
+        assert resp["status"] == "started"
+    finally:
+        api.sessions.pop("force-session", None)
+
+
+def test_simulate_gate_skipped_for_uploads(tmp_path, monkeypatch):
+    chat = _dataset_chat(tmp_path, "upload-session", {"source": "upload"})
+    try:
+        def must_not_run(c):
+            raise AssertionError("gate must be skipped for uploaded datasets")
+
+        monkeypatch.setattr(api, "_find_reuse_candidate", must_not_run)
+        monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+        async def fake_run(*a, **k):
+            chat.simulating = False
+
+        monkeypatch.setattr(api, "_run_forward_model", fake_run)
+        resp = asyncio.run(api.start_forward_model("upload-session"))
+        assert resp["status"] == "started"
+    finally:
+        api.sessions.pop("upload-session", None)
+
+
+def test_simulate_gate_similarity_failure_falls_through(tmp_path, monkeypatch):
+    """A broken similarity stack must never block the run (real
+    _find_reuse_candidate + a raising search)."""
+    chat = _dataset_chat(tmp_path, "fallthrough-session")
+    try:
+        def boom(*a, **k):
+            raise RuntimeError("qdrant down")
+
+        monkeypatch.setattr(api.sim_similarity, "find_similar_session", boom)
+        monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+        async def fake_run(*a, **k):
+            chat.simulating = False
+
+        monkeypatch.setattr(api, "_run_forward_model", fake_run)
+        resp = asyncio.run(api.start_forward_model("fallthrough-session"))
+        assert resp["status"] == "started"
+        assert chat.reuse_recommendation is None
+    finally:
+        api.sessions.pop("fallthrough-session", None)
+
+
+def _make_source_dataset(src_dir, filenames, with_manifests=True, missing_out=()):
+    src_in = src_dir / "in_files"
+    src_out = src_dir / "out_files"
+    _write_in_files(src_in, filenames)
+    src_out.mkdir(parents=True, exist_ok=True)
+    for name in filenames:
+        stem = Path(name).stem
+        if stem + ".out" not in missing_out:
+            (src_out / (stem + ".out")).write_bytes(b"\x89HDF")
+    manifest = {
+        "n_written": len(filenames),
+        "output_dir": str(src_dir),
+        "in_dir": str(src_in),
+        "files": [
+            {"sample_id": i + 1, "filename": n, "path": str(src_in / n)}
+            for i, n in enumerate(filenames)
+        ],
+    }
+    (src_dir / "emitted_files.json").write_text(json.dumps(manifest))
+    if with_manifests:
+        for m in ("sampled_layers.json", "derived_layers.json", "global_derive.json"):
+            (src_dir / m).write_text("{}")
+    return manifest
+
+
+def _make_source_rows(src_dir, session_uuid, filenames):
+    rows = []
+    for i, name in enumerate(filenames):
+        stem = Path(name).stem
+        rows.append(Simulation(
+            session_id=session_uuid,
+            user_id="source-user",
+            sample_index=i + 1,
+            layers=[{"name": "topsoil", "thickness_m": 0.3}],
+            num_layers=1,
+            signal_ez=[0.1, 0.2, 0.3],
+            signal_length=3,
+            simulation_completed_at=datetime.now(timezone.utc),
+            input_file_path=str(src_dir / "in_files" / name),
+            output_file_path=str(src_dir / "out_files" / (stem + ".out")),
+        ))
+    return rows
+
+
+def test_adopt_copies_files_and_rekeys_rows(tmp_path, monkeypatch):
+    cur_dir = tmp_path / "current"
+    src_dir = tmp_path / "source"
+    cur_dir.mkdir()
+    _make_source_dataset(src_dir, ["soil_1.in", "soil_2.in"])
+    src_uuid = api._coerce_uuid("src-session")
+    src_rows = _make_source_rows(src_dir, src_uuid, ["soil_1.in", "soil_2.in"])
+
+    chat = api._new_chat_session("adopt-session")
+    api.sessions["adopt-session"] = chat
+    try:
+        chat.state["dataset_config"] = {
+            "num_samples": 2, "model_basename": "demo", "output_dir": str(cur_dir),
+        }
+        chat.reuse_recommendation = {
+            "source_session_id": "src-session", "similarity_pct": 97.2,
+            "num_samples": 2, "source_output_dir": str(src_dir),
+            "source_user_id": "source-user",
+        }
+        inserted = {}
+        monkeypatch.setattr(api, "get_extraction_session", lambda u: None)
+        monkeypatch.setattr(api, "get_simulations_for_session", lambda u: src_rows)
+        monkeypatch.setattr(api, "delete_simulations_for_session",
+                            lambda u: inserted.setdefault("deleted", u))
+        monkeypatch.setattr(api, "batch_insert_simulations",
+                            lambda rows: inserted.setdefault("rows", rows) and len(rows))
+        monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+        result = asyncio.run(api.adopt_dataset(
+            "adopt-session", api.AdoptDatasetPayload(source_session_id="src-session")
+        ))
+
+        assert result["status"] == "adopted"
+        assert result["adopted_from"] == "src-session"
+        # files + manifests copied, manifest rewritten to current paths
+        assert (cur_dir / "in_files" / "soil_1.in").is_file()
+        assert (cur_dir / "out_files" / "soil_2.out").is_file()
+        assert (cur_dir / "sampled_layers.json").is_file()
+        new_manifest = json.loads((cur_dir / "emitted_files.json").read_text())
+        assert new_manifest["output_dir"] == str(cur_dir)
+        assert new_manifest["in_dir"] == str(cur_dir / "in_files")
+        assert new_manifest["adopted_from"] == "src-session"
+        assert all(f["path"].startswith(str(cur_dir)) for f in new_manifest["files"])
+        # rows re-keyed to this session, signals carried, paths repointed
+        rows = inserted["rows"]
+        assert inserted["deleted"] == api._coerce_uuid("adopt-session")
+        assert len(rows) == 2
+        assert all(r["session_id"] == api._coerce_uuid("adopt-session") for r in rows)
+        assert all(r["user_id"] == chat.user_id for r in rows)
+        assert [r["sample_index"] for r in rows] == [1, 2]
+        assert all(r["signal_ez"] == [0.1, 0.2, 0.3] for r in rows)
+        assert all(r["id"] not in {s.id for s in src_rows} for r in rows)
+        assert rows[0]["input_file_path"] == str(cur_dir / "in_files" / "soil_1.in")
+        assert rows[0]["output_file_path"] == str(cur_dir / "out_files" / "soil_1.out")
+        # chat state converged
+        assert chat.reuse_recommendation is None
+        assert chat.dataset_result["status"] == "adopted"
+        assert chat.simulation_result["succeeded"] == 2
+        assert chat.simulation_result["adopted_from"] == "src-session"
+        assert all(chat.viz_flags.values())
+        types_seen = [e["type"] for e in chat.transcript]
+        assert "dataset_ready" in types_seen and "simulation_complete" in types_seen
+        assert chat.simulating is False
+    finally:
+        api.sessions.pop("adopt-session", None)
+
+
+def test_adopt_guards(tmp_path, monkeypatch):
+    chat = _dataset_chat(tmp_path, "adopt-guard")
+    try:
+        payload = api.AdoptDatasetPayload(source_session_id="src-session")
+
+        # no pending recommendation
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.adopt_dataset("adopt-guard", payload))
+        assert exc.value.status_code == 409
+
+        # mismatched recommendation
+        chat.reuse_recommendation = {"source_session_id": "someone-else"}
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.adopt_dataset("adopt-guard", payload))
+        assert exc.value.status_code == 409
+
+        # busy states
+        chat.reuse_recommendation = {"source_session_id": "src-session"}
+        for flag in ("simulating", "busy", "regenerating"):
+            setattr(chat, flag, True)
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(api.adopt_dataset("adopt-guard", payload))
+            assert exc.value.status_code == 409
+            setattr(chat, flag, False)
+    finally:
+        api.sessions.pop("adopt-guard", None)
+
+
+def test_adopt_verifies_before_deleting(tmp_path, monkeypatch):
+    """A missing source .out must 409 BEFORE the current dataset is touched."""
+    cur_dir = tmp_path / "current"
+    src_dir = tmp_path / "source"
+    _write_in_files(cur_dir / "in_files", ["mine_1.in"])
+    marker = cur_dir / "in_files" / "mine_1.in"
+    _make_source_dataset(src_dir, ["soil_1.in"], missing_out={"soil_1.out"})
+
+    chat = api._new_chat_session("adopt-verify")
+    api.sessions["adopt-verify"] = chat
+    try:
+        chat.state["dataset_config"] = {
+            "num_samples": 1, "model_basename": "demo", "output_dir": str(cur_dir),
+        }
+        chat.reuse_recommendation = {
+            "source_session_id": "src-session",
+            "source_output_dir": str(src_dir),
+        }
+        monkeypatch.setattr(api, "get_extraction_session", lambda u: None)
+        monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.adopt_dataset(
+                "adopt-verify", api.AdoptDatasetPayload(source_session_id="src-session")
+            ))
+        assert exc.value.status_code == 409
+        assert marker.is_file()  # current dataset untouched
+        assert chat.reuse_recommendation is not None  # still pending
+    finally:
+        api.sessions.pop("adopt-verify", None)
+
+
+def _forward_model_chat(tmp_path, session_id):
+    chat = api._new_chat_session(session_id)
+    chat.state["dataset_config"] = {
+        "num_samples": 1, "model_basename": "demo", "output_dir": str(tmp_path),
+    }
+    return chat
+
+
+def test_forward_model_indexes_successful_run(tmp_path, monkeypatch):
+    chat = _forward_model_chat(tmp_path, "index-session")
+    manifest = {"files": [{"sample_id": 1, "filename": "demo_1.in"}]}
+    result = {"succeeded": 1, "failed": 0, "skipped": 0, "total": 1,
+              "output_dir": str(tmp_path / "out_files"), "outputs": [], "errors": []}
+
+    async def run_thread(fn, *a, **k):
+        return fn(*a, **k)
+
+    monkeypatch.setattr(api, "run_batch_simulation", lambda **k: result)
+    monkeypatch.setattr(api, "_record_simulation_outputs", lambda *a: (1, 1))
+    monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+    indexed = {}
+
+    def fake_index(state, **meta):
+        indexed.update(meta)
+        return True
+
+    monkeypatch.setattr(api.sim_similarity, "index_completed_session", fake_index)
+    asyncio.run(api._run_forward_model(
+        chat, manifest, tmp_path / "in_files", tmp_path / "out_files", ["demo_1.in"]
+    ))
+
+    assert indexed["session_id"] == str(api._coerce_uuid("index-session"))
+    assert indexed["num_samples"] == 1
+    assert indexed["output_dir"] == str(tmp_path)
+    assert chat.simulation_result["signals_updated"] == 1
+
+
+def test_forward_model_skips_index_on_failures(tmp_path, monkeypatch):
+    chat = _forward_model_chat(tmp_path, "index-fail-session")
+    manifest = {"files": []}
+    result = {"succeeded": 0, "failed": 1, "skipped": 0, "total": 1,
+              "output_dir": str(tmp_path / "out_files"), "outputs": [],
+              "errors": [{"filename": "demo_1.in", "error": "boom"}]}
+
+    monkeypatch.setattr(api, "run_batch_simulation", lambda **k: result)
+    monkeypatch.setattr(api, "_record_simulation_outputs", lambda *a: (0, 0))
+    monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+    def must_not_index(*a, **k):
+        raise AssertionError("failed runs must not be indexed")
+
+    monkeypatch.setattr(api.sim_similarity, "index_completed_session", must_not_index)
+    asyncio.run(api._run_forward_model(
+        chat, manifest, tmp_path / "in_files", tmp_path / "out_files", ["demo_1.in"]
+    ))
+    assert chat.simulation_result["failed"] == 1
+
+
+def test_forward_model_index_errors_swallowed(tmp_path, monkeypatch):
+    chat = _forward_model_chat(tmp_path, "index-boom-session")
+    manifest = {"files": []}
+    result = {"succeeded": 1, "failed": 0, "skipped": 0, "total": 1,
+              "output_dir": str(tmp_path / "out_files"), "outputs": [], "errors": []}
+
+    monkeypatch.setattr(api, "run_batch_simulation", lambda **k: result)
+    monkeypatch.setattr(api, "_record_simulation_outputs", lambda *a: (1, 1))
+    monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+
+    def boom(*a, **k):
+        raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(api.sim_similarity, "index_completed_session", boom)
+    asyncio.run(api._run_forward_model(
+        chat, manifest, tmp_path / "in_files", tmp_path / "out_files", ["demo_1.in"]
+    ))
+    assert chat.simulation_result["succeeded"] == 1  # run completed normally
