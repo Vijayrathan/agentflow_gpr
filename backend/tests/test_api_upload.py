@@ -139,7 +139,7 @@ def test_record_simulation_outputs_skips_uploaded_manifests(tmp_path, monkeypatc
             "files": [{"sample_id": 1, "filename": "good.in"}],
         }
         result = {"outputs": [{"filename": "good.in", "out_file": "x.out"}]}
-        assert api._record_simulation_outputs(chat, manifest, result) == 0
+        assert api._record_simulation_outputs(chat, manifest, result) == (0, 0)
 
 
 def test_upload_summary_lists_rejections():

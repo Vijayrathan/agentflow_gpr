@@ -62,6 +62,7 @@ This is the single most important design constraint. Violating it is never accep
 | `viz_projection.py` | Pure projection of the section store + pipeline manifests into the `model_update` scene payload for the live frontend visualization (no FastAPI/LLM imports) |
 | `simulate.py` | Batch gprMax forward-model runner (deterministic; lazy gprMax import). Backs the UI "Run forward model" button via `POST /datasets/{sid}/simulate` and doubles as a CLI |
 | `deck_validation.py` | Syntax validation for user-uploaded gprMax `.in` decks: safe preprocessing (mirrors gprMax's line handling but NEVER `exec`s `#python:` blocks; `#include_file:` rejected too) + gprMax's own `check_cmd_names` rules (lazy gprMax import) |
+| `sim_similarity.py` | Forward-model reuse: session-config similarity index over the `sim_sessions` Qdrant collection (raw normalized numeric feature vectors — NO embedding model — + payload hard filters + exact interval-IoU rescoring in Python). Deterministic, lazy `qdrant_client` import, failure-swallowing entry points; `python backend/sim_similarity.py backfill` indexes existing completed sessions |
 
 ### Single-Agent Extraction (ACTIVE — `backend/agentflow_single_agent.py`)
 
@@ -242,8 +243,9 @@ state, so cross-section edits land immediately.
 **Frontend WebSocket protocol** (`api.py` → `chatbot.jsx`): `agent_message`,
 `stage_change`, `progress`, `validation_failed`, `pipeline_busy`, `dataset_ready`,
 `model_update`, `session_restore`, `simulation_progress`, `simulation_complete`,
-`error`. `choice_required` is no longer emitted (the agent negotiates the fix in
-conversation); the frontend handler remains for compatibility.
+`reuse_recommendation`, `error`. `choice_required` is no longer emitted (the
+agent negotiates the fix in conversation); the frontend handler remains for
+compatibility.
 
 **Forward model** ("Run forward model" button → `POST /datasets/{sid}/simulate`):
 once the dataset is emitted, the button runs `simulate.run_batch_simulation` (gprMax
@@ -254,11 +256,46 @@ manifest's filenames — the per-dataset in_files dir can still hold stale decks
 be simulated. Per-file progress streams as
 `simulation_progress` (transient; drives the run button/progress bar in `app.jsx`
 via `onSimulationEvent`); the recorded `simulation_complete` summary lands in the
-chat and `.out` paths are written onto the session's `Simulation` rows
-(`db.set_simulation_outputs`, keyed by `sample_index`; failures swallowed). The
+chat, `.out` paths are written onto the session's `Simulation` rows
+(`db.set_simulation_outputs`, keyed by `sample_index`; failures swallowed) and the
+signal arrays are extracted into the rows' `signal_*` float8[] columns
+(`signal_extraction.extract_and_prepare_batch` + `db.bulk_update_signals`, lazy
+h5py import — this is what makes a dataset reusable, see Forward-model reuse). The
 endpoint 409s while a run or pipeline step is in flight; `simulating` +
 `simulation` ride along on `session_restore` so a refresh re-hydrates the run
 state. Key-free tests: `backend/tests/test_simulate.py` (solver stubbed).
+
+**Forward-model reuse** (`backend/sim_similarity.py`; fully deterministic — the
+agent is NEVER involved): after every fully successful generated run,
+`_run_forward_model` indexes the session's config envelope into the
+`sim_sessions` Qdrant collection (point id = the coerced session UUID —
+idempotent; same `QDRANT_URL` as RAG but a separate collection with NO embedding
+model). Vectors are raw numeric features normalized by FIXED physical constants
+(`SCALES`); text embeddings are useless here because configs differ only in
+numbers. Retrieval = ANN candidates + payload hard filters (`num_layers`,
+waveform/antenna kinds, target counts, grid policy — categorically incompatible
+configs never compete); the gate is an exact Python rescoring (interval IoU over
+ranges, weighted per `GROUP_WEIGHTS`) against `SIM_REUSE_THRESHOLD` (default
+0.95; also `SIM_REUSE_TOPK`, `SIM_REUSE_ENABLED`). `POST /datasets/{sid}/simulate`
+runs the check first (skipped for uploads and with `?force=true`): on a match it
+does NOT start the run — it records a `reuse_recommendation` chat event, stores
+`ChatSession.reuse_recommendation` (persisted; rides `session_restore` as
+`reuse`), and returns `{"status": "reuse_recommended"}`, which `app.jsx` renders
+as a compact Reuse / Simulate-anyway bar by the Run button. `POST
+/datasets/{sid}/adopt` executes ONLY the pending recommendation (409 otherwise):
+after verifying the source end-to-end (all rows `simulation_completed_at`, files
+on disk — BEFORE any deletion), it REPLACES the current dataset with a copy of
+the source's (`in_files`/`out_files`/manifests, `emitted_files.json` rewritten
+with current paths + `adopted_from`; Simulation rows re-keyed to this
+session/user with signals carried and paths repointed; rows lacking arrays are
+healed from the copied `.out` files), then emits `dataset_ready` +
+`simulation_complete`. The section store / `ExtractionSession` keep the USER's
+own ranges — a later regeneration re-runs from those and overwrites the
+adoption. Every similarity entry point swallows failures (Qdrant down ⇒ the run
+proceeds normally). Backfill existing sessions:
+`python backend/sim_similarity.py backfill`. Key-free tests:
+`backend/tests/test_sim_similarity.py` + the reuse/adopt half of
+`test_simulate.py`.
 
 **Dataset upload** ("Upload → From file…" → `POST /datasets/{sid}/upload`, raw zip
 as the request body — no multipart dep): every `.in` member is syntax-checked by

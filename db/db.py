@@ -524,6 +524,60 @@ def upsert_chat_session(
         db.commit()
 
 
+def get_simulations_for_session(session_id: _uuid.UUID) -> List[Simulation]:
+    """All Simulation rows for one session, ordered by sample_index."""
+    from sqlmodel import select
+
+    with get_session() as db:
+        return list(
+            db.exec(
+                select(Simulation)
+                .where(Simulation.session_id == session_id)
+                .order_by(Simulation.sample_index)  # type: ignore[arg-type]
+            ).all()
+        )
+
+
+def get_extraction_session(session_id: _uuid.UUID) -> Optional[ExtractionSession]:
+    """Fetch one extraction-session row (the user's parameter ranges)."""
+    with get_session() as db:
+        return db.get(ExtractionSession, session_id)
+
+
+def list_extraction_sessions() -> List[ExtractionSession]:
+    """All extraction sessions — used by the similarity-index backfill CLI."""
+    from sqlmodel import select
+
+    with get_session() as db:
+        return list(db.exec(select(ExtractionSession)).all())
+
+
+def count_incomplete_simulations(session_id: _uuid.UUID) -> tuple:
+    """(total, not-yet-completed) Simulation counts for one session.
+
+    Reuse needs signal arrays, not just HDF5 output paths. A row with
+    simulation_completed_at set but signal_length still NULL is not adoptable.
+    """
+    from sqlmodel import select
+
+    with get_session() as db:
+        total = db.exec(
+            select(func.count()).select_from(Simulation).where(
+                Simulation.session_id == session_id
+            )
+        ).one()
+        incomplete = db.exec(
+            select(func.count()).select_from(Simulation).where(
+                Simulation.session_id == session_id,
+                (
+                    Simulation.simulation_completed_at.is_(None)  # type: ignore[union-attr]
+                    | Simulation.signal_length.is_(None)  # type: ignore[union-attr]
+                ),
+            )
+        ).one()
+        return (int(total), int(incomplete))
+
+
 def get_completed_simulations(
     model_filter: Optional[str] = None,
     num_layers_filter: Optional[int] = None,
@@ -537,7 +591,8 @@ def get_completed_simulations(
 
     with get_session() as db:
         stmt = select(Simulation).where(
-            Simulation.simulation_completed_at.is_not(None)  # type: ignore[union-attr]
+            Simulation.simulation_completed_at.is_not(None),  # type: ignore[union-attr]
+            Simulation.signal_length.is_not(None),  # type: ignore[union-attr]
         )
         if model_filter:
             stmt = stmt.where(Simulation.model == model_filter)  # type: ignore[arg-type]

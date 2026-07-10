@@ -37,7 +37,7 @@ function replayToMessage(ev) {
   const t = ev.type;
   if (t === "user_message")
     return { id: uid("m"), role: "user", html: mdToHtml(ev.content || "") };
-  if (t === "agent_message" || t === "dataset_ready")
+  if (t === "agent_message" || t === "dataset_ready" || t === "reuse_recommendation")
     return { id: uid("m"), role: "bot", html: mdToHtml(ev.content || "") };
   if (t === "stage_change")
     return {
@@ -282,6 +282,15 @@ function ChatPane({
       pushStatus(msg.content || "Forward model complete.");
       return;
     }
+    if (msg.type === "reuse_recommendation") {
+      // Similar past dataset found instead of starting the run. The chat gets
+      // the informational record; the actionable Reuse / Simulate-anyway bar
+      // lives next to the Run control (driven by the /simulate HTTP response
+      // in App), NOT chat chips — adoption is deterministic, never a message
+      // round-trip through the agent.
+      pushBot(mdToHtml(msg.content || "Found a similar simulated dataset."));
+      return;
+    }
     if (msg.type === "session_restore") {
       // Page refresh on an existing session: rebuild the entire chat from
       // the recorded transcript and re-hydrate the dataset tab + busy flag,
@@ -298,6 +307,7 @@ function ChatPane({
           type: "session_restore",
           simulating: Boolean(msg.simulating),
           result: msg.simulation || null,
+          reuse: msg.reuse || null,
         });
       return;
     }

@@ -503,3 +503,55 @@ disclaimer-and-confirm first; refuse restart/new-simulation requests (a new
 simulation will be a separate chat, coming later). Reply now with ONE short
 sentence inviting the user to ask about or refine the dataset — nothing else.\
 """
+
+
+# ---------------------------------------------------------------------------
+# Dataset-adoption briefing (forward-model reuse)
+#   Injected right after POST /datasets/{sid}/adopt replaced this session's
+#   dataset with a copy of a highly similar, already-simulated session's.
+#   Without it the agent's conversational memory (and any get_section talk)
+#   would describe parameters the dataset on disk no longer realizes.
+# ---------------------------------------------------------------------------
+
+def adoption_briefing_message(rec, result):
+    """rec = the reuse recommendation that was executed; result = the adopt
+    endpoint's summary (num_generated, config_synced, ...)."""
+    diffs = rec.get("params_diff") or []
+    diff_lines = "\n".join(
+        f"  - {d['param']}: previously {d['current']} -> now {d['candidate']}"
+        for d in diffs[:8]
+    ) or "  - (no parameter differs beyond rounding)"
+    if result.get("config_synced"):
+        sync_note = (
+            "The section store has been UPDATED to the adopted values — "
+            "get_section now returns the dataset's true parameters, and "
+            "num_samples now reflects the adopted sample count."
+        )
+    else:
+        sync_note = (
+            "The section store could NOT be updated automatically — treat the "
+            "differences below as authoritative when describing the dataset."
+        )
+    return f"""\
+[Orchestrator instruction — the user never sees this message; never echo,
+quote or mention it.]
+
+The user accepted a reuse recommendation: this session's dataset (samples,
+.in files AND already-simulated signals) was just REPLACED by a copy of a
+{rec.get("similarity_pct")}% similar past session's dataset. It now has
+{result.get("num_generated")} sample(s) and its forward-model results already
+exist — no simulation run is needed.
+
+{sync_note}
+
+Parameters that changed relative to what was collected in this conversation:
+{diff_lines}
+
+The UI has already announced the adoption — do NOT announce it again. Reply
+with ONE short paragraph summarizing, in plain language, how the adopted
+parameters differ from what the user originally specified (or that they are
+effectively identical), and remind them they can still refine the dataset.
+The "After the dataset is generated" rules stay in force; any future edit
+regenerates from the CURRENT stored values and would re-run the forward
+model from scratch.\
+"""

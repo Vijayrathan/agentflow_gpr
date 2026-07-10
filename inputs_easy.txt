@@ -17,7 +17,7 @@ Buried target:
 
 ---
 
-waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=700000000; waveform_name=ricker_700mhz_peak
+    waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=700000000; waveform_name=ricker_700mhz_peak
 
 ---
 
