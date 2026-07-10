@@ -36,3 +36,4 @@ test_notebooks/
 .pytest_cache/
 .vscode/
 .inputs_easy.txt
+db/mineru_parsed

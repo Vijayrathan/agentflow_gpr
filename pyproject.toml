@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.15.0",
     "colorama>=0.4.6",
+    "cython>=3.2.8",
     "deepagents>=0.4.4",
     "docling>=2.75.0",
     "dvc>=3.67.1",
