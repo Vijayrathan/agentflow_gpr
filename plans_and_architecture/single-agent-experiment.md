@@ -88,6 +88,17 @@ _after_sampling            # "peplinski_derive" if state.get("sample_validation_
                            #  any re-entry means gate 1 passed -> derive chain)
 ```
 
+The standalone stage driver also performs the API's eager check after every
+agent turn once a sampling snapshot exists. Complete cross-edits redraw
+immediately; incomplete edits stay deferred to the post-`advanced_params`
+branch.
+
+`layer_sampling` is wrapped with the same failure-remediation contract as the
+API driver: classify the exception with the shared helper, inject
+`layer_sampling_remediation_message(...)` into the existing agent thread, wait
+for a complete changed section, retry, then resume at `waveform` on the initial
+pass or `peplinski_derive` on a later re-entry.
+
 ### Remediation (same agent, same thread)
 
 ```python

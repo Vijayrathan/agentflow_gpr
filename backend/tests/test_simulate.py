@@ -8,6 +8,7 @@ and guards the /simulate endpoint.
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -117,8 +118,9 @@ def test_run_batch_skip_existing_counts_output(tmp_path, monkeypatch):
     # existing .out still reported so DB paths can be (re)recorded
     assert result["outputs"][0]["out_file"].endswith("demo_1.out")
     assert events == [{
-        "event": "done", "index": 1, "total": 1, "filename": "demo_1.in",
-        "status": "skipped", "out_file": result["outputs"][0]["out_file"],
+        "event": "done", "index": 1, "total": 1, "completed": 1,
+        "filename": "demo_1.in", "status": "skipped",
+        "out_file": result["outputs"][0]["out_file"],
     }]
 
 
@@ -167,6 +169,224 @@ def test_run_batch_missing_inputs_raise(tmp_path):
     empty.mkdir()
     with pytest.raises(FileNotFoundError):
         simulate.run_batch_simulation(empty)
+
+
+def _clear_backend_env(monkeypatch):
+    for name in ("GPR_GPU", "GPR_GPU_IDS", "GPR_SIM_WORKERS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_execution_plan_defaults_to_cpu_serial(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    plan = simulate.resolve_execution()
+    assert (plan.gpu, plan.workers, plan.gpu_arg_for(0)) == (False, 1, None)
+    # a serial CPU run must not throttle gprMax's own OpenMP threads
+    assert plan.omp_threads is None
+
+
+def test_execution_plan_from_env(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GPR_GPU", "1")
+    plan = simulate.resolve_execution()
+    assert plan.gpu is True
+    # GPU default: overlap models so the device is not idle during model build
+    assert plan.workers == simulate._DEFAULT_WORKERS_PER_GPU
+    assert plan.omp_threads >= 1
+
+    monkeypatch.setenv("GPR_SIM_WORKERS", "5")
+    assert simulate.resolve_execution().workers == 5
+    # explicit arguments beat the environment
+    assert simulate.resolve_execution(gpu=False, workers=1).gpu is False
+
+
+def test_execution_plan_ignores_malformed_env(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GPR_GPU_IDS", "zero,one")
+    monkeypatch.setenv("GPR_SIM_WORKERS", "lots")
+    plan = simulate.resolve_execution()
+    # a typo in a deployment env var must not make the batch unstartable
+    assert (plan.gpu, plan.gpu_ids, plan.workers) == (False, [], 1)
+
+
+def test_execution_plan_spreads_models_over_devices(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    plan = simulate.resolve_execution(gpu_ids=[0, 1])
+    assert plan.gpu is True
+    assert plan.workers == 2 * simulate._DEFAULT_WORKERS_PER_GPU
+    assert [plan.gpu_arg_for(i) for i in range(3)] == [[[0]], [[1]], [[0]]]
+    # no explicit IDs => gprMax picks device 0
+    assert simulate.resolve_execution(gpu=True).gpu_arg_for(0) == [[]]
+
+
+def test_run_batch_passes_gpu_arg_to_solver(tmp_path, monkeypatch):
+    import concurrent.futures as futures
+
+    _clear_backend_env(monkeypatch)
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["demo_1.in"])
+    out_dir = tmp_path / "out_files"
+    out_dir.mkdir()
+    # GPU mode always uses the pool; swap in threads so the stub applies
+    monkeypatch.setattr(
+        simulate, "_make_pool", lambda plan: futures.ThreadPoolExecutor(plan.workers)
+    )
+
+    seen = []
+    runner = _fake_runner(out_dir)
+
+    def spy(tmp_in, n, gpu_arg, verbose):
+        seen.append(gpu_arg)
+        return runner(tmp_in, n, gpu_arg, verbose)
+
+    monkeypatch.setattr(simulate, "run_simulation", spy)
+    result = simulate.run_batch_simulation(
+        in_dir, output_dir=out_dir, gpu=True, gpu_ids=[1], workers=1
+    )
+
+    assert seen == [[[1]]]
+    assert (result["mode"], result["workers"], result["gpu_ids"]) == ("gpu", 1, [1])
+
+
+def test_run_batch_parallel_runs_every_file(tmp_path, monkeypatch):
+    # The parallel driver is exercised through a thread pool so the stubbed
+    # solver still applies (real runs use spawned processes — see _make_pool).
+    import concurrent.futures as futures
+
+    _clear_backend_env(monkeypatch)
+    in_dir = tmp_path / "in_files"
+    names = [f"demo_{i}.in" for i in range(1, 6)]
+    _write_in_files(in_dir, names)
+    out_dir = tmp_path / "out_files"
+    out_dir.mkdir()
+    monkeypatch.setattr(simulate, "run_simulation", _fake_runner(out_dir, fail={"demo_3.in"}))
+
+    inflight = {"now": 0, "peak": 0}
+    real_execute = simulate._execute_one
+
+    def counting_execute(task):
+        inflight["now"] += 1
+        inflight["peak"] = max(inflight["peak"], inflight["now"])
+        try:
+            time.sleep(0.05)  # hold the slot so genuine overlap is observable
+            return real_execute(task)
+        finally:
+            inflight["now"] -= 1
+
+    monkeypatch.setattr(simulate, "_execute_one", counting_execute)
+    monkeypatch.setattr(
+        simulate, "_make_pool", lambda plan: futures.ThreadPoolExecutor(plan.workers)
+    )
+
+    events = []
+    result = simulate.run_batch_simulation(
+        in_dir, output_dir=out_dir, workers=3, progress=events.append
+    )
+
+    assert result["succeeded"] == 4
+    assert result["failed"] == 1
+    assert result["errors"][0]["filename"] == "demo_3.in"
+    assert sorted(o["filename"] for o in result["outputs"]) == sorted(
+        n for n in names if n != "demo_3.in"
+    )
+    assert result["workers"] == 3
+    # models really do overlap, and never more than `workers` at a time
+    assert 1 < inflight["peak"] <= 3
+    # progress stays monotonic even though files finish out of order
+    done_counts = [e["completed"] for e in events if e["event"] == "done"]
+    assert done_counts == [1, 2, 3, 4, 5]
+    assert not (out_dir / "_tmp").exists()
+
+
+def test_run_batch_parallel_survives_dead_worker(tmp_path, monkeypatch):
+    # A worker process can die outright (CUDA fault, OOM): that file fails,
+    # the batch continues.
+    import concurrent.futures as futures
+
+    _clear_backend_env(monkeypatch)
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["a_1.in", "b_2.in"])
+    out_dir = tmp_path / "out_files"
+    out_dir.mkdir()
+    monkeypatch.setattr(simulate, "run_simulation", _fake_runner(out_dir))
+
+    real_execute = simulate._execute_one
+
+    def flaky(task):
+        if task["filename"] == "a_1.in":
+            raise RuntimeError("worker process died")
+        return real_execute(task)
+
+    monkeypatch.setattr(simulate, "_execute_one", flaky)
+    monkeypatch.setattr(
+        simulate, "_make_pool", lambda plan: futures.ThreadPoolExecutor(plan.workers)
+    )
+
+    result = simulate.run_batch_simulation(in_dir, output_dir=out_dir, workers=2)
+
+    assert (result["succeeded"], result["failed"]) == (1, 1)
+    assert "worker process died" in result["errors"][0]["error"]
+
+
+def test_failed_model_does_not_poison_the_next_one(tmp_path, monkeypatch):
+    # gprMax leaves its built grid in a module-level global when a model
+    # raises; the next api() call in the same process would then silently
+    # reuse the DEAD model's geometry ("not re-processed, i.e. geometry
+    # fixed") instead of building the new one.
+    import types
+
+    _clear_backend_env(monkeypatch)
+    fake_mbr = types.ModuleType("gprMax.model_build_run")
+    fake_mbr.G = object()
+    monkeypatch.setitem(sys.modules, "gprMax.model_build_run", fake_mbr)
+
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["a_1.in", "b_2.in"])
+    out_dir = tmp_path / "out_files"
+    out_dir.mkdir()
+
+    saw_leftover_grid = []
+    runner = _fake_runner(out_dir, fail={"a_1.in"})
+
+    def spy(tmp_in, n, gpu_arg, verbose):
+        saw_leftover_grid.append(hasattr(fake_mbr, "G"))
+        return runner(tmp_in, n, gpu_arg, verbose)
+
+    monkeypatch.setattr(simulate, "run_simulation", spy)
+    result = simulate.run_batch_simulation(in_dir, output_dir=out_dir)
+
+    # first file inherits the pre-existing global, second must start clean
+    assert saw_leftover_grid == [True, False]
+    assert (result["succeeded"], result["failed"]) == (1, 1)
+
+
+def test_gpu_runs_never_execute_in_the_calling_process(tmp_path, monkeypatch):
+    # api.py runs batches in a thread of the uvicorn process; a CUDA context
+    # must never be created there, so GPU mode uses the pool even at workers=1.
+    import concurrent.futures as futures
+
+    _clear_backend_env(monkeypatch)
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["demo_1.in"])
+    out_dir = tmp_path / "out_files"
+    out_dir.mkdir()
+    monkeypatch.setattr(simulate, "run_simulation", _fake_runner(out_dir))
+
+    pools = []
+
+    def tracking_pool(plan):
+        pools.append(plan)
+        return futures.ThreadPoolExecutor(plan.workers)
+
+    monkeypatch.setattr(simulate, "_make_pool", tracking_pool)
+    simulate.run_batch_simulation(in_dir, output_dir=out_dir, gpu=True, workers=1)
+    assert [p.workers for p in pools] == [1]
+
+    # CPU at workers=1 stays in-process (no pool, no spawn overhead)
+    pools.clear()
+    simulate.run_batch_simulation(
+        in_dir, output_dir=out_dir, gpu=False, workers=1, skip_existing=False
+    )
+    assert pools == []
 
 
 def test_record_simulation_outputs_maps_samples(monkeypatch):

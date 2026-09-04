@@ -36,6 +36,12 @@ dependencies = [
     "uvicorn>=0.41.0",
 ]
 
+# NOTE: pycuda (needed only for the GPU forward model — see CLAUDE.md "Solver
+# backend") is deliberately NOT declared here. It ships as source only and its
+# build needs the CUDA toolkit headers, so listing it would break `uv sync` and
+# `uv lock` on every machine without CUDA, including Macs. Install it directly
+# on the GPU host instead: `uv pip install pycuda`.
+
 [dependency-groups]
 dev = [
     "dotenv>=0.9.9",

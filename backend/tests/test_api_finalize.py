@@ -50,6 +50,26 @@ def _sampled_manifest():
     }
 
 
+def _derived_manifest():
+    return {
+        "eps_r_aggregate": {"eps_r_max": 12.0, "eps_r_min": 5.0},
+        "samples": [
+            {
+                "sample_id": 1,
+                "layers": [
+                    {
+                        "name": "sand",
+                        "eps_r_dry": 5.0,
+                        "eps_r_wet": 12.0,
+                        "sigma_dry": 0.004,
+                        "sigma_wet": 0.021,
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def _global_derive():
     return {
         "source_height_m": 0.25,
@@ -80,6 +100,7 @@ def test_build_simulation_rows_maps_emitted_file_and_sample_target():
         sampled_manifest=_sampled_manifest(),
         global_derive=_global_derive(),
         emitted_manifest={"files": [{"sample_id": 1, "path": "/tmp/demo_1.in"}]},
+        derived_manifest=_derived_manifest(),
     )
 
     assert len(rows) == 1
@@ -95,13 +116,39 @@ def test_build_simulation_rows_maps_emitted_file_and_sample_target():
     assert row["boxes"] == [_sampled_manifest()["samples"][0]["targets"][1]]
     assert row["spheres"] is None
     assert row["layers"][0]["name"] == "sand"
+    # eps/sigma labels joined from the derive manifest, aligned with `layers`
+    assert row["derived_layers"] == _derived_manifest()["samples"][0]["layers"]
+
+
+def test_build_simulation_rows_without_derive_manifest_leaves_labels_null():
+    cfg = DatasetConfig(num_samples=1, model_basename="demo", output_dir="./dataset/demo")
+    rows = api._build_simulation_rows(
+        session_uuid=uuid.uuid4(),
+        user_id="user-1",
+        cfg=cfg,
+        wf=ExtractedWaveform(
+            waveform_kind="ricker",
+            waveform_amplitude=1.0,
+            waveform_center_freq_hz=400e6,
+            waveform_name="ricker_400mhz",
+        ),
+        ant=ExtractedAntenna(tx_rx_offset_m=0.12, antenna_axis="x"),
+        adv=None,
+        sampled_manifest=_sampled_manifest(),
+        global_derive=_global_derive(),
+        emitted_manifest={"files": [{"sample_id": 1, "path": "/tmp/demo_1.in"}]},
+    )
+
+    assert rows[0]["derived_layers"] is None
 
 
 def test_finalize_dataset_sync_upserts_session_and_batches_rows(tmp_path, monkeypatch):
     sampled = tmp_path / "sampled_layers.json"
+    derived = tmp_path / "derived_layers.json"
     global_path = tmp_path / "global_derive.json"
     emitted = tmp_path / "emitted_files.json"
     sampled.write_text(api.json.dumps(_sampled_manifest()), encoding="utf-8")
+    derived.write_text(api.json.dumps(_derived_manifest()), encoding="utf-8")
     global_path.write_text(api.json.dumps(_global_derive()), encoding="utf-8")
     emitted.write_text(
         api.json.dumps({"in_dir": str(tmp_path / "in_files"), "n_written": 1, "files": [{"sample_id": 1, "path": str(tmp_path / "demo_1.in")}], "errors": []}),
@@ -156,6 +203,7 @@ def test_finalize_dataset_sync_upserts_session_and_batches_rows(tmp_path, monkey
             "output_dir": str(tmp_path),
             "in_dir": str(tmp_path / "in_files"),
             "sampled_layers_json": str(sampled),
+            "derived_layers_json": str(derived),
             "global_derive_json": str(global_path),
             "emitted_files_json": str(emitted),
         },
@@ -170,6 +218,7 @@ def test_finalize_dataset_sync_upserts_session_and_batches_rows(tmp_path, monkey
     assert fake_db.row.num_samples_requested == 1
     assert fake_db.row.model_config_data["dataset_config"]["model_basename"] == "demo"
     assert inserted_rows[0]["input_file_path"].endswith("demo_1.in")
+    assert inserted_rows[0]["derived_layers"][0]["sigma_wet"] == 0.021
     # Finalize is idempotent: the session's old rows are deleted BEFORE the
     # new batch is inserted (a regeneration replaces them, never duplicates).
     assert len(deleted_sessions) == 1

@@ -454,7 +454,15 @@ function App() {
     (msg) => {
       if (msg.type === "simulation_progress") {
         const total = msg.total || 1;
-        const done = msg.event === "done" ? msg.index : msg.index - 1;
+        // `completed` is a running count of finished files — the only
+        // monotonic source once several models solve in parallel and finish
+        // out of order (msg.index is the file's position in the batch).
+        const done =
+          typeof msg.completed === "number"
+            ? msg.completed
+            : msg.event === "done"
+              ? msg.index
+              : msg.index - 1;
         const p = clamp(done / total, 0, 1);
         setSolving(true);
         setSim({ done, total });

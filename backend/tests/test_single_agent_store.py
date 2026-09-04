@@ -223,6 +223,7 @@ def test_samples_stale():
 def test_after_sampling_routes_by_gate_marker():
     assert sap._after_sampling({}) == "waveform"
     assert sap._after_sampling({"sample_validation_passed": True}) == "peplinski_derive"
+    assert sap._after_sampling({"halted": True}) == END
 
 
 def test_route_after_advanced():
@@ -236,6 +237,161 @@ def test_route_after_advanced():
     state["dataset_config"] = {"num_samples": 10}
     assert sap._route_after_advanced(state) == "layer_sampling"
     assert sap._route_after_advanced({"halted": True}) == END
+
+
+# ---------------------------------------------------------------------------
+# API-parity eager resampling / sampling remediation in the standalone graph
+# ---------------------------------------------------------------------------
+
+def test_eager_resample_during_collect_syncs_snapshot(monkeypatch):
+    state = {
+        "dataset_config": {"num_samples": 3},
+        "layers": VALID_LAYERS,
+        "target_ranges": {},
+    }
+    state["sampling_snapshot"] = sap._sampling_inputs(state)
+    for section, payload in state.items():
+        if section in sap.SECTION_SCHEMA:
+            sap._STORE[section] = json.loads(json.dumps(payload))
+
+    edited_target = {
+        "cylinders": [{
+            "name": "pipe",
+            "material": "pec",
+            "x_offset_min_m": -0.2,
+            "x_offset_max_m": 0.2,
+            "depth_min_m": 0.2,
+            "depth_max_m": 0.4,
+            "radius_min_m": 0.03,
+            "radius_max_m": 0.07,
+        }]
+    }
+    sap._STORE["target_ranges"] = edited_target
+    calls = []
+
+    def fake_sampling(state_arg):
+        calls.append(json.loads(json.dumps(state_arg)))
+        return {"sampling_snapshot": sap._sampling_inputs(state_arg)}
+
+    monkeypatch.setattr(sap, "_run_layer_sampling_or_remediate", fake_sampling)
+
+    halt_reason = sap._maybe_resample_stale_during_collect(state)
+
+    assert halt_reason is None
+    assert len(calls) == 1
+    assert calls[0]["target_ranges"] == edited_target
+    assert state["target_ranges"] == edited_target
+    assert state["sampling_snapshot"]["target_ranges"] == edited_target
+
+
+def test_eager_resample_defers_incomplete_sampling_edit(monkeypatch):
+    state = {
+        "dataset_config": {"num_samples": 3},
+        "layers": VALID_LAYERS,
+        "target_ranges": {},
+    }
+    state["sampling_snapshot"] = sap._sampling_inputs(state)
+    sap._STORE.update({
+        "dataset_config": {"num_samples": 3},
+        "layers": {"num_layers": "not-an-int"},
+        "target_ranges": {},
+    })
+    calls = []
+    monkeypatch.setattr(
+        sap,
+        "_run_layer_sampling_or_remediate",
+        lambda state_arg: calls.append(state_arg) or {},
+    )
+
+    halt_reason = sap._maybe_resample_stale_during_collect(state)
+
+    assert halt_reason is None
+    assert calls == []
+    assert state["sampling_snapshot"]["layers"] == VALID_LAYERS
+
+
+def test_sampling_failure_remediates_and_retries(monkeypatch):
+    sap._STORE["dataset_config"] = {"num_samples": 3}
+    sap._STORE["layers"] = VALID_LAYERS
+    state = {
+        "dataset_config": {"num_samples": 3},
+        "layers": VALID_LAYERS,
+        "target_ranges": None,
+    }
+    calls = []
+
+    def fake_layer_sampling(state_arg):
+        calls.append(json.loads(json.dumps(state_arg)))
+        if len(calls) == 1:
+            raise ValueError(
+                "Could not draw a feasible sample for layer after 200 retries"
+            )
+        return {"sampling_snapshot": sap._sampling_inputs(state_arg)}
+
+    def fake_remediation(kickoff, display_name):
+        assert "Layer + Target Sampling" in kickoff
+        assert display_name == "layer sampling remediation"
+        sap._STORE["target_ranges"] = {}
+        return {"target_ranges"}, None
+
+    monkeypatch.setattr(sap, "layer_sampling_node", fake_layer_sampling)
+    monkeypatch.setattr(sap, "_run_remediation", fake_remediation)
+
+    updates = sap._run_layer_sampling_or_remediate(state)
+
+    assert len(calls) == 2
+    assert updates["target_ranges"] == {}
+    assert updates["sampling_snapshot"]["target_ranges"] == {}
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_next"),
+    [
+        ({}, "waveform"),
+        ({"sample_validation_passed": True}, "peplinski_derive"),
+    ],
+)
+def test_sampling_retry_resumes_at_api_equivalent_stage(
+    monkeypatch, state, expected_next
+):
+    attempts = 0
+
+    def fake_layer_sampling(state_arg):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ValueError("Could not draw a feasible sample")
+        return {"sampling_snapshot": sap._sampling_inputs(state_arg)}
+
+    monkeypatch.setattr(sap, "layer_sampling_node", fake_layer_sampling)
+    monkeypatch.setattr(
+        sap,
+        "_run_remediation",
+        lambda _kickoff, _display_name: ({"layers"}, None),
+    )
+
+    updates = sap.layer_sampling_graph_node(state)
+    routed_state = {**state, **updates}
+
+    assert attempts == 2
+    assert sap._after_sampling(routed_state) == expected_next
+
+
+def test_sampling_failure_can_halt(monkeypatch):
+    def broken_sampling(_state):
+        raise ValueError("Could not draw a feasible sample")
+
+    monkeypatch.setattr(sap, "layer_sampling_node", broken_sampling)
+    monkeypatch.setattr(
+        sap,
+        "_run_remediation",
+        lambda _kickoff, _display_name: (set(), "user exited during remediation"),
+    )
+
+    updates = sap._run_layer_sampling_or_remediate({})
+
+    assert updates["halted"] is True
+    assert updates["halt_reason"] == "user exited during remediation"
 
 
 # ---------------------------------------------------------------------------

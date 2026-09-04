@@ -193,6 +193,16 @@ class Simulation(SQLModel, table=True):
     )
     num_layers: int = Field(sa_column=Column(Integer, nullable=False))
 
+    # Derived dielectric labels, one entry per `layers` entry IN THE SAME ORDER:
+    # {name, eps_r_dry, eps_r_wet, sigma_dry, sigma_wet}. eps is the in-band real
+    # permittivity and sigma the effective conductivity (S/m) at the two edges of
+    # the layer's theta_v band — both come straight from gprMax's own Peplinski
+    # routine (backend.dataset_sampling.peplinski_derive). Nullable: an adopted or
+    # legacy dataset can predate the derive manifest.
+    derived_layers: Optional[List[Dict[str, Any]]] = Field(
+        default=None, sa_column=Column(JSONB, nullable=True)
+    )
+
     # ── Geometry objects (variable-length → JSONB, nullable) ──────────────
     cylinders: Optional[List[Dict[str, Any]]] = Field(
         default=None, sa_column=Column(JSONB, nullable=True)

@@ -1,7 +1,8 @@
 # NumPy 2.0 compatibility: np.NINF was removed, use -np.inf instead
 # Patch must be applied before any dependencies import numpy
 import numpy as np
-if not hasattr(np, 'NINF'):
+
+if not hasattr(np, "NINF"):
     np.NINF = -np.inf
 
 import re
@@ -22,6 +23,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from langchain_core.tools import tool
+
 # 2. Embedding & Reranking Libraries
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
 
@@ -37,8 +39,13 @@ DEFAULT_QDRANT_URL = "http://localhost:6333"
 _NON_TOPIC_FOLDERS = {"_to_review", "own_work_proposals"}
 _MISC_TOPIC = "misc"
 
+
 class GeophysicsRAG:
-    def __init__(self, mode: Literal["training", "inference"] = "inference", qdrant_url: str | None = None):
+    def __init__(
+        self,
+        mode: Literal["training", "inference"] = "inference",
+        qdrant_url: str | None = None,
+    ):
         """
         Initialize RAG system with mode-specific model loading.
 
@@ -59,24 +66,26 @@ class GeophysicsRAG:
         if mode == "training":
             print("Training mode: Loading models for indexing...")
             # Training mode: Need encoder and text splitter for indexing
-            self.encoder = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
-            
+            self.encoder = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
+
             # Setup Semantic Chunker
-            base_embedder = HuggingFaceBgeEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+            base_embedder = HuggingFaceBgeEmbeddings(
+                model_name="BAAI/bge-small-en-v1.5"
+            )
             self.text_splitter = SemanticChunker(
-                base_embedder, 
+                base_embedder,
                 breakpoint_threshold_type="percentile",
-                breakpoint_threshold_amount=70 
+                breakpoint_threshold_amount=70,
             )
             self.reranker = None  # Not needed for training
-            
+
         elif mode == "inference":
             print("Inference mode: Loading models for retrieval...")
             # Inference mode: Need encoder and reranker for search
-            self.encoder = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
-            self.reranker = FlagReranker('BAAI/bge-reranker-v2-m3', use_fp16=True)
+            self.encoder = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
+            self.reranker = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
             self.text_splitter = None  # Not needed for inference
-        
+
         self._setup_collection()
 
     def _setup_collection(self):
@@ -96,7 +105,7 @@ class GeophysicsRAG:
                     vectors_config={
                         "dense": models.VectorParams(
                             size=1024,  # BGE-M3 dense dimension
-                            distance=models.Distance.COSINE
+                            distance=models.Distance.COSINE,
                         )
                     },
                     sparse_vectors_config={
@@ -105,7 +114,7 @@ class GeophysicsRAG:
                                 on_disk=True,  # Store sparse index on disk for persistence
                             )
                         )
-                    }
+                    },
                 )
                 self._ensure_payload_indexes()
             else:
@@ -117,10 +126,14 @@ class GeophysicsRAG:
                 )
         else:
             if self.mode == "training":
-                print(f"Collection '{self.collection_name}' already exists. Adding to existing collection...")
+                print(
+                    f"Collection '{self.collection_name}' already exists. Adding to existing collection..."
+                )
                 self._ensure_payload_indexes()
             else:
-                print(f"Collection '{self.collection_name}' found. Ready for inference.")
+                print(
+                    f"Collection '{self.collection_name}' found. Ready for inference."
+                )
 
     # Payload fields we filter/scope on. Keyword for categoricals, integer for year.
     _PAYLOAD_INDEXES = {
@@ -277,7 +290,7 @@ class GeophysicsRAG:
     def index_all_documents(self, docs_path: str | None = None):
         """
         Recursively index every supported document under `docs_path`
-        (default: repo-root `review_docs/`). PDFs are OCR-parsed via MinerU;
+        (default: repo-root `knowledge_source/`). PDFs are OCR-parsed via MinerU;
         markdown/text files are ingested natively. Each chunk is tagged with the
         document's metadata (topic/doc_type/year/author/title/source).
         Only available in training mode.
@@ -286,7 +299,7 @@ class GeophysicsRAG:
             raise ValueError("index_all_documents is only available in training mode.")
 
         if docs_path is None:
-            root = Path(__file__).parent.parent / "review_docs"
+            root = Path(__file__).parent.parent / "knowledge_source"
         else:
             root = Path(docs_path)
         if not root.exists():
@@ -294,11 +307,12 @@ class GeophysicsRAG:
 
         supported = {".pdf"} | self._TEXT_SUFFIXES
         files = [
-            p for p in sorted(root.rglob("*"))
+            p
+            for p in sorted(root.rglob("*"))
             if p.is_file()
             and p.suffix.lower() in supported
-            and ".claude" not in p.parts               # stray tooling dir
-            and not p.name.startswith("receipt_")      # non-technical receipts
+            and ".claude" not in p.parts  # stray tooling dir
+            and not p.name.startswith("receipt_")  # non-technical receipts
         ]
 
         if not files:
@@ -320,7 +334,9 @@ class GeophysicsRAG:
             meta = self._extract_metadata(f, root)
             all_chunks.extend(chunks)
             all_metas.extend([meta] * len(chunks))
-            print(f"  Extracted {len(chunks)} chunks (topic={meta['topic']}, type={meta['doc_type']})")
+            print(
+                f"  Extracted {len(chunks)} chunks (topic={meta['topic']}, type={meta['doc_type']})"
+            )
 
         if all_chunks:
             print(f"\nTotal chunks to index: {len(all_chunks)}")
@@ -375,7 +391,9 @@ class GeophysicsRAG:
         # Assign per-source chunk_index / total_chunks for provenance.
         source_totals: Dict[str, int] = {}
         for _, meta in pairs:
-            source_totals[meta.get("source", "")] = source_totals.get(meta.get("source", ""), 0) + 1
+            source_totals[meta.get("source", "")] = (
+                source_totals.get(meta.get("source", ""), 0) + 1
+            )
         source_seen: Dict[str, int] = {}
 
         ingested_at = datetime.now(timezone.utc).isoformat()
@@ -388,24 +406,28 @@ class GeophysicsRAG:
         total_batches = (len(filtered_chunks) + batch_size - 1) // batch_size
 
         for batch_idx in range(0, len(filtered_chunks), batch_size):
-            batch_chunks = filtered_chunks[batch_idx:batch_idx + batch_size]
-            batch_metas = filtered_metas[batch_idx:batch_idx + batch_size]
+            batch_chunks = filtered_chunks[batch_idx : batch_idx + batch_size]
+            batch_metas = filtered_metas[batch_idx : batch_idx + batch_size]
             current_batch_num = (batch_idx // batch_size) + 1
 
-            print(f"Processing batch {current_batch_num}/{total_batches} ({len(batch_chunks)} chunks)...")
+            print(
+                f"Processing batch {current_batch_num}/{total_batches} ({len(batch_chunks)} chunks)..."
+            )
 
             try:
                 # BGE-M3 Encoding
                 # returns dict with 'dense_vecs', 'lexical_weights', 'colbert_vecs'
-                output = self.encoder.encode(batch_chunks, return_dense=True, return_sparse=True)
+                output = self.encoder.encode(
+                    batch_chunks, return_dense=True, return_sparse=True
+                )
 
                 points = []
                 for i, (chunk, meta) in enumerate(zip(batch_chunks, batch_metas)):
                     # Format Dense Vector
-                    dense_vec = output['dense_vecs'][i]
+                    dense_vec = output["dense_vecs"][i]
 
                     # Format Sparse Vector (Convert dictionary to Qdrant format)
-                    sparse_weight_dict = output['lexical_weights'][i]
+                    sparse_weight_dict = output["lexical_weights"][i]
                     sparse_indices = [int(k) for k in sparse_weight_dict.keys()]
                     sparse_values = list(sparse_weight_dict.values())
 
@@ -421,20 +443,21 @@ class GeophysicsRAG:
                         "ingested_at": ingested_at,
                     }
 
-                    points.append(models.PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector={
-                            "dense": dense_vec,
-                            "sparse": models.SparseVector(indices=sparse_indices, values=sparse_values)
-                        },
-                        payload=payload
-                    ))
+                    points.append(
+                        models.PointStruct(
+                            id=str(uuid.uuid4()),
+                            vector={
+                                "dense": dense_vec,
+                                "sparse": models.SparseVector(
+                                    indices=sparse_indices, values=sparse_values
+                                ),
+                            },
+                            payload=payload,
+                        )
+                    )
 
                 # Upsert batch to Qdrant
-                self.qdrant.upsert(
-                    collection_name=self.collection_name,
-                    points=points
-                )
+                self.qdrant.upsert(collection_name=self.collection_name, points=points)
                 print(f"  ✓ Batch {current_batch_num} indexed successfully.")
 
             except Exception as e:
@@ -444,7 +467,9 @@ class GeophysicsRAG:
 
         print(f"Indexing complete. Processed {len(filtered_chunks)} chunks.")
 
-    def search(self, query: str, top_k: int = 5, query_filter: "models.Filter | None" = None):
+    def search(
+        self, query: str, top_k: int = 5, query_filter: "models.Filter | None" = None
+    ):
         """
         Step 3: Hybrid Retrieval + Reranking.
         Only available in inference mode.
@@ -463,7 +488,9 @@ class GeophysicsRAG:
 
         # Guard: server may have no collection yet (freshly started, pre-ingest).
         if not self.qdrant.collection_exists(self.collection_name):
-            print(f"⚠️  Collection '{self.collection_name}' not found on {self.qdrant_url}.")
+            print(
+                f"⚠️  Collection '{self.collection_name}' not found on {self.qdrant_url}."
+            )
             print("   Please run in training mode first to index documents.")
             return []
 
@@ -473,13 +500,15 @@ class GeophysicsRAG:
             print("   Please run in training mode first to index documents.")
             return []
 
-        print(f"Searching for: '{query}' (Collection has {collection_info.points_count} documents)")
+        print(
+            f"Searching for: '{query}' (Collection has {collection_info.points_count} documents)"
+        )
 
         # 1. Encode Query — wrap in list so BGE-M3 always returns batch format
         q_output = self.encoder.encode([query], return_dense=True, return_sparse=True)
 
-        q_dense = q_output['dense_vecs'][0]
-        q_sparse_weights = q_output['lexical_weights'][0]
+        q_dense = q_output["dense_vecs"][0]
+        q_sparse_weights = q_output["lexical_weights"][0]
 
         q_sparse_indices = [int(k) for k in q_sparse_weights.keys()]
         q_sparse_values = list(q_sparse_weights.values())
@@ -489,9 +518,13 @@ class GeophysicsRAG:
             response = self.qdrant.query_points(
                 collection_name=self.collection_name,
                 prefetch=[
-                    models.Prefetch(query=q_dense, using="dense", limit=20, filter=query_filter),
                     models.Prefetch(
-                        query=models.SparseVector(indices=q_sparse_indices, values=q_sparse_values),
+                        query=q_dense, using="dense", limit=20, filter=query_filter
+                    ),
+                    models.Prefetch(
+                        query=models.SparseVector(
+                            indices=q_sparse_indices, values=q_sparse_values
+                        ),
                         using="sparse",
                         limit=20,
                         filter=query_filter,
@@ -523,55 +556,59 @@ class GeophysicsRAG:
         ]
 
         if not candidate_docs:
-            print("⚠️  No candidate documents found. The query might not match any indexed content.")
+            print(
+                "⚠️  No candidate documents found. The query might not match any indexed content."
+            )
             return []
 
         print(f"Found {len(candidate_docs)} candidate documents for reranking...")
-        
+
         # 3. Reranking (The "Geophysics Judge")
         # Rerank the top 20 candidates to find the true best matches
         print("Reranking candidates...")
         pairs = [[query, doc] for doc in candidate_docs]
         scores = self.reranker.compute_score(pairs, normalize=True)
-        
+
         # Handle both single score and list of scores
         if not isinstance(scores, list):
             scores = [scores]
-        
+
         # Combine docs with scores and sort
-        ranked_results = sorted(zip(candidate_docs, scores), key=lambda x: x[1], reverse=True)
-        
+        ranked_results = sorted(
+            zip(candidate_docs, scores), key=lambda x: x[1], reverse=True
+        )
+
         return ranked_results[:top_k]
-    
+
     def generate(self, query: str, top_k: int = 3) -> str:
         """
         Step 4: Generate answer using LLM with retrieved context.
-        
+
         Args:
             query: User's question
             top_k: Number of documents to retrieve for context
-            
+
         Returns:
             Generated answer as a string
         """
         from langchain_openai import ChatOpenAI
         import os
-        
+
         # Get retrieved documents
         results = self.search(query, top_k=top_k)
-        
+
         if not results:
             return (
                 "I couldn't find specific information about that in the knowledge base."
             )
-        
+
         # Prepare context from retrieved documents
         context_parts = []
         for i, (doc, score) in enumerate(results, 1):
             context_parts.append(f"[Source {i}] (Relevance: {score:.2f})\n{doc}\n")
-        
+
         context = "\n".join(context_parts)
-        
+
         # Create prompt for LLM
         system_prompt = """You are a helpful assistant specializing in Ground Penetrating Radar (GPR) and geophysics.
 Your role is to answer questions based on the provided research documents and technical documentation.
@@ -597,19 +634,19 @@ Please provide a clear, informative answer based on these sources."""
         # Initialize LLM
         openai_api_key = os.getenv("OPENAI_API_KEY")
         openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        
+
         llm = ChatOpenAI(model=openai_model, api_key=openai_api_key, temperature=0.3)
-        
+
         # Generate response
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
+            {"role": "user", "content": user_prompt},
         ]
-        
+
         response = llm.invoke(messages)
-        
+
         return response.content
-    
+
     def list_sources(self) -> Dict[str, int]:
         """
         Maintenance helper: enumerate indexed documents by source filename with
@@ -644,9 +681,11 @@ Please provide a clear, informative answer based on these sources."""
             collection_name=self.collection_name,
             points_selector=models.FilterSelector(
                 filter=models.Filter(
-                    must=[models.FieldCondition(
-                        key="source", match=models.MatchValue(value=source)
-                    )]
+                    must=[
+                        models.FieldCondition(
+                            key="source", match=models.MatchValue(value=source)
+                        )
+                    ]
                 )
             ),
         )
@@ -655,19 +694,20 @@ Please provide a clear, informative answer based on these sources."""
         """
         Properly close the Qdrant client to avoid cleanup warnings.
         """
-        if hasattr(self, 'qdrant') and self.qdrant is not None:
+        if hasattr(self, "qdrant") and self.qdrant is not None:
             try:
                 self.qdrant.close()
             except Exception:
                 pass  # Ignore errors during cleanup
-    
+
     def __enter__(self):
         """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - ensures cleanup."""
         self.close()
+
 
 _rag_instance: GeophysicsRAG | None = None
 
@@ -705,13 +745,16 @@ def rag_search(
     property references). Returns relevant passages above the relevance
     threshold, or 'NO_RESULTS' if nothing relevant is found."""
     import traceback
+
     try:
         rag_system = _get_rag()
         results = rag_system.search(query, top_k=3)
         if not results:
             return "NO_RESULTS"
         # Filter by relevance threshold
-        relevant = [(doc, score) for doc, score in results if score >= RELEVANCE_THRESHOLD]
+        relevant = [
+            (doc, score) for doc, score in results if score >= RELEVANCE_THRESHOLD
+        ]
         if not relevant:
             return "NO_RESULTS"
         parts = []
@@ -727,15 +770,13 @@ def rag_search(
         return f"RAG_SEARCH_ERROR: {e}\n{tb}"
 
 
-
-
 # --- Usage Example ---
 if __name__ == "__main__":
     import sys
-    
+
     # Determine mode from command line or default to inference
     mode = sys.argv[1] if len(sys.argv) > 1 else "inference"
-    
+
     if mode == "training":
         # Training mode: Index all documents from retrieval_docs
         print("=" * 60)
@@ -750,7 +791,7 @@ if __name__ == "__main__":
         finally:
             if rag is not None:
                 rag.close()
-        
+
     elif mode == "inference":
         # Inference mode: Only perform retrieval
         print("=" * 60)
@@ -759,11 +800,11 @@ if __name__ == "__main__":
         rag = None
         try:
             rag = GeophysicsRAG(mode="inference")
-            
+
             # Example search
             query = "What is the frequency range of peplinski model?"
             results = rag.search(query)
-            
+
             print("\n--- Final Results ---")
             for i, (doc, score) in enumerate(results, 1):
                 print(f"\n[Result {i}, Score: {score:.4f}]")

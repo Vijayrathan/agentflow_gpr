@@ -60,7 +60,7 @@ This is the single most important design constraint. Violating it is never accep
 | `physics_modelling.py` | Peplinski ε computation via gprMax-native routines |
 | `validation_tools_new.py` | Tiered validation (Tier 0–4) for physics constraints |
 | `viz_projection.py` | Pure projection of the section store + pipeline manifests into the `model_update` scene payload for the live frontend visualization (no FastAPI/LLM imports) |
-| `simulate.py` | Batch gprMax forward-model runner (deterministic; lazy gprMax import). Backs the UI "Run forward model" button via `POST /datasets/{sid}/simulate` and doubles as a CLI |
+| `simulate.py` | Batch gprMax forward-model runner (deterministic; lazy gprMax import). Backs the UI "Run forward model" button via `POST /datasets/{sid}/simulate` and doubles as a CLI. Solver backend (CPU/OpenMP vs CUDA) and per-model concurrency are env-resolved — see Solver backend below |
 | `deck_validation.py` | Syntax validation for user-uploaded gprMax `.in` decks: safe preprocessing (mirrors gprMax's line handling but NEVER `exec`s `#python:` blocks; `#include_file:` rejected too) + gprMax's own `check_cmd_names` rules (lazy gprMax import) |
 | `sim_similarity.py` | Forward-model reuse: session-config similarity index over the `sim_sessions` Qdrant collection (raw normalized numeric feature vectors — NO embedding model — + payload hard filters + exact interval-IoU rescoring in Python). Deterministic, lazy `qdrant_client` import, failure-swallowing entry points; `python backend/sim_similarity.py backfill` indexes existing completed sessions |
 
@@ -233,6 +233,14 @@ START → dataset_config → layers → target_ranges → layer_sampling
   → target_placement → dataset_generation → END
 ```
 
+After the first `layer_sampling`, both the WebSocket/API driver and standalone
+graph check sampling-input staleness after every agent turn. A complete edit to
+`dataset_config`, `layers`, or `target_ranges` redraws samples immediately; an
+incomplete edit is deferred until it becomes complete. If `layer_sampling`
+raises, both drivers inject the same sampling-remediation prompt into the same
+agent thread, wait for at least one complete section change, retry sampling, and
+resume the interrupted path (waveform collection or the derive chain).
+
 On validation failure, the errors are injected into the single agent's ongoing
 conversation; it agrees the fix with the user and re-saves the offending section, then
 the gate re-runs. A global-remediation edit to a `RESAMPLE_SECTIONS` member routes back
@@ -264,6 +272,54 @@ h5py import — this is what makes a dataset reusable, see Forward-model reuse).
 endpoint 409s while a run or pipeline step is in flight; `simulating` +
 `simulation` ride along on `session_restore` so a refresh re-hydrates the run
 state. Key-free tests: `backend/tests/test_simulate.py` (solver stubbed).
+
+**Solver backend — CPU vs GPU, and per-model concurrency** (`simulate.resolve_execution`
+→ `ExecutionPlan`): gprMax's ONLY GPU backend is NVIDIA CUDA via `pycuda`
+(`fields_updates_gpu.py`; there is no Metal/OpenCL path and never will be here), so
+the backend is a property of the DEPLOYMENT, not a code branch — the GPU host sets
+env vars, laptops/CI leave them unset and get the OpenMP CPU solver. Explicit
+`run_batch_simulation(gpu=…, gpu_ids=…, workers=…)` arguments beat the environment;
+`api.py` passes none, so the UI button always follows the host's env:
+
+| Env var | Meaning | Default |
+|---------|---------|---------|
+| `GPR_GPU` | use the CUDA solver | off |
+| `GPR_GPU_IDS` | device IDs, e.g. `0` or `0,1` (implies `GPR_GPU`) | device 0 |
+| `GPR_SIM_WORKERS` | models solved **concurrently** | 2 per GPU; 1 on CPU |
+
+`pycuda` is installed ONLY on the GPU host, and NOT via `pyproject.toml`
+(`uv pip install pycuda`, with the CUDA toolkit headers + `nvcc` present): it is a
+source-only distribution whose build needs `cuda.h`, so declaring it — even as an
+optional extra — breaks `uv sync`/`uv lock` on every CUDA-less machine. Preflight
+the devices with `python backend/simulate.py --check-gpu` before flipping `GPR_GPU`.
+
+Concurrency is per-MODEL, never inside one model: each worker is a **spawned**
+process (`_make_pool`; forking with a CUDA context is undefined behaviour) running
+one `.in` end to end via `_execute_one`. This is what actually saturates a GPU here —
+a 2D GPR grid (single-cell z) is far too small to fill a modern device, and one
+sample's serial CPU-side model build overlaps another's solve. Consequences to
+preserve when editing:
+
+- Each concurrent model holds its own field arrays in VRAM ⇒ `GPR_SIM_WORKERS` is
+  bounded by device memory, and `_init_worker` splits `OMP_NUM_THREADS` between
+  workers (gprMax reads it at model-build time, `input_cmds_singleuse.py`).
+- `_execute_one` gets a PER-FILE tmp dir: the stray-artifact sweep (`#geometry_view`
+  .vti next to the deck) would otherwise steal another worker's in-flight files.
+- Submission is bounded to `workers` in flight, so a `start` event still means "running
+  now"; every progress event carries `completed` (a monotonic finished count) because
+  `index` is only the file's batch position and models finish out of order — `app.jsx`
+  drives the progress bar off `completed`.
+- `result["outputs"]` is consumed by filename (`_record_simulation_outputs`), never by
+  order. Output is bit-identical to a serial run — verified against the same decks.
+- A dead worker (CUDA fault/OOM) is charged to its file and the batch continues.
+- GPU runs ALWAYS take the pool, even at `workers=1` — `api.py` calls the batch from a
+  thread of the uvicorn process and a CUDA context must never be built there.
+- `_reset_gprmax_state()` runs after every FAILED model, and is not optional: gprMax
+  holds the built grid in a module-level global (`run_model`'s `global G`) that is
+  only `del`'d on a clean finish, so after an exception the next `api()` call in that
+  process silently reuses the dead model's geometry ("input file (not re-processed,
+  i.e. geometry fixed)") under the new file's name. It also pops any CUDA context
+  `solve_gpu` left behind, which otherwise aborts the process at exit.
 
 **Forward-model reuse** (`backend/sim_similarity.py`; fully deterministic — the
 agent is NEVER involved): after every fully successful generated run,

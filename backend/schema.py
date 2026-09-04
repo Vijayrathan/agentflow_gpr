@@ -579,10 +579,16 @@ class SampledSample(BaseModel):
 
 class DerivedLayer(BaseModel):
     """In-band relative permittivity edges for one sampled layer, evaluated with
-    gprMax's PeplinskiSoil at the operating frequency (calculate_er(f).real)."""
+    gprMax's PeplinskiSoil at the operating frequency (calculate_er(f).real),
+    plus the same edge bins' effective conductivity (gprMax's `Material.se`).
+
+    sigma is a LABEL only — it never feeds the grid budget (see the module
+    docstring of dataset_sampling.peplinski_derive)."""
     name: Optional[str] = None
     eps_r_dry: float    # driest bin  -> smallest eps -> largest lambda_max (domain)
     eps_r_wet: float    # wettest bin -> largest eps  -> smallest lambda_min (dx)
+    sigma_dry: float    # driest bin  effective conductivity, S/m
+    sigma_wet: float    # wettest bin effective conductivity, S/m
 
 
 class DerivedSample(BaseModel):

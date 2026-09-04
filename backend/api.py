@@ -65,6 +65,7 @@ from agentflow_single_agent import (  # noqa: E402
     SECTION_DISPLAY,
     SingleAgentSession,
     _changed_sections,
+    _sampling_failure_errors,
     _samples_stale,
     _scoped_output_dir,
     dataset_generation_node,
@@ -660,6 +661,10 @@ async def _run_forward_model(
         "output_dir": result["output_dir"],
         "rows_updated": rows_updated,
         "signals_updated": signals_updated,
+        # Which solver backend actually ran (env-resolved in simulate.py) —
+        # persisted so a restored session still shows how it was produced.
+        "mode": result.get("mode", "cpu"),
+        "workers": result.get("workers", 1),
         # Full tracebacks stay in the server log; the chat gets one line each.
         "errors": [
             {"filename": e["filename"],
@@ -667,10 +672,13 @@ async def _run_forward_model(
             for e in result.get("errors", [])
         ],
     }
+    backend_note = (
+        f"{summary['mode'].upper()} solver, {summary['workers']} model(s) in parallel"
+    )
     content = (
         f"Forward model complete — {summary['succeeded']} succeeded, "
         f"{summary['failed']} failed, {summary['skipped']} skipped "
-        f"(of {summary['total']}). Output written to "
+        f"(of {summary['total']}; {backend_note}). Output written to "
         f"{str(out_dir).replace(_project_root + '/', '')}."
     )
     chat.simulation_result = summary
@@ -1624,25 +1632,6 @@ async def _start_remediation(
     await _invoke_and_handle(chat, message)
 
 
-def _sampling_failure_errors(exc: Exception) -> list[str]:
-    """User-facing diagnostics for failures while drawing per-sample inputs."""
-    detail = str(exc).strip() or type(exc).__name__
-    errors = [f"[layers] {detail}"]
-    lowered = detail.lower()
-    if "feasible sample" in lowered or "theta_v" in lowered or "pore space" in lowered:
-        errors.append(
-            "[layers] Make the valid region larger: lower theta_v_max, lower "
-            "bulk density, raise particle density, or widen density ranges "
-            "toward values with enough porosity."
-        )
-    if "sand+clay" in lowered or "silt" in lowered:
-        errors.append(
-            "[layers] Adjust sand/clay ranges so sand + clay <= 100 is common, "
-            "not only barely possible."
-        )
-    return errors
-
-
 async def _run_layer_sampling_or_remediate(
     chat: ChatSession,
     resume: dict[str, Any],
@@ -1907,6 +1896,15 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
     sampled_manifest = _read_json(sampled_path)
     global_derive = _read_json(global_path)
     emitted_manifest = _read_json(emitted_path)
+    # eps/sigma labels. Tolerated as absent (rows keep derived_layers = NULL)
+    # rather than failing the finalize — a dataset without labels is still a
+    # dataset, and the derive chain is what guarantees the manifest exists.
+    derived_ref = artifacts.get("derived_layers_json")
+    derived_manifest = (
+        _read_json(Path(derived_ref))
+        if derived_ref and Path(derived_ref).is_file()
+        else {}
+    )
 
     status = "complete" if not payload.emission.get("errors") else "partial"
     with get_session() as db:
@@ -1941,6 +1939,7 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
         ant=ant,
         adv=adv,
         sampled_manifest=sampled_manifest,
+        derived_manifest=derived_manifest,
         global_derive=global_derive,
         emitted_manifest=emitted_manifest,
     )
@@ -1974,10 +1973,19 @@ def _build_simulation_rows(
     sampled_manifest: dict[str, Any],
     global_derive: dict[str, Any],
     emitted_manifest: dict[str, Any],
+    derived_manifest: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     files_by_sample = {
         int(item["sample_id"]): item
         for item in emitted_manifest.get("files", [])
+        if "sample_id" in item
+    }
+    # Per-layer eps/sigma from the Peplinski derive, keyed the same way. The
+    # layer lists are emitted in the same order by both manifests, so the entry
+    # at index i labels layers[i].
+    derived_by_sample = {
+        int(item["sample_id"]): item.get("layers") or []
+        for item in (derived_manifest or {}).get("samples", [])
         if "sample_id" in item
     }
     rows: list[dict[str, Any]] = []
@@ -2024,6 +2032,7 @@ def _build_simulation_rows(
             "output_dir": cfg.output_dir,
             "layers": sample.get("layers", []),
             "num_layers": len(sample.get("layers", [])),
+            "derived_layers": derived_by_sample.get(sample_id) or None,
             "cylinders": cylinders or None,
             "boxes": boxes or None,
             "spheres": None,  # spheres unsupported (2D thin-z); column kept for schema stability

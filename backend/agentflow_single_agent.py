@@ -27,7 +27,12 @@ What changes vs agentflow_langgraph.py
 - **Staleness branch.** Because the agent can edit `layers` / `dataset_config`
   / `target_ranges` at any time (even after sampling already ran), the inputs
   used at sampling time are snapshotted; a new conditional edge after
-  advanced_params re-runs layer_sampling if they changed.
+  advanced_params re-runs layer_sampling if they changed. The standalone driver
+  also mirrors the API's eager behavior: complete sampling-input edits during
+  later collection stages re-run layer_sampling immediately.
+- **Sampling remediation.** Layer/target sampling failures are routed into the
+  same conversation with the same remediation prompt used by `backend.api`, then
+  sampling is retried before the normal graph edge resumes.
 
 Quirks (intended):
 - A section pre-filled by a cross-edit makes its own later stage complete after
@@ -44,7 +49,7 @@ Graph
       -> dataset_config        (agent stage)
       -> layers                (agent stage)
       -> target_ranges         (agent stage)
-      -> layer_sampling        (derive; snapshots its inputs)
+      -> layer_sampling        (derive; snapshots its inputs; failures remediate)
       -> waveform              (agent stage)
       -> antenna               (agent stage)
       -> sample_validation     (GATE) --fail--> sample_remediation --> sample_validation
@@ -110,6 +115,7 @@ from single_agent_prompts import (
     SECTION_KICKOFF,
     sample_remediation_message,
     global_remediation_message,
+    layer_sampling_remediation_message,
 )
 
 dotenv.load_dotenv()
@@ -382,7 +388,7 @@ class SingleAgentSession:
             from langchain_openai import ChatOpenAI
             from langgraph.checkpoint.memory import InMemorySaver
             from backend.rag import rag_search
-            from backend.prompt_library import RAG_SUBAGENT_PROMPT
+            from single_agent_prompts import RAG_SUBAGENT_PROMPT
 
             rag_subagent = {
                 "name": "knowledge-agent",
@@ -504,19 +510,34 @@ def _invoke_agent(text: str) -> dict:
 # Stage driver + agent nodes
 # ---------------------------------------------------------------------------
 
-def _run_stage(section: str, display_name: str, kickoff: str) -> Optional[str]:
+def _run_stage(
+    section: str,
+    display_name: str,
+    kickoff: str,
+    state: PipelineState,
+) -> Optional[str]:
     """Drive the agent until the section is complete in the store.
 
     Returns None on success, or a halt reason if the user exits. If the section
     was already filled by an earlier cross-edit, the kickoff turn lets the
     agent confirm/summarise and the stage completes without user input.
+
+    This mirrors the API driver: after every agent turn, if a complete
+    cross-section edit made the already-drawn samples stale, re-run layer
+    sampling immediately instead of waiting until `advanced_params`.
     """
     _invoke_agent(kickoff)
+    halt_reason = _maybe_resample_stale_during_collect(state)
+    if halt_reason:
+        return halt_reason
     while not _stage_done(section):
         user_input = input("You: ").strip()
         if not user_input or user_input.lower() in ("quit", "exit"):
             return f"user exited during {display_name}"
         _invoke_agent(user_input)
+        halt_reason = _maybe_resample_stale_during_collect(state)
+        if halt_reason:
+            return halt_reason
     return None
 
 
@@ -525,12 +546,15 @@ def _make_agent_stage_node(section: str):
 
     def node(state: PipelineState) -> dict:
         _banner(f"Starting: {display_name}")
-        halt_reason = _run_stage(section, display_name, SECTION_KICKOFF[section])
+        halt_reason = _run_stage(section, display_name, SECTION_KICKOFF[section], state)
         if halt_reason:
             print("Exiting pipeline.")
             return {"halted": True, "halt_reason": halt_reason}
         print(f"\n>> {display_name} complete — {section} saved to state.\n")
-        return _state_sync()
+        updates = _state_sync()
+        if "sampling_snapshot" in state:
+            updates["sampling_snapshot"] = copy.deepcopy(state.get("sampling_snapshot"))
+        return updates
 
     return node
 
@@ -556,6 +580,92 @@ def _run_remediation(kickoff: str, display_name: str):
         if not user_input or user_input.lower() in ("quit", "exit"):
             return set(), f"user exited during {display_name}"
         _invoke_agent(user_input)
+
+
+def _sampling_failure_errors(exc: Exception) -> list[str]:
+    """User-facing diagnostics for failures while drawing per-sample inputs.
+
+    Imported by `backend.api` so both drivers inject identical remediation
+    guidance from one shared contract.
+    """
+    detail = str(exc).strip() or type(exc).__name__
+    errors = [f"[layers] {detail}"]
+    lowered = detail.lower()
+    if "feasible sample" in lowered or "theta_v" in lowered or "pore space" in lowered:
+        errors.append(
+            "[layers] Make the valid region larger: lower theta_v_max, lower "
+            "bulk density, raise particle density, or widen density ranges "
+            "toward values with enough porosity."
+        )
+    if "sand+clay" in lowered or "silt" in lowered:
+        errors.append(
+            "[layers] Adjust sand/clay ranges so sand + clay <= 100 is common, "
+            "not only barely possible."
+        )
+    return errors
+
+
+def _run_layer_sampling_or_remediate(state: PipelineState) -> dict:
+    """Run layer/target sampling, remediating draw failures in the same agent.
+
+    This is the standalone graph equivalent of `api._run_layer_sampling_or_remediate`:
+    the same remediation builder is injected into the same conversation, the
+    same snapshot-diff completion contract is used, and sampling is retried
+    until it succeeds or the user exits.
+    """
+    working_state = dict(state)
+    while True:
+        try:
+            updates = layer_sampling_node(working_state)
+            return {**_state_sync(), **updates}
+        except Exception as exc:
+            errors = _sampling_failure_errors(exc)
+            _banner("Fix Required — Layer + Target Sampling")
+            print("Layer + Target Sampling failed:")
+            for e in errors:
+                print(f"  - {e}")
+            changed, halt_reason = _run_remediation(
+                layer_sampling_remediation_message(errors, _STORE),
+                "layer sampling remediation",
+            )
+            if halt_reason:
+                print("Exiting pipeline.")
+                return {"halted": True, "halt_reason": halt_reason}
+            print(f"\n>> Updated {sorted(changed)} — re-running layer sampling.\n")
+            working_state.update(_state_sync())
+
+
+def layer_sampling_graph_node(state: PipelineState) -> dict:
+    """Graph-facing layer_sampling node with API-parity failure remediation."""
+    if state.get("halted"):
+        return {}
+    return _run_layer_sampling_or_remediate(state)
+
+
+def _maybe_resample_stale_during_collect(state: PipelineState) -> Optional[str]:
+    """Eager API-parity staleness check for standalone collection stages.
+
+    After `layer_sampling` has run, a complete edit to `dataset_config`,
+    `layers`, or `target_ranges` immediately redraws samples. Incomplete edits
+    are left alone; the deferred `_route_after_advanced` check still catches
+    them once complete.
+    """
+    snap = state.get("sampling_snapshot")
+    if snap is None:
+        return None
+    changed = {
+        s for s in SAMPLING_INPUT_SECTIONS
+        if _DEFAULT_SESSION.store.get(s) != snap.get(s)
+    }
+    if not changed:
+        return None
+    if not all(_stage_done(s) for s in changed):
+        return None
+
+    state.update(_state_sync())
+    updates = _run_layer_sampling_or_remediate(state)
+    state.update(updates)
+    return state.get("halt_reason") if state.get("halted") else None
 
 
 def sample_remediation_node(state: PipelineState) -> dict:
@@ -877,6 +987,8 @@ def _after_sampling(state: PipelineState) -> str:
     """First pass: gate 1 hasn't run yet -> continue to waveform. Any re-entry
     (staleness re-sample or global remediation) means gate 1 already passed ->
     jump straight to the derive chain."""
+    if state.get("halted"):
+        return END
     return "peplinski_derive" if state.get("sample_validation_passed") else "waveform"
 
 
@@ -915,7 +1027,7 @@ def build_graph():
         g.add_node(section, _make_agent_stage_node(section))
 
     # Deterministic derive / validate nodes
-    g.add_node("layer_sampling", layer_sampling_node)
+    g.add_node("layer_sampling", layer_sampling_graph_node)
     g.add_node("sample_validation", sample_validation_node)
     g.add_node("sample_remediation", sample_remediation_node)
     g.add_node("peplinski_derive", peplinski_derive_node)
@@ -935,7 +1047,7 @@ def build_graph():
     # Sampling runs after the target-range mini-stage on the first pass. It is
     # re-entered for staleness re-samples and for global remediation edits, in
     # which case it jumps straight to the derive chain.
-    g.add_conditional_edges("layer_sampling", _after_sampling, ["waveform", "peplinski_derive"])
+    g.add_conditional_edges("layer_sampling", _after_sampling, ["waveform", "peplinski_derive", END])
 
     g.add_conditional_edges("waveform", _linear_route("antenna"), ["antenna", END])
     g.add_conditional_edges("antenna", _linear_route("sample_validation"), ["sample_validation", END])

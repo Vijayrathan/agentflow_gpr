@@ -8,32 +8,39 @@ wheels/
 
 # Virtual environments
 .venv
-
 .env
-qdrant_storage/
+backend/.env
+
 .claude/
 
+.playwright-mcp/
+.vscode/
+
 # Simulation outputs and data
-simulation_outputs/
+
 *.out
 *.vti
 .DS_Store
 
 # DVC and data files
-datasets/
-dataset/
-*.in
-*.out
-*.vti
-dvc.lock
 
-.plans/
+dataset/
+
+
+.plans_and_architecture/
+
+
+evals/
 
 db/retrieval_docs/
-review_docs/
+knowledge_source/
 .cursor/
-test_notebooks/
+
 .pytest_cache/
-.vscode/
-.inputs_easy.txt
-db/mineru_parsed
+
+knowledge_source_parsed/
+OLD_CODE_FILES/
+conversation_samples/
+AGENT.md
+CLAUDE.md
+dvc/qdrant_storage.dvc

@@ -51,6 +51,7 @@ def derive_global(
     largest_extent_global_m: Optional[float] = None,
     deepest_target_bottom_global_m: Optional[float] = None,
     static_x_halfwidth_global_m: Optional[float] = None,
+    enforce_peplinski_gate: bool = True,
 ) -> GlobalDerived:
     """Size the single global grid/domain/depth/time window from the aggregated
     eps_r corners and the buried-target corners.
@@ -74,7 +75,7 @@ def derive_global(
     f_max = WANG_FHIGH_OVER_FP * f_peak
     bandwidth = f_max - f_min
     gate_ok = (f_min >= PEPLINSKI_FMIN_HZ) and (f_max <= PEPLINSKI_FMAX_HZ)
-    if not gate_ok:
+    if enforce_peplinski_gate and not gate_ok:
         raise ValueError(
             f"Peplinski gate FAIL: band [{f_min/1e6:.1f}, {f_max/1e6:.1f}] MHz "
             f"outside [{PEPLINSKI_FMIN_HZ/1e6:.0f}, {PEPLINSKI_FMAX_HZ/1e6:.0f}] MHz "
@@ -216,6 +217,7 @@ def derive_and_write_global(
     largest_extent_global_m: Optional[float] = None,
     deepest_target_bottom_global_m: Optional[float] = None,
     static_x_halfwidth_global_m: Optional[float] = None,
+    enforce_peplinski_gate: bool = True,
 ):
     """Derive the global grid/domain/depth/time window and persist it.
 
@@ -228,6 +230,7 @@ def derive_and_write_global(
         largest_extent_global_m=largest_extent_global_m,
         deepest_target_bottom_global_m=deepest_target_bottom_global_m,
         static_x_halfwidth_global_m=static_x_halfwidth_global_m,
+        enforce_peplinski_gate=enforce_peplinski_gate,
     )
     path = write_global(grid, output_dir, filename=filename)
     return grid, path

@@ -5,9 +5,12 @@ After the antenna stage, every parameter needed to compute soil permittivity is
 known. We derive the in-band relative permittivity for each drawn sample using
 gprMax's OWN Peplinski routine (gprMax.materials.PeplinskiSoil), so the sizing
 eps_r matches — by construction — the eps gprMax will build at model-build time
-from #soil_peplinski. We do NOT reimplement the mixing model, and we do NOT
-derive sigma: only the real, in-band eps_r enters the wavelength / grid budget,
-and gprMax writes the actual eps/sigma materials itself.
+from #soil_peplinski. We do NOT reimplement the mixing model.
+
+sigma is recorded alongside eps as a LABEL only (it is what gprMax itself writes
+onto the edge-bin materials, `Material.se`). It plays no part in sizing: only the
+real, in-band eps_r enters the wavelength / grid budget, and the global aggregate
+carries eps corners only.
 
 Procedure per sampled layer:
   1. Build PeplinskiSoil(name, sand_frac, clay_frac, rho_b, rho_s,
@@ -68,7 +71,7 @@ class _GridStub:
         self.materials: list = []
 
 
-def derive_layer_eps(
+def derive_layer_properties(
     name: str,
     sand_pct: float,
     clay_pct: float,
@@ -78,12 +81,14 @@ def derive_layer_eps(
     theta_v_max: float,
     nbins: int,
     freq_hz: float,
-) -> Tuple[float, float]:
-    """Return (eps_r_dry, eps_r_wet) for one sampled layer at freq_hz.
+) -> Tuple[float, float, float, float]:
+    """Return (eps_r_dry, eps_r_wet, sigma_dry, sigma_wet) for one sampled layer.
 
-    eps_r_dry is the driest bin (first), eps_r_wet the wettest (last); both are the
-    real part of gprMax's in-band permittivity, never the stored infinite-frequency
-    m.er.
+    eps_* is the real part of gprMax's in-band permittivity on the edge bins —
+    driest bin (first) and wettest bin (last) — never the stored infinite-frequency
+    m.er. sigma_* is the edge bins' effective conductivity (S/m) exactly as gprMax
+    stores it on the material (`Material.se`), which is frequency-independent; it
+    is a label, not a sizing input.
     """
     soil = PeplinskiSoil(
         name or "soil",
@@ -102,6 +107,27 @@ def derive_layer_eps(
 
     eps_dry = mats[0].calculate_er(freq_hz).real    # driest bin
     eps_wet = mats[-1].calculate_er(freq_hz).real   # wettest bin
+    return eps_dry, eps_wet, float(mats[0].se), float(mats[-1].se)
+
+
+def derive_layer_eps(
+    name: str,
+    sand_pct: float,
+    clay_pct: float,
+    bulk_density: float,
+    particle_density: float,
+    theta_v_min: float,
+    theta_v_max: float,
+    nbins: int,
+    freq_hz: float,
+) -> Tuple[float, float]:
+    """Return (eps_r_dry, eps_r_wet) — the sizing-relevant half of
+    `derive_layer_properties`. Kept as the narrow entry point for the live
+    visualization preview."""
+    eps_dry, eps_wet, _, _ = derive_layer_properties(
+        name, sand_pct, clay_pct, bulk_density, particle_density,
+        theta_v_min, theta_v_max, nbins, freq_hz,
+    )
     return eps_dry, eps_wet
 
 
@@ -145,7 +171,7 @@ def derive_samples(
     for s in samples:
         dlayers: List[DerivedLayer] = []
         for layer in s.layers:
-            eps_dry, eps_wet = derive_layer_eps(
+            eps_dry, eps_wet, sig_dry, sig_wet = derive_layer_properties(
                 layer.name,
                 layer.sand_pct,
                 layer.clay_pct,
@@ -157,7 +183,13 @@ def derive_samples(
                 freq,
             )
             dlayers.append(
-                DerivedLayer(name=layer.name, eps_r_dry=eps_dry, eps_r_wet=eps_wet)
+                DerivedLayer(
+                    name=layer.name,
+                    eps_r_dry=eps_dry,
+                    eps_r_wet=eps_wet,
+                    sigma_dry=sig_dry,
+                    sigma_wet=sig_wet,
+                )
             )
             eps_max = max(eps_max, eps_wet)
             eps_min = min(eps_min, eps_dry)
