@@ -76,6 +76,39 @@ def extract_signals_from_hdf5(filepath: str | Path) -> dict[str, Any]:
     return signals
 
 
+def read_ascan(filepath: str | Path) -> dict[str, Any]:
+    """Read one gprMax .out (HDF5) file for A-scan display.
+
+    Returns the first receiver's available field components plus the time
+    axis info (dt, Iterations) needed to plot amplitude vs time.
+
+    Returns:
+        Dict with keys dt (float, seconds), iterations (int) and
+        components ({"Ex": list[float], ...} — absent components omitted).
+
+    Raises:
+        FileNotFoundError, ValueError, OSError, KeyError on bad input.
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        raise FileNotFoundError(f"Output file not found: {filepath}")
+
+    with h5py.File(str(filepath), "r") as f:
+        dt = float(f.attrs["dt"])
+        iterations = int(f.attrs["Iterations"])
+        rx_path = "/rxs/rx1"
+        if rx_path not in f:
+            raise ValueError(f"Receiver group {rx_path} missing in {filepath.name}")
+        rx_group = f[rx_path]
+        components = {
+            comp: np.asarray(rx_group[comp], dtype=np.float64).tolist()
+            for comp in COMPONENTS
+            if comp in rx_group
+        }
+
+    return {"dt": dt, "iterations": iterations, "components": components}
+
+
 def extract_and_prepare_batch(
     output_dir: str | Path,
     session_id: str,

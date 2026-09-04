@@ -1,0 +1,549 @@
+/* ============================================================
+   NL2Sim — backend-connected AI assistant pane
+   ============================================================ */
+
+function mdToHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`(.+?)`/g, "<code>$1</code>")
+    .replace(/\n/g, "<br/>");
+}
+
+function nextChips(kind) {
+  if (kind === "choice")
+    return [
+      { t: "dataset_config", ic: "grid" },
+      { t: "layers", ic: "layers" },
+      { t: "waveform", ic: "wave" },
+      { t: "antenna", ic: "radar" },
+      { t: "advanced_params", ic: "target" },
+    ];
+  if (kind === "starter")
+    return [
+      { t: "Use defaults", ic: "check" },
+      { t: "Skip target", ic: "target" },
+      { t: "Continue", ic: "play" },
+    ];
+  return [];
+}
+
+// Map one recorded transcript event to a chat message for the reconnect
+// replay (`session_restore`). Must mirror the live handleServerEvent
+// rendering so a refreshed page shows the identical conversation.
+function replayToMessage(ev) {
+  const t = ev.type;
+  if (t === "user_message")
+    return { id: uid("m"), role: "user", html: mdToHtml(ev.content || "") };
+  if (t === "agent_message" || t === "dataset_ready" || t === "reuse_recommendation")
+    return { id: uid("m"), role: "bot", html: mdToHtml(ev.content || "") };
+  if (t === "stage_change")
+    return {
+      id: uid("m"),
+      role: "bot",
+      status: true,
+      html: mdToHtml("**Stage:** " + (ev.stage_name || "Pipeline step")),
+    };
+  if (t === "progress" || t === "simulation_complete")
+    return {
+      id: uid("m"),
+      role: "bot",
+      status: true,
+      html: mdToHtml(ev.content || "Step complete."),
+    };
+  if (t === "validation_failed") {
+    const errors = (ev.errors || []).map((e) => "- " + e).join("\n");
+    return {
+      id: uid("m"),
+      role: "bot",
+      html: mdToHtml(
+        "**Validation failed:** " +
+          (ev.stage_name || "") +
+          (errors ? "\n" + errors : ""),
+      ),
+    };
+  }
+  return null;
+}
+
+// The CURRENT chat id. Chats are minted server-side (POST /users/{uid}/chats)
+// and selected in App; every HTTP dataset call reads this at call time, so
+// switching chats re-scopes all of them automatically. Null until a chat is
+// selected (the user gate / chat bootstrap is still running).
+function getSessionId() {
+  return localStorage.getItem("nl2sim_current_chat_id") || null;
+}
+
+function getUserId() {
+  return localStorage.getItem("nl2sim_user_id") || null;
+}
+
+function getApiHost() {
+  const isFile = window.location.protocol === "file:";
+  // Match any local loopback hostname — the page may be opened as localhost,
+  // 127.0.0.1, or [::1]; only 127.0.0.1 was matched before, so localhost/::1
+  // fell through and sent the WebSocket to the static dev server (→ 404).
+  const localHosts = ["127.0.0.1", "localhost", "::1", "[::1]"];
+  const isStaticDevServer =
+    localHosts.includes(window.location.hostname) &&
+    ["5173", "8001", "8080"].includes(window.location.port);
+  // Force 127.0.0.1 (IPv4) because uvicorn binds 127.0.0.1 — routing to
+  // localhost/::1 could resolve to IPv6 and fail to connect.
+  return isFile || isStaticDevServer ? "127.0.0.1:8000" : window.location.host;
+}
+
+function getWsUrl(userId, sessionId) {
+  const path = `${encodeURIComponent(userId)}/${sessionId}`;
+  if (window.NL2SIM_WS_URL) return window.NL2SIM_WS_URL + "/" + path;
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${getApiHost()}/ws/${path}`;
+}
+
+// HTTP base for REST calls (dataset file listing / content / zip download).
+function getApiHttpBase() {
+  if (window.NL2SIM_HTTP_URL) return window.NL2SIM_HTTP_URL;
+  const proto = window.location.protocol === "https:" ? "https" : "http";
+  return `${proto}://${getApiHost()}`;
+}
+
+function ChatPane({
+  activeModel,
+  collapsed,
+  setCollapsed,
+  toast,
+  onModelUpdate,
+  onDatasetReady,
+  onSimulationEvent,
+  sessionId,
+  userId,
+  chats,
+  onSelectChat,
+  onNewChat,
+  onSwitchUser,
+}) {
+  const [messages, setMessages] = React.useState([
+    {
+      id: uid("m"),
+      role: "bot",
+      html: mdToHtml("Connecting to **NL2Sim** Agent..."),
+    },
+  ]);
+  const [chips, setChips] = React.useState([]);
+  const [typing, setTyping] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+  const [status, setStatus] = React.useState("connecting");
+  const [busy, setBusy] = React.useState(false);
+  const [sending, setSending] = React.useState(false);
+  const scrollRef = React.useRef(null);
+  const taRef = React.useRef(null);
+  const wsRef = React.useRef(null);
+  const paneRef = React.useRef(null);
+
+  // user-resizable pane width; null = CSS default (clamp on .chat).
+  // CSS min/max-width still bound the inline value, so it stays responsive
+  // when the window shrinks.
+  const [chatW, setChatW] = React.useState(() => {
+    const v = parseInt(localStorage.getItem("nl2sim_chat_w") || "", 10);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  });
+  const [resizing, setResizing] = React.useState(false);
+
+  React.useEffect(() => {
+    if (chatW != null) localStorage.setItem("nl2sim_chat_w", String(chatW));
+    else localStorage.removeItem("nl2sim_chat_w");
+  }, [chatW]);
+
+  function startResize(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = paneRef.current ? paneRef.current.offsetWidth : 392;
+    setResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev) => {
+      const max = Math.round(window.innerWidth * 0.72);
+      setChatW(clamp(startW + (startX - ev.clientX), 280, max));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setResizing(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+  // ws.onmessage is bound once at mount and would capture the first render's
+  // handleServerEvent; route the callback through a ref so it stays current.
+  const onModelUpdateRef = React.useRef(onModelUpdate);
+  onModelUpdateRef.current = onModelUpdate;
+  const onDatasetReadyRef = React.useRef(onDatasetReady);
+  onDatasetReadyRef.current = onDatasetReady;
+  const onSimulationEventRef = React.useRef(onSimulationEvent);
+  onSimulationEventRef.current = onSimulationEvent;
+
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, typing, chips]);
+
+  React.useEffect(() => {
+    if (!sessionId || !userId) return undefined;
+    // Chat switch or first mount: reset the pane, then let the new socket's
+    // session_restore repaint the selected chat's conversation.
+    setMessages([
+      {
+        id: uid("m"),
+        role: "bot",
+        html: mdToHtml("Connecting to **NL2Sim** Agent..."),
+      },
+    ]);
+    setChips([]);
+    setBusy(false);
+    setTyping(false);
+    setSending(false);
+    setStatus("connecting");
+
+    const ws = new WebSocket(getWsUrl(userId, sessionId));
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setStatus("connected");
+      setChips(nextChips("starter"));
+    };
+    ws.onclose = () => {
+      setStatus("disconnected");
+      setTyping(false);
+      setBusy(false);
+      setSending(false);
+      pushBot(
+        mdToHtml(
+          "Connection closed. Restart the API server and reload the page.",
+        ),
+      );
+    };
+    ws.onerror = () => {
+      setStatus("error");
+      setTyping(false);
+      setSending(false);
+    };
+    ws.onmessage = (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      handleServerEvent(msg);
+    };
+
+    return () => {
+      // Silence the handlers first: the deliberate close on a chat switch
+      // must not push a "Connection closed" bubble into the NEXT chat.
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws.close();
+    };
+  }, [sessionId, userId]);
+
+  function pushBot(html, card) {
+    setMessages((m) => [...m, { id: uid("m"), role: "bot", html, card }]);
+  }
+
+  function pushStatus(text) {
+    setMessages((m) => [
+      ...m,
+      { id: uid("m"), role: "bot", html: mdToHtml(text), status: true },
+    ]);
+  }
+
+  function handleServerEvent(msg) {
+    if (msg.type === "pipeline_busy") {
+      setBusy(Boolean(msg.busy));
+      return;
+    }
+    if (msg.type === "model_update") {
+      // Mid-turn canvas update — must not clear the typing indicator.
+      if (onModelUpdateRef.current) onModelUpdateRef.current(msg.scene);
+      return;
+    }
+    if (msg.type === "simulation_progress") {
+      // Forward-model run is independent of the chat turn — drive the run
+      // button/progress bar only, don't touch typing/busy.
+      if (onSimulationEventRef.current) onSimulationEventRef.current(msg);
+      return;
+    }
+    if (msg.type === "simulation_complete") {
+      if (onSimulationEventRef.current) onSimulationEventRef.current(msg);
+      pushStatus(msg.content || "Forward model complete.");
+      return;
+    }
+    if (msg.type === "reuse_recommendation") {
+      // Similar past dataset found instead of starting the run. The chat gets
+      // the informational record; the actionable Reuse / Simulate-anyway bar
+      // lives next to the Run control (driven by the /simulate HTTP response
+      // in App), NOT chat chips — adoption is deterministic, never a message
+      // round-trip through the agent.
+      pushBot(mdToHtml(msg.content || "Found a similar simulated dataset."));
+      return;
+    }
+    if (msg.type === "session_restore") {
+      // Page refresh on an existing session: rebuild the entire chat from
+      // the recorded transcript and re-hydrate the dataset tab + busy flag,
+      // so the UI resumes exactly where the session left off.
+      const rebuilt = (msg.events || []).map(replayToMessage).filter(Boolean);
+      if (rebuilt.length) setMessages(rebuilt);
+      setBusy(Boolean(msg.busy));
+      setTyping(Boolean(msg.busy)); // a turn is still in flight — show activity
+      setChips([]);
+      if (msg.dataset && onDatasetReadyRef.current)
+        onDatasetReadyRef.current(msg.dataset);
+      if (onSimulationEventRef.current)
+        onSimulationEventRef.current({
+          type: "session_restore",
+          simulating: Boolean(msg.simulating),
+          result: msg.simulation || null,
+          reuse: msg.reuse || null,
+        });
+      return;
+    }
+
+    setSending(false);
+    setTyping(false);
+
+    if (msg.type === "agent_message") {
+      pushBot(mdToHtml(msg.content));
+      setChips([]);
+      return;
+    }
+    if (msg.type === "stage_change") {
+      pushStatus("**Stage:** " + (msg.stage_name || "Pipeline step"));
+      setChips([]);
+      return;
+    }
+    if (msg.type === "progress") {
+      pushStatus(msg.content || "Step complete.");
+      return;
+    }
+    if (msg.type === "validation_failed") {
+      const errors = (msg.errors || []).map((e) => "- " + e).join("\n");
+      pushBot(
+        mdToHtml(
+          "**Validation failed:** " +
+            (msg.stage_name || "") +
+            (errors ? "\n" + errors : ""),
+        ),
+      );
+      return;
+    }
+    if (msg.type === "choice_required") {
+      pushBot(mdToHtml(msg.content));
+      setChips(
+        (msg.choices || []).map((c) => ({
+          t: c,
+          ic: c === "layers" ? "layers" : c === "waveform" ? "wave" : "grid",
+        })),
+      );
+      return;
+    }
+    if (msg.type === "dataset_ready") {
+      pushBot(mdToHtml(msg.content || "Dataset created."));
+      setChips([]);
+      if (onDatasetReadyRef.current)
+        onDatasetReadyRef.current(msg.result || {});
+      if (toast) toast("Dataset created and stored", "ok");
+      return;
+    }
+    if (msg.type === "error") {
+      pushBot(
+        mdToHtml("**Backend error:** " + (msg.message || "Unknown error")),
+      );
+      return;
+    }
+  }
+
+  function handle(text) {
+    const clean = text.trim();
+    if (!clean) return;
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      pushBot(mdToHtml("The backend WebSocket is not connected."));
+      return;
+    }
+
+    setMessages((m) => [
+      ...m,
+      { id: uid("m"), role: "user", html: mdToHtml(clean) },
+    ]);
+    setChips([]);
+    setDraft("");
+    setTyping(true);
+    setSending(true);
+    ws.send(JSON.stringify({ type: "user_message", content: clean }));
+  }
+
+  const connected = status === "connected";
+  const inputDisabled = !connected || busy || sending;
+
+  // The textarea is disabled while the pipeline works, which drops focus.
+  // Re-focus whenever it becomes editable again so the user can keep typing.
+  React.useEffect(() => {
+    if (!inputDisabled && taRef.current) taRef.current.focus();
+  }, [inputDisabled]);
+  const statusText =
+    status === "connected"
+      ? busy
+        ? "running pipeline step"
+        : "connected"
+      : status;
+
+  return (
+    <section
+      ref={paneRef}
+      className={
+        "chat" + (collapsed ? " collapsed" : "") + (resizing ? " resizing" : "")
+      }
+      style={!collapsed && chatW != null ? { width: chatW } : undefined}
+    >
+      <div
+        className={"chat-resizer" + (resizing ? " active" : "")}
+        onPointerDown={startResize}
+        onDoubleClick={() => setChatW(null)}
+        title="Drag to resize · double-click to reset"
+      />
+      <ChatStrip
+        chats={chats || []}
+        currentChatId={sessionId}
+        userId={userId}
+        onSelect={onSelectChat}
+        onNew={onNewChat}
+        onSwitchUser={onSwitchUser}
+      />
+      <div className="chat-head">
+        <div className="chat-av">
+          <Icon name="sparkles" size={17} style={{ color: "#fff" }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="ct">Simulation Assistant</div>
+          <div className="cs">
+            <span className="dot"></span>
+            {statusText}{" "}
+            <b style={{ color: "var(--ink-2)", fontWeight: 600 }}>
+              &nbsp;{ML_MODELS.find((m) => m.id === activeModel)?.label}
+            </b>
+            &nbsp;solver
+          </div>
+        </div>
+        <button
+          className="hbtn"
+          title="Collapse"
+          onClick={() => setCollapsed(true)}
+        >
+          <Icon name="chev" size={15} />
+        </button>
+      </div>
+
+      <div className="chat-scroll" ref={scrollRef}>
+        {messages.map((m) => (
+          <div key={m.id} className={"msg " + m.role}>
+            <div className="av">
+              {m.role === "bot" ? (
+                <Icon name="sparkles" size={13} style={{ color: "#fff" }} />
+              ) : (
+                <span
+                  className="mono"
+                  style={{ fontSize: 10, fontWeight: 600 }}
+                >
+                  YOU
+                </span>
+              )}
+            </div>
+            <div className="bubble">
+              <div dangerouslySetInnerHTML={{ __html: m.html }} />
+            </div>
+          </div>
+        ))}
+        {typing && (
+          <div className="msg bot">
+            <div className="av">
+              <Icon name="sparkles" size={13} style={{ color: "#fff" }} />
+            </div>
+            <div className="bubble">
+              <div className="typing">
+                <i></i>
+                <i></i>
+                <i></i>
+              </div>
+            </div>
+          </div>
+        )}
+        {chips.length > 0 && !typing && !busy && (
+          <div className="chips">
+            {chips.map((c, i) => (
+              <button key={i} className="chip" onClick={() => handle(c.t)}>
+                <Icon name={c.ic} className="ic" />
+                {c.t}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="chat-input">
+        <div className="chat-inwrap">
+          <textarea
+            ref={taRef}
+            rows={1}
+            placeholder={
+              connected
+                ? "Reply to the agent..."
+                : "Waiting for backend connection..."
+            }
+            value={draft}
+            disabled={inputDisabled}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              e.target.style.height = "auto";
+              e.target.style.height =
+                Math.min(120, e.target.scrollHeight) + "px";
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handle(draft);
+                if (taRef.current) taRef.current.style.height = "auto";
+              }
+            }}
+          />
+          <button
+            className="send"
+            disabled={inputDisabled || !draft.trim()}
+            onClick={() => {
+              handle(draft);
+              if (taRef.current) taRef.current.style.height = "auto";
+            }}
+          >
+            <Icon name="send" size={15} />
+          </button>
+        </div>
+        <div className="chat-hint">
+          press ↵ to send
+        </div>
+      </div>
+    </section>
+  );
+}
+
+Object.assign(window, {
+  ChatPane,
+  mdToHtml,
+  nextChips,
+  getSessionId,
+  getUserId,
+  getApiHttpBase,
+});
