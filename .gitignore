@@ -27,7 +27,7 @@ backend/.env
 dataset/
 
 
-.plans_and_architecture/
+plans_and_architecture/
 
 
 evals/
@@ -44,3 +44,5 @@ conversation_samples/
 AGENT.md
 CLAUDE.md
 dvc/qdrant_storage.dvc
+.dvc/
+todo
