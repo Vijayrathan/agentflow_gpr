@@ -133,7 +133,7 @@ Validation is split by when the required information becomes available: schema c
 | --- | --- | --- |
 | Section schemas and completeness | Positive sample count and grid-policy values; nonnegative PML/buffer counts; ordered ranges; feasible minimum sand/clay sum; moisture envelope fitting the loosest density-derived porosity; matching layer count; required section content. | Invalid saves are rejected; incomplete sections do not advance. |
 | Target schemas | Ordered size/position ranges, positive radius/box dimensions, supported shapes, and PEC-only material. | Reject invalid target configurations before sampling. |
-| Antenna schema and collection gate | Required positive resistance below 376.73 ohms for voltage/transmission-line configurations; valid axis; finite/ranged resistance; source start/end ordering and missing end time. | Reject invalid configurations. |
+| Antenna schema and collection gate | Supported source type; required positive resistance below 376.73 ohms for voltage/transmission-line configurations; valid axis; finite/ranged resistance; source start/end ordering and missing end time. | Reject invalid configurations. |
 | Each soil draw | Texture closure; real moisture band; bulk density below particle density; physical porosity; moisture maximum no greater than that draw's porosity; Peplinski moisture ceiling of 0.30. | Reject and redraw; exhausted attempts return to remediation. |
 | Calibration warnings | Sand outside 15–50%, silt outside 35–65%, or clay outside 5–20%. | Warn that composition lies outside the project's Peplinski calibration envelope; texture excursions alone do not reject a draw. |
 | Waveform gate | Recognized waveform name, positive frequency, finite amplitude, and derived band edges inside 0.3–1.3 GHz. | Stop before material/grid derivation; the band gate is also reasserted during global derivation. |
@@ -189,7 +189,7 @@ The generated model is a **2D, z-polarized, static single-Tx/single-Rx A-scan** 
 | Setting | Current behavior |
 | --- | --- |
 | 3D, spheres, dielectric targets, sampled target material | Not supported by the active generated-dataset path. |
-| Source type | Explicit emission supports Hertzian dipole and voltage source. Other names, including collected `transmission_line`, currently fall back to Hertzian emission. |
+| Source type | Hertzian dipole, voltage source, and transmission line are emitted as selected. Case and whitespace are normalized (e.g. `Hertzian Dipole` becomes `hertzian_dipole`). Unsupported, empty, or null types are rejected; omitting the field uses the Hertzian default. Transmission lines require CPU solving: GPU batches with an explicit `#transmission_line` command in a pending deck are rejected before any models or workers start. |
 | Polarization and receiver height | Emission forces z polarization; derivation places Rx at Tx height even if `rx_same_height` is false. Stored requested metadata can therefore differ from the deck. |
 | Receiver array | Can be collected and step-checked, but the emitter writes one `#rx`; it does not emit the array. |
 | Waveform families | Several names are accepted, but band conversion/gating always uses Ricker coefficients. Other families do not yet have a matching spectral derivation. |

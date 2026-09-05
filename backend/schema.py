@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Tuple, Literal
 
 # Resistance bound for #transmission_line / #voltage_source (exclusive upper bound).
@@ -341,7 +341,7 @@ class ExtractedWaveform(BaseModel):
 
 class ExtractedAntenna(BaseModel):
     """Output of the antenna extraction subagent (STAGE 3)."""
-    antenna_kind: Optional[str] = "hertzian_dipole"
+    antenna_kind: Literal["hertzian_dipole", "voltage_source", "transmission_line"] = "hertzian_dipole"
     antenna_axis: Optional[str] = "x"
     tx_rx_offset_m: float  # required: Tx-Rx offset in metres
     resistance: Optional[float] = None  # required for transmission_line / voltage_source
@@ -352,6 +352,11 @@ class ExtractedAntenna(BaseModel):
     source_height_m: Optional[float] = None
 
     rx_array: Optional[RxArrayConfigSchema] = None
+
+    @field_validator("antenna_kind", mode="before")
+    @classmethod
+    def _normalise_kind(cls, value):
+        return "_".join(value.lower().split()) if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _resistance_rules(self):

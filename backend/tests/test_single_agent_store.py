@@ -146,6 +146,43 @@ def test_optional_section_skip_completes():
     assert sap._stage_done("target_ranges")
 
 
+@pytest.mark.parametrize("kind", ["custom_antenna", "", "   ", None])
+def test_invalid_source_type_does_not_replace_saved_antenna(kind):
+    valid = {"antenna_kind": "transmission_line", "resistance": 75, "tx_rx_offset_m": 0.1}
+    assert _save("antenna", valid)["status"] == "ok"
+    before = sap._store_snapshot()["antenna"]
+    out = _save("antenna", {**valid, "antenna_kind": kind})
+    assert out["error"] == "validation_failed"
+    assert sap._STORE["antenna"] == before
+
+
+@pytest.mark.parametrize("kind", ["hertzian_dipole", "voltage_source", "transmission_line"])
+@pytest.mark.parametrize("separator", ["_", " ", "  ", "\t"])
+def test_source_type_is_normalized_and_preserved_in_store(kind, separator):
+    out = _save("antenna", {
+        "antenna_kind": f" {kind.upper().replace('_', separator)} ",
+        "resistance": 75, "tx_rx_offset_m": 0.1,
+    })
+    assert out["status"] == "ok"
+    assert sap._STORE["antenna"]["antenna_kind"] == kind
+    assert sap._stage_done("antenna")
+
+
+@pytest.mark.parametrize("kind", ["VOLTAGE_SOURCE", "TRANSMISSION_LINE"])
+@pytest.mark.parametrize("resistance", [None, 0, -1, 376.73, float("inf"), float("nan")])
+def test_resistive_source_requires_valid_resistance_after_normalization(kind, resistance):
+    out = _save("antenna", {
+        "antenna_kind": kind, "resistance": resistance, "tx_rx_offset_m": 0.1,
+    })
+    assert out["error"] == "validation_failed"
+    assert sap._STORE["antenna"] is None
+
+
+def test_omitted_source_type_uses_schema_default():
+    assert _save("antenna", {"tx_rx_offset_m": 0.1})["status"] == "ok"
+    assert sap._STORE["antenna"]["antenna_kind"] == "hertzian_dipole"
+
+
 def test_target_ranges_multi_object_roundtrip():
     payload = {
         "cylinders": [{

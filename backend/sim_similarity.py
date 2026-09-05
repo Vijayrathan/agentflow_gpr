@@ -217,7 +217,7 @@ def build_feature_payload(
             "source_end_time": wf.source_end_time,
         },
         "antenna": {
-            "kind": ant.antenna_kind or "hertzian_dipole",
+            "kind": ant.antenna_kind,
             "axis": ant.antenna_axis or "x",
             "tx_rx_offset_m": float(ant.tx_rx_offset_m),
             "source_height_m": ant.source_height_m,

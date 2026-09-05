@@ -72,7 +72,7 @@ def validate_waveform_antenna(
 
     # Antenna configuration sanity. Source timing lives on the waveform.
     e, w = validate_antenna_config(
-        kind=antenna.antenna_kind or "hertzian_dipole",
+        kind=antenna.antenna_kind,
         axis=antenna.antenna_axis or "x",
         resistance=antenna.resistance,
         source_start_time=waveform.source_start_time,

@@ -146,12 +146,14 @@ def validate_antenna_config(
     voltage_source. Here we add axis, the source-timing PAIR rule, and a softer
     resistance finite/range echo for hertzian cases where schema stays silent.)"""
     e: List[str] = []
+    if kind not in {"hertzian_dipole", "voltage_source", "transmission_line"}:
+        e.append(f"unsupported antenna kind {kind!r}")
     if axis.lower() not in {"x", "y", "z"}:
         e.append("axis must be x, y or z")
     # transmission_line AND voltage_source both need resistance (schema enforces).
     # No 50-100 ohm "recommended" warning — that heuristic is not grounded.
     if resistance is not None:
-        if not math.isfinite(resistance) or resistance < 0 or resistance >= RESISTANCE_MAX_OHM:
+        if not math.isfinite(resistance) or resistance <= 0 or resistance >= RESISTANCE_MAX_OHM:
             e.append(f"resistance must satisfy 0 < R < {RESISTANCE_MAX_OHM} ohm")
     # gprMax timing is a pair [start, end]. end-alone -> start defaults to 0 (ok);
     # start-alone is the genuine error.

@@ -373,6 +373,10 @@ the user should explicitly say to skip. Do not skip on your own\
    **Antenna configuration:**
    - antenna_kind: type of antenna (default: "hertzian_dipole"; \
 alternatives: "voltage_source", "transmission_line")
+     Only these three source types are supported; never substitute a Hertzian
+     dipole for another requested antenna. Explain unsupported types and ask
+     the user to choose a supported source. Transmission lines require CPU
+     solving because the bundled gprMax CUDA solver does not support them.
    - antenna_axis: polarisation axis ("x", "y", or "z"; default: "x"). \
 Conventionally perpendicular to the B-scan survey direction.
    - tx_rx_offset_m: transmitter-receiver offset in metres (required)

@@ -336,6 +336,9 @@ def run_batch_simulation(
     It is keyed by filename, not order, so callers stay correct when models
     finish out of order.
 
+    GPU batches containing an explicit #transmission_line command in a deck
+    that needs solving raise ValueError before starting any models or workers.
+
     Args:
         gpu/gpu_ids/workers: solver backend and concurrency. Leave as None to
             take them from the environment (see ExecutionPlan above) — that is
@@ -361,16 +364,41 @@ def run_batch_simulation(
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = output_dir / "_tmp"
-    tmp_dir.mkdir(exist_ok=True)
-
     in_files = sorted(input_dir.glob("*.in"))
     if filenames is not None:
         wanted = {Path(name).name for name in filenames}
         in_files = [p for p in in_files if p.name in wanted]
     if not in_files:
         raise FileNotFoundError(f"No .in files found in {input_dir}")
+
+    # Inspect the actual decks so this covers generated datasets, uploads,
+    # and CLI runs without needing the collection-stage antenna config.
+    # Check the whole pending batch before starting even its first model.
+    if plan.gpu:
+        for in_file in in_files:
+            if skip_existing and (output_dir / f"{in_file.stem}.out").exists():
+                continue
+            try:
+                with in_file.open() as deck:
+                    has_transmission_line = any(
+                        line.partition(":")[0].strip().lower() == "#transmission_line"
+                        for line in deck
+                    )
+            except (OSError, UnicodeError):
+                # Preserve per-file failure reporting for unreadable decks.
+                continue
+            if has_transmission_line:
+                raise ValueError(
+                    f"{in_file.name}: transmission_line sources require CPU solving; "
+                    "the gprMax CUDA solver does not support them. "
+                    "Disable GPU execution (gpu=False, gpu_ids=[] in Python; "
+                    "GPR_GPU=0 with GPR_GPU_IDS unset and no --gpu/--gpu-ids flags "
+                    "for CLI/server runs)."
+                )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = output_dir / "_tmp"
+    tmp_dir.mkdir(exist_ok=True)
 
     total = len(in_files)
     succeeded = 0
@@ -606,7 +634,7 @@ def main():
             verbose=args.verbose,
             progress=_cli_progress,
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
 

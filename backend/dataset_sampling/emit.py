@@ -127,20 +127,24 @@ def _fractal_box_line(
 def _source_line(ant: ExtractedAntenna, grid: GlobalDerived, wf: ExtractedWaveform) -> str:
     """Transmitter line, polarised along the thin invariant axis (z).
 
-    Emits #hertzian_dipole (default) or #voltage_source. The optional [start end]
-    timing pair is written only when BOTH are set (gprMax requires the pair).
+    Preserve the selected Hertzian, voltage or transmission-line source;
+    reject unknown kinds instead of substituting a different excitation.
+    The optional [start end] timing pair is written only when BOTH are set
+    (gprMax requires the pair). Transmission lines require CPU solving.
     """
-    kind = (ant.antenna_kind or "hertzian_dipole").lower()
+    kind = ant.antenna_kind
     timing = ""
     if wf.source_start_time is not None and wf.source_end_time is not None:
         timing = f" {_g(wf.source_start_time)} {_g(wf.source_end_time)}"
     pos = f"{_g(grid.tx_x_m)} {_g(grid.tx_y_m)} 0"
     name = _sanitize(wf.waveform_name)
-    if kind == "voltage_source":
+    if kind == "hertzian_dipole":
+        return f"#hertzian_dipole: z {pos} {name}{timing}"
+    if kind in ("voltage_source", "transmission_line"):
         if ant.resistance is None:
-            raise ValueError("voltage_source requires a resistance value")
-        return f"#voltage_source: z {pos} {_g(ant.resistance)} {name}{timing}"
-    return f"#hertzian_dipole: z {pos} {name}{timing}"
+            raise ValueError(f"{kind} requires a resistance value")
+        return f"#{kind}: z {pos} {_g(ant.resistance)} {name}{timing}"
+    raise ValueError(f"Unsupported antenna_kind {kind!r}; no source was substituted")
 
 
 def _rx_line(grid: GlobalDerived) -> str:

@@ -2007,7 +2007,7 @@ def _build_simulation_rows(
             "session_id": session_uuid,
             "user_id": user_id,
             "sample_index": sample_id,
-            "antenna_kind": ant.antenna_kind or "hertzian_dipole",
+            "antenna_kind": ant.antenna_kind,
             "antenna_axis": ant.antenna_axis or "x",
             "tx_rx_offset_m": ant.tx_rx_offset_m,
             "resistance": ant.resistance,
