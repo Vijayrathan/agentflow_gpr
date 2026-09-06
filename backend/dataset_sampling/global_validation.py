@@ -36,7 +36,7 @@ from backend.schema import (
     ExtractedLayers,
     GlobalDerived,
 )
-from dataset_sampling.target_shapes import draw_target, iter_ranges, placement_failures
+from backend.dataset_sampling.target_shapes import draw_target, iter_ranges, placement_failures
 from backend.validation_tools_new import (
     PML_GAP_CELLS,
     validate_global_grid,
@@ -131,6 +131,8 @@ def validate_global(
     target_ranges: Optional[ExtractedTargetRanges] = None,
 ) -> GlobalValidationReport:
     """Validate the single global grid in cascade-gated phases."""
+    if cfg.contract_version >= 2:
+        return _validate_contract(grid, cfg, wf, ant, layers, adv, target_ranges)
     report = GlobalValidationReport()
 
     # 2D geometry: uniform cell; the thin (out-of-plane) axis is one cell.
@@ -202,4 +204,86 @@ def validate_global(
             "larger smallest object dimension if runtime matters."
         )
 
+    return report
+
+
+def _validate_contract(grid, cfg, wf, ant, layers, adv, target_ranges):
+    import math
+    from backend.dataset_sampling.contract import validate_capabilities, component_positions
+    from backend.dataset_sampling.numerics import native_dt, cell_index, excitation
+    from backend.dataset_sampling.scene import resolve_outputs, resolve_target, bounds_overlap, resolve_roughness, validate_resolved_target
+    from backend.schema import validate_gprmax_pml_profile
+    report = GlobalValidationReport()
+    try:
+        validate_capabilities(cfg, waveform=wf, antenna=ant, target_ranges=target_ranges, advanced=adv)
+        if cfg.dimensionality != grid.dimensionality or grid.contract_version != 2:
+            raise ValueError("Mode/version differs from common grid; regenerate")
+        dims = [grid.domain_x_m, grid.domain_y_m, grid.domain_z_m]
+        counts = [grid.nx, grid.ny, grid.nz]
+        if not all(n is not None and n > 0 for n in counts):
+            raise ValueError("Grid requires positive integer cell counts")
+        if cfg.dimensionality == "3D" and min(counts) <= 1 or cfg.dimensionality == "2D" and counts[2] != 1:
+            raise ValueError("Cell counts do not select the declared native mode")
+        if grid.nx <= 1 or grid.ny <= 1:
+            raise ValueError("x/y must remain active axes")
+        if any(abs(dim / grid.dx_m - n) > 1e-8 for dim, n in zip(dims, counts)):
+            raise ValueError("Physical domain does not match integer cell counts")
+        validate_gprmax_pml_profile(cfg.gprmax_pml_cells(), nx=grid.nx, ny=grid.ny, nz=grid.nz)
+        if grid.dx_m > grid.lambda_min_m / max(10, cfg.cells_per_wavelength) + 1e-12:
+            raise ValueError("Common grid violates its native spectral wavelength budget")
+        if not math.isclose(grid.dt_s, native_dt(grid.dx_m, cfg.dimensionality), rel_tol=1e-13):
+            raise ValueError("dt differs from native mode-aware CFL rounding")
+        if grid.dt_s >= grid.derivation["minimum_tau_s"]:
+            raise ValueError("Debye relaxation time must exceed actual dt; finer common grid required")
+        if not grid.iterations or grid.iterations <= 1 or not math.isclose(grid.time_window_s, (grid.iterations - 1) * grid.dt_s, rel_tol=1e-13):
+            raise ValueError("Recording window and common iteration count disagree")
+        if excitation(cfg, wf) != grid.derivation["excitation"]:
+            raise ValueError("Excitation changed after common planning; regenerate")
+    except (ValueError, KeyError, TypeError) as exc:
+        report.errors.append(f"[contract_grid] {exc}")
+        return report
+    try:
+        margin = (cfg.pml_cells + PML_GAP_CELLS) * grid.dx_m
+        axes = range(3) if cfg.dimensionality == "3D" else range(2)
+        for name, coords in (("Tx", [grid.tx_x_m, grid.tx_y_m, grid.tx_z_m]),
+                             ("Rx", [grid.rx_x_m, grid.rx_y_m, grid.rx_z_m])):
+            if any(abs(v / grid.dx_m - cell_index(v, grid.dx_m)) > 1e-8 for v in coords):
+                raise ValueError(f"{name} not resolved to native cell coordinates")
+            positions = component_positions(coords, grid.dx_m)
+            selected = [positions["E" + ant.antenna_axis]] if name == "Tx" else positions.values()
+            for point in selected:
+                if any(point[i] < margin - 1e-10 or point[i] > dims[i] - margin + 1e-10 for i in axes):
+                    raise ValueError(f"{name} component violates a PML+15 face clearance")
+                if point[1] < grid.ground_y_m:
+                    raise ValueError(f"{name} is below the surface")
+        e, _ = _check_source_height_vs_domain(grid, margin)
+        if e:
+            raise ValueError("; ".join(e))
+        static = []
+        rough = None
+        if adv and adv.surface_roughness:
+            rough = resolve_roughness(adv.surface_roughness, grid, cfg,
+                {"box_id": "layer_1_volume", "y_bottom_m": grid.ground_y_m - cell_index(layers.layers[0].thickness_m_min, grid.dx_m) * grid.dx_m}, 0)
+        for spec in iter_ranges(target_ranges) if target_ranges else []:
+            if spec.is_static:
+                target = draw_target(spec, random.Random(0), independent_seed=0)
+                resolved = resolve_target(target, grid, cfg)
+                failures = validate_resolved_target(resolved, grid, cfg, rough["height_min_m"] if rough else None)
+                if failures:
+                    raise ValueError("static_target_placement: " + "; ".join(failures))
+                resolved = resolve_target(target, grid, cfg)
+                if any(bounds_overlap(resolved, other, cfg.dimensionality) for other in static):
+                    raise ValueError("static targets violate the disjoint_bounds policy")
+                static.append(resolved)
+        resolve_outputs(adv, grid, "validation")
+        if sum(L.thickness_m_max for L in layers.layers) > grid.soil_depth_m + 1e-10:
+            raise ValueError("Layer stack exceeds the common soil depth")
+    except (ValueError, TypeError) as exc:
+        report.errors.append(f"[resolved_placement] {exc}")
+        return report
+    from backend.resources import estimate_resources
+    costs = estimate_resources(grid, cfg, len(layers.layers), adv)
+    report.warnings.append(f"[resources] Estimated peak host {costs['host_peak_bytes']/1024**3:.2f} GiB, "
+                           f"device {costs['device_peak_bytes']/1024**3:.2f} GiB per model; execution admission uses available capacity")
+    report.warnings.append("[qualification] Numerical configuration valid; scientific qualification is recorded separately")
     return report

@@ -112,7 +112,8 @@ def test_dataset_config_defaults_complete():
     assert sap._STORE["dataset_config"]["dimensionality"] == "2D"
 
 
-def test_dataset_config_server_fixed_fields_are_overridden():
+def test_dataset_config_preserves_explicit_mode_and_fixes_server_paths(monkeypatch):
+    monkeypatch.setenv("GPR_ENABLE_EXPERIMENTAL_3D", "1")
     # Even if the agent passes user-supplied values through, the server-fixed
     # fields are forced back; output_dir follows the model_basename.
     out = _save("dataset_config", {
@@ -124,8 +125,17 @@ def test_dataset_config_server_fixed_fields_are_overridden():
     })
     assert out["status"] == "ok"
     assert sap._STORE["dataset_config"]["output_dir"] == "./dataset/clay_survey"
-    assert sap._STORE["dataset_config"]["dimensionality"] == "2D"
+    assert sap._STORE["dataset_config"]["dimensionality"] == "3D"
+    assert sap._STORE["dataset_config"]["contract_version"] == 2
     assert sap._STORE["dataset_config"]["num_threads"] is None
+
+
+def test_3d_collection_requires_developer_release_gate(monkeypatch):
+    monkeypatch.delenv("GPR_ENABLE_EXPERIMENTAL_3D", raising=False)
+    out = _save("dataset_config", {"num_samples": 1, "dimensionality": "3D"})
+    assert out["error"] == "validation_failed"
+    assert "experimental" in out["detail"]
+    assert sap._STORE["dataset_config"] is None
 
 
 @pytest.mark.parametrize("raw,expected", [

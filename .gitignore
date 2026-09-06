@@ -46,3 +46,4 @@ CLAUDE.md
 dvc/qdrant_storage.dvc
 .dvc/
 todo
+docs/

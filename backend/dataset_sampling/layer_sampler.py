@@ -30,7 +30,7 @@ from backend.schema import (
     SampledSample,
 )
 from backend.validation_tools_new import validate_sampled_layer
-from dataset_sampling.target_shapes import draw_target, iter_ranges
+from backend.dataset_sampling.target_shapes import draw_target, iter_ranges
 
 # Max attempts when re-drawing a target's geometry against the (later) global
 # grid in the per-sample placement pass (Stage 7). Defined here next to the
@@ -53,6 +53,9 @@ def _sample_one_layer(
     rng: random.Random,
     enforce_validity: bool,
     max_retries: int = 200,
+    nbins: int = 50,
+    preserve_precision: bool = False,
+    rejection_log=None,
 ) -> Tuple[SampledLayer, List[str]]:
     """Draw one feasible concrete layer from a range spec.
 
@@ -79,6 +82,8 @@ def _sample_one_layer(
         clay = rng.uniform(layer.clay_pct_min, layer.clay_pct_max)
         silt = 100.0 - sand - clay
         if silt < 0.0:
+            if rejection_log is not None:
+                rejection_log.append("texture closure: sand + clay > 100")
             continue  # texture closure infeasible for this draw — redraw
 
         bulk = rng.uniform(layer.bulk_density_gcm3_min, layer.bulk_density_gcm3_max)
@@ -93,18 +98,26 @@ def _sample_one_layer(
             enforce_validity=enforce_validity,
         )
         if errors:
+            if rejection_log is not None:
+                rejection_log.extend(errors)
             continue  # e.g. theta_v_max > drawn porosity — redraw densities/texture
+        actual_wet = tv_max + (tv_max - tv_min) / (2 * (nbins - 1))
+        if actual_wet > min(0.30, 1 - bulk / particle):
+            if rejection_log is not None:
+                rejection_log.append("shifted native wet bin exceeds porosity/calibration limit")
+            continue
 
+        quantize = (lambda v: v) if preserve_precision else _round
         sampled = SampledLayer(
             name=layer.name,
-            thickness_m=_round(thickness),
-            sand_pct=_round(sand),
-            clay_pct=_round(clay),
-            silt_pct=_round(silt),
+            thickness_m=quantize(thickness),
+            sand_pct=quantize(sand),
+            clay_pct=quantize(clay),
+            silt_pct=quantize(silt),
             theta_v_min=tv_min,
             theta_v_max=tv_max,
-            bulk_density_gcm3=_round(bulk),
-            particle_density_gcm3=_round(particle),
+            bulk_density_gcm3=quantize(bulk),
+            particle_density_gcm3=quantize(particle),
         )
         return sampled, warnings
 
@@ -122,6 +135,7 @@ def sample_layers(
     seed: Optional[int] = None,
     enforce_validity: bool = True,
     target_ranges: Optional[ExtractedTargetRanges] = None,
+    dataset_config=None,
 ) -> Tuple[List[SampledSample], List[str]]:
     """Draw `num_samples` concrete parameter sets over the extracted layer ranges.
 
@@ -136,6 +150,13 @@ def sample_layers(
     if num_samples < 1:
         raise ValueError(f"num_samples must be >= 1, got {num_samples}")
 
+    from backend.dataset_sampling.contract import stream_seed, validate_capabilities
+    if dataset_config is not None:
+        validate_capabilities(dataset_config, target_ranges=target_ranges)
+    version = dataset_config.contract_version if dataset_config else 1
+    nbins = dataset_config.fractal_nbins if dataset_config else 50
+    if version >= 2:
+        seed = dataset_config.seed if seed is None else seed
     specs = iter_ranges(target_ranges) if target_ranges is not None else []
     rng = random.Random(seed)
     samples: List[SampledSample] = []
@@ -143,14 +164,24 @@ def sample_layers(
     n_layer_records = 0
     for i in range(1, num_samples + 1):
         layers: List[SampledLayer] = []
-        for layer in extracted.layers:
-            sampled, warnings = _sample_one_layer(layer, rng, enforce_validity)
+        layer_rejections = []
+        for j, layer in enumerate(extracted.layers):
+            rejected = []
+            layer_rng = random.Random(stream_seed(seed, i, "layer", j)) if version >= 2 else rng
+            sampled, warnings = _sample_one_layer(layer, layer_rng, enforce_validity,
+                                                   nbins=nbins, preserve_precision=version >= 2, rejection_log=rejected)
+            layer_rejections.append({"layer_index": j, "reasons": dict(Counter(rejected)), "attempt_limit": 200})
             layers.append(sampled)
             n_layer_records += 1
             for m in warnings:
                 warn_counts[_normalise(m)] += 1
-        targets = [draw_target(spec, rng) for spec in specs]
-        samples.append(SampledSample(sample_id=i, layers=layers, targets=targets))
+        targets = [draw_target(spec, rng, independent_seed=stream_seed(seed, i, "target", j) if version >= 2 else None)
+                   for j, spec in enumerate(specs)]
+        provenance = {"seed": seed, "random_policy": "independent-identity-v2" if version >= 2 else "legacy-sequential-v1",
+                      "original_targets": [t.model_dump() for t in targets],
+                      "soil_draw_rejections": layer_rejections,
+                      "moisture_policy": "supplied band passed through unchanged"}
+        samples.append(SampledSample(sample_id=i, layers=layers, targets=targets, provenance=provenance))
 
     warnings_summary = [
         f"[{n}/{n_layer_records} sample-layers] {msg}"
@@ -208,6 +239,7 @@ def sample_and_write(
     enforce_validity: bool = True,
     filename: str = "sampled_layers.json",
     target_ranges: Optional[ExtractedTargetRanges] = None,
+    dataset_config=None,
 ) -> Tuple[List[SampledSample], str, List[str]]:
     """Sample the layer ranges (and any buried objects) and persist the draws.
 
@@ -215,7 +247,7 @@ def sample_and_write(
     """
     samples, warnings = sample_layers(
         extracted, num_samples, seed=seed, enforce_validity=enforce_validity,
-        target_ranges=target_ranges,
+        target_ranges=target_ranges, dataset_config=dataset_config,
     )
     path = write_samples(samples, output_dir, warnings=warnings, filename=filename)
     return samples, path, warnings

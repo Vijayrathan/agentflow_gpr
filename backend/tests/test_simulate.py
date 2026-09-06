@@ -632,9 +632,10 @@ def test_record_simulation_outputs_extracts_signals(monkeypatch):
     monkeypatch.setattr(api, "set_simulation_outputs", lambda *a: 1)
     seen = {}
 
-    def fake_extract(out_dir, session_uuid):
+    def fake_extract(out_dir, session_uuid, **kwargs):
         seen["out_dir"] = str(out_dir)
         seen["session"] = session_uuid
+        seen.update(kwargs)
         return {"updates": [{"id": "row-1", "signal_ez": [0.1], "signal_length": 1}]}
 
     _stub_signal_extraction(monkeypatch, fake_extract)
@@ -643,6 +644,8 @@ def test_record_simulation_outputs_extracts_signals(monkeypatch):
     assert api._record_simulation_outputs(chat, manifest, result) == (1, 1)
     assert seen["out_dir"] == "/abs/out_files"
     assert seen["session"] == api._coerce_uuid("session-x")
+    assert seen["manifest"] == manifest
+    assert seen["outputs"] == result["outputs"]
 
 
 def test_record_simulation_outputs_signal_failure_swallowed(monkeypatch):

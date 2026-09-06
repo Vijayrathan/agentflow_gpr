@@ -1,5 +1,14 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Tuple, Literal
+
+
+class BaseModel(PydanticBaseModel):
+    # NaN/Infinity must never pass comparisons and reach native material/grid code.
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
+class CollectedModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 # Resistance bound for #transmission_line / #voltage_source (exclusive upper bound).
 MAX_TL_RESISTANCE_OHM = 376.73
@@ -120,14 +129,14 @@ class SphereSchema(BaseModel):
     dielectric_smoothing: bool = True
 
 
-class SurfaceRoughnessConfigSchema(BaseModel):
-    fractal_dim: float = 1.5
-    weight_x: float = 1.0
-    weight_y: float = 1.0
-    amplitude_m: float = 0.01
+class SurfaceRoughnessConfigSchema(CollectedModel):
+    fractal_dim: float = Field(1.5, gt=0)
+    weight_x: float = Field(1.0, gt=0)
+    weight_y: float = Field(1.0, gt=0)
+    amplitude_m: float = Field(0.01, gt=0)
     add_water: bool = False
-    water_depth_m: float = 0.005
-    seed: Optional[int] = None
+    water_depth_m: float = Field(0.005, ge=0)
+    seed: Optional[int] = Field(None, ge=0, le=2**32 - 1)
 
 
 class RxArrayConfigSchema(BaseModel):
@@ -142,7 +151,7 @@ class RxArrayConfigSchema(BaseModel):
     dz: float
 
 
-class SnapshotConfigSchema(BaseModel):
+class SnapshotConfigSchema(CollectedModel):
     time_s: float
     filename: str
     dx: Optional[float] = None
@@ -208,7 +217,7 @@ class GprSchema(BaseModel):
 #   advanced_params  -> ExtractedAdvancedParams
 # ---------------------------------------------------------------------------
 
-class DatasetConfig(BaseModel):
+class DatasetConfig(CollectedModel):
     """STAGE 0 — dataset / run orchestration (collect).
 
     Holds everything that has no physics dependency but drives the run.
@@ -224,6 +233,11 @@ class DatasetConfig(BaseModel):
     buffer_cells: int = Field(10, ge=0)    # extra cells between PML and objects
     cells_per_wavelength: int = Field(10, gt=0)  # lambda/10 rule-of-thumb
     dimensionality: Literal["2D", "3D"] = "2D"
+    contract_version: Literal[1, 2] = 1
+    coordinate_frame: Literal["x-horizontal_y-up_z-crossline"] = "x-horizontal_y-up_z-crossline"
+    seed: int = Field(42, ge=0, le=2**32 - 1)
+    quantization_policy: Literal["nearest_cell", "exact"] = "nearest_cell"
+    overlap_policy: Literal["disjoint_bounds"] = "disjoint_bounds"
 
     # Resolution policy: highest SIGNIFICANT frequency = factor * centre freq.
     high_freq_factor: float = Field(3.0, gt=0)
@@ -233,7 +247,17 @@ class DatasetConfig(BaseModel):
     center_freq_is_peak: bool = True
 
     # Soil build: #soil_peplinski via #fractal_box needs a material count.
-    fractal_nbins: int = Field(50, gt=0)
+    fractal_nbins: int = Field(50, ge=2)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mode_version(cls, data):
+        if isinstance(data, dict) and data.get("dimensionality") == "3D":
+            data = dict(data)
+            data.setdefault("contract_version", 2)
+            if data["contract_version"] != 2:
+                raise ValueError("3D requires contract_version=2; legacy data remains 2D")
+        return data
 
     def gprmax_pml_cells(self) -> Tuple[int, int, int, int, int, int]:
         """Six-face #pml_cells tuple in gprMax order: x0 y0 z0 xmax ymax zmax."""
@@ -249,7 +273,7 @@ class DatasetConfig(BaseModel):
         return self
 
 
-class ExtractedLayerParams(BaseModel):
+class ExtractedLayerParams(CollectedModel):
     """One soil layer (STAGE 1). Ranges are sampled per-sample downstream.
 
     The sampler must draw EVERY field declared as a range here. If a quantity
@@ -283,6 +307,14 @@ class ExtractedLayerParams(BaseModel):
 
     @model_validator(mode="after")
     def _check_ranges(self):
+        if min(self.thickness_m_min, self.bulk_density_gcm3_min, self.particle_density_gcm3_min) <= 0:
+            raise ValueError("thickness and densities must be positive")
+        if min(self.sand_pct_min, self.clay_pct_min, self.theta_v_min) < 0:
+            raise ValueError("texture and moisture fractions must be nonnegative")
+        if self.theta_v_min >= self.theta_v_max:
+            raise ValueError("theta_v_min must be < theta_v_max (a moisture band)")
+        if self.bulk_density_gcm3_min >= self.particle_density_gcm3_max:
+            raise ValueError("density ranges cannot produce positive porosity")
         for lo, hi, label in [
             (self.thickness_m_min, self.thickness_m_max, "thickness"),
             (self.sand_pct_min, self.sand_pct_max, "sand_pct"),
@@ -308,7 +340,7 @@ class ExtractedLayerParams(BaseModel):
 
 # compute peplinski eps and sig from the gprmax module itself
 
-class ExtractedLayers(BaseModel):
+class ExtractedLayers(CollectedModel):
     """Output of the layer extraction subagent (STAGE 1)."""
     num_layers: int
     layers: List[ExtractedLayerParams]
@@ -320,13 +352,20 @@ class ExtractedLayers(BaseModel):
         return self
 
 
-class ExtractedWaveform(BaseModel):
+class ExtractedWaveform(CollectedModel):
     """Output of the waveform extraction subagent (STAGE 2)."""
 
     waveform_kind: Optional[str] = "ricker"
     waveform_amplitude: float = 1.0  # required #waveform field; 1.0 by convention
-    waveform_center_freq_hz: float  # required: centre frequency in Hz
-    waveform_name: str  # required: descriptive name for the waveform
+    waveform_center_freq_hz: float = Field(..., gt=0)
+    waveform_name: str = Field(..., min_length=1)  # required: descriptive name for the waveform
+
+    @field_validator("waveform_name")
+    @classmethod
+    def _nonempty_name(cls, value):
+        if not value.strip():
+            raise ValueError("waveform_name cannot be blank")
+        return value
 
     # Source timing (optional): gates WHEN the source is on/off; resolves AFTER
     # the time window downstream.
@@ -339,10 +378,10 @@ class ExtractedWaveform(BaseModel):
 #compute lambda_min, max and cells_per_wavelength
 
 
-class ExtractedAntenna(BaseModel):
+class ExtractedAntenna(CollectedModel):
     """Output of the antenna extraction subagent (STAGE 3)."""
     antenna_kind: Literal["hertzian_dipole", "voltage_source", "transmission_line"] = "hertzian_dipole"
-    antenna_axis: Optional[str] = "x"
+    antenna_axis: Literal["x", "y", "z"] = "z"
     tx_rx_offset_m: float  # required: Tx-Rx offset in metres
     resistance: Optional[float] = None  # required for transmission_line / voltage_source
     rx_same_height: Optional[bool] = True  # Rx at same height as Tx
@@ -350,6 +389,8 @@ class ExtractedAntenna(BaseModel):
     # source_height_m must exist for "same height" to mean anything. If left
     # None it is DERIVED downstream as >= lambda_max/2.
     source_height_m: Optional[float] = None
+    tx_rx_crossline_offset_m: float = 0.0
+    receiver_height_m: Optional[float] = Field(None, ge=0)
 
     rx_array: Optional[RxArrayConfigSchema] = None
 
@@ -369,7 +410,7 @@ class ExtractedAntenna(BaseModel):
         return self
 
 
-class ExtractedAdvancedParams(BaseModel):
+class ExtractedAdvancedParams(CollectedModel):
     """Output of the optional / advanced parameters extraction stage.
 
     Geometry objects were REMOVED from this section: all buried objects (fixed
@@ -404,7 +445,7 @@ class ExtractedAdvancedParams(BaseModel):
 # 3D emitter exists.
 # ---------------------------------------------------------------------------
 
-class _TargetRangeBase(BaseModel):
+class _TargetRangeBase(CollectedModel):
     """Shared fields + static detection for buried-target sampling ranges."""
     name: str = "target"
     material: Literal["pec"] = "pec"   # PEC-only: size-only grid effect, no eps
@@ -412,13 +453,15 @@ class _TargetRangeBase(BaseModel):
     x_offset_max_m: float
     depth_min_m: float                 # depth of CENTER below ground surface
     depth_max_m: float
+    z_offset_min_m: Optional[float] = None
+    z_offset_max_m: Optional[float] = None
 
     def _range_pairs(self) -> List[Tuple[float, float]]:
         """The geometric (min, max) pairs; subclasses extend."""
         return [
             (self.x_offset_min_m, self.x_offset_max_m),
             (self.depth_min_m, self.depth_max_m),
-        ]
+        ] + ([(self.z_offset_min_m, self.z_offset_max_m)] if self.z_offset_min_m is not None else [])
 
     @property
     def is_static(self) -> bool:
@@ -428,6 +471,12 @@ class _TargetRangeBase(BaseModel):
 
     @model_validator(mode="after")
     def _check_base_ranges(self):
+        if (self.z_offset_min_m is None) != (self.z_offset_max_m is None):
+            raise ValueError("z_offset requires both min and max")
+        if self.z_offset_min_m is not None and self.z_offset_min_m > self.z_offset_max_m:
+            raise ValueError("z_offset: min > max")
+        if self.depth_min_m < 0:
+            raise ValueError("center depth must be nonnegative")
         for lo, hi, label in [
             (self.x_offset_min_m, self.x_offset_max_m, "x_offset"),
             (self.depth_min_m, self.depth_max_m, "depth"),
@@ -443,12 +492,19 @@ class CylinderTargetRange(_TargetRangeBase):
     kind: Literal["cylinder"] = "cylinder"
     radius_min_m: float
     radius_max_m: float
+    length_min_m: Optional[float] = Field(None, gt=0)
+    length_max_m: Optional[float] = Field(None, gt=0)
+    cylinder_axis: Optional[Literal["x", "y", "z"]] = None
 
     def _range_pairs(self) -> List[Tuple[float, float]]:
-        return super()._range_pairs() + [(self.radius_min_m, self.radius_max_m)]
+        return super()._range_pairs() + [(self.radius_min_m, self.radius_max_m)] + ([(self.length_min_m, self.length_max_m)] if self.length_min_m is not None else [])
 
     @model_validator(mode="after")
     def _check_ranges(self):
+        if (self.length_min_m is None) != (self.length_max_m is None):
+            raise ValueError("length requires both min and max")
+        if self.length_min_m is not None and self.length_min_m > self.length_max_m:
+            raise ValueError("length: min > max")
         if self.radius_min_m > self.radius_max_m:
             raise ValueError(
                 f"radius: min ({self.radius_min_m}) > max ({self.radius_max_m})")
@@ -465,15 +521,21 @@ class BoxTargetRange(_TargetRangeBase):
     width_max_m: float
     height_min_m: float
     height_max_m: float
+    crossline_size_min_m: Optional[float] = Field(None, gt=0)
+    crossline_size_max_m: Optional[float] = Field(None, gt=0)
 
     def _range_pairs(self) -> List[Tuple[float, float]]:
         return super()._range_pairs() + [
             (self.width_min_m, self.width_max_m),
             (self.height_min_m, self.height_max_m),
-        ]
+        ] + ([(self.crossline_size_min_m, self.crossline_size_max_m)] if self.crossline_size_min_m is not None else [])
 
     @model_validator(mode="after")
     def _check_ranges(self):
+        if (self.crossline_size_min_m is None) != (self.crossline_size_max_m is None):
+            raise ValueError("crossline_size requires both min and max")
+        if self.crossline_size_min_m is not None and self.crossline_size_min_m > self.crossline_size_max_m:
+            raise ValueError("crossline_size: min > max")
         for lo, hi, label in [
             (self.width_min_m, self.width_max_m, "width"),
             (self.height_min_m, self.height_max_m, "height"),
@@ -487,7 +549,7 @@ class BoxTargetRange(_TargetRangeBase):
         return self
 
 
-class ExtractedTargetRanges(BaseModel):
+class ExtractedTargetRanges(CollectedModel):
     """Output of the target stage: zero or more buried objects, each range-based.
     Skip = save an empty payload {} (both lists default empty)."""
     cylinders: List[CylinderTargetRange] = Field(default_factory=list)
@@ -551,15 +613,21 @@ class SampledTarget(BaseModel):
     """
     kind: Literal["cylinder", "box"]
     name: str = "target"
-    material: str = "pec"
+    material: Literal["pec"] = "pec"
     x_offset_m: float
     depth_m: float
     radius_m: Optional[float] = None    # cylinder
     width_m: Optional[float] = None     # box: x extent
     height_m: Optional[float] = None    # box: y extent
+    z_offset_m: Optional[float] = None
+    crossline_size_m: Optional[float] = Field(None, gt=0)
+    length_m: Optional[float] = Field(None, gt=0)
+    cylinder_axis: Optional[Literal["x", "y", "z"]] = None
 
     @model_validator(mode="after")
     def _kind_fields(self):
+        if any(v is not None and v <= 0 for v in (self.radius_m, self.width_m, self.height_m)):
+            raise ValueError("target sizes must be positive")
         if self.kind == "cylinder" and self.radius_m is None:
             raise ValueError("cylinder target requires radius_m")
         if self.kind == "box" and (self.width_m is None or self.height_m is None):
@@ -573,6 +641,7 @@ class SampledSample(BaseModel):
     sample_id: int
     layers: List[SampledLayer]
     targets: List[SampledTarget] = Field(default_factory=list)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +663,7 @@ class DerivedLayer(BaseModel):
     eps_r_wet: float    # wettest bin -> largest eps  -> smallest lambda_min (dx)
     sigma_dry: float    # driest bin  effective conductivity, S/m
     sigma_wet: float    # wettest bin effective conductivity, S/m
+    material_provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DerivedSample(BaseModel):
@@ -624,6 +694,11 @@ class GlobalEpsAggregate(BaseModel):
     # make this symmetric, so widening domain_x to 2*(halfwidth + clearance)
     # accommodates both left- and right-pinned fixed objects.
     static_x_halfwidth_global_m: Optional[float] = None
+    z_halfwidth_global_m: Optional[float] = None
+    spectral_lambda_min_m: Optional[float] = None
+    spectral_index_max: Optional[float] = None
+    min_layer_thickness_m: Optional[float] = None
+    min_relaxation_time_s: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +731,28 @@ class GlobalDerived(BaseModel):
     rx_x_m: float            # receiver x   (= domain_x/2 + tx_rx_offset/2)
     tx_y_m: float            # transmitter height = ground_y + source_height
     rx_y_m: float            # receiver height (= tx_y if rx_same_height)
+    contract_version: Literal[1, 2] = 1
+    dimensionality: Literal["2D", "3D"] = "2D"
+    domain_z_m: Optional[float] = None  # old records: thin z, never a finite length
+    soil_depth_m: Optional[float] = None
+    nx: Optional[int] = None
+    ny: Optional[int] = None
+    nz: Optional[int] = None
+    tx_z_m: float = 0.0
+    rx_z_m: float = 0.0
+    iterations: Optional[int] = None
+    requested_time_window_s: Optional[float] = None
+    derivation: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _legacy_depth_mapping(self):
+        if self.soil_depth_m is None:
+            self.soil_depth_m = self.depth_z_m
+        if self.domain_z_m is None:
+            if self.dimensionality == "3D":
+                raise ValueError("3D requires a derived domain_z_m")
+            self.domain_z_m = self.dx_m
+        return self
 
 
 # ---------------------------------------------------------------------------

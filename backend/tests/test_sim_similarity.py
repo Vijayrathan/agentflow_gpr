@@ -129,12 +129,18 @@ def test_over_capacity_raises():
 # ---------------------------------------------------------------------------
 
 def test_hard_filters_contents():
+    from backend.dataset_sampling.contract import digest
     f = ss.hard_filters(make_payload())
     assert f == {
         "num_layers": 2,
         "waveform_kind": "ricker",
         "antenna_kind": "hertzian_dipole",
-        "antenna_axis": "x",
+        "antenna_axis": "z",
+        "feature_version": 2,
+        "contract_version": 1,
+        "center_freq_is_peak": True,
+        "geometry_orientation": digest(["z"]),
+        "roughness_digest": digest(None),
         "dimensionality": "2D",
         "n_cylinders": 1,
         "n_boxes": 0,

@@ -715,14 +715,16 @@ function App() {
                     transition: "transform .15s",
                   }}
                 >
-                  <SubsurfaceView
+                  {scene?.dimensionality === "3D" ? (
+                    <OrthogonalSlices scene={scene} sampleIndex={vizTab === "samples" ? sampleIdx : 0} />
+                  ) : <SubsurfaceView
                     model={model}
                     selected={selected}
                     onSelect={onSelect}
                     view={view}
                     scanFrac={scanFrac}
                     solving={solving}
-                  />
+                  />}
                 </div>
 
                 {/* generated .in file viewer — covers the canvas when a

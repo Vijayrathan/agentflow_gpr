@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # Tunables
 # ---------------------------------------------------------------------------
 
-COLLECTION_NAME = "sim_sessions"
+COLLECTION_NAME = "sim_sessions_v2"  # new vector layout; never reinterpret old points
 
 # Slot capacities. Configs exceeding these cannot be vectorized (ValueError);
 # raising a capacity later only requires a collection rebuild (backfill).
@@ -66,9 +66,9 @@ MAX_CYLINDERS = 4
 MAX_BOXES = 4
 
 LAYER_DIMS = 12      # 6 range fields x (min, max)
-WA_DIMS = 6          # waveform + antenna scalars
-CYL_DIMS = 6         # 3 range fields x (min, max)
-BOX_DIMS = 8         # 4 range fields x (min, max)
+WA_DIMS = 9          # includes crossline separation and receiver height
+CYL_DIMS = 11        # includes z, finite length and orientation
+BOX_DIMS = 12        # includes z and finite crossline size
 VECTOR_DIM = MAX_LAYERS * LAYER_DIMS + WA_DIMS + MAX_CYLINDERS * CYL_DIMS + MAX_BOXES * BOX_DIMS
 
 REUSE_THRESHOLD = float(os.getenv("SIM_REUSE_THRESHOLD", "0.95"))
@@ -128,11 +128,13 @@ def _pair(lo: Any, hi: Any) -> list[float]:
 def _target_sort_key(t: dict) -> tuple:
     """Deterministic order for target slots so equivalent configs vectorize
     identically regardless of the order the user listed the objects in."""
+    import json
     size = t.get("radius_m") or t.get("width_m") or [0.0, 0.0]
     return (
         (t["depth_m"][0] + t["depth_m"][1]) / 2.0,
         (t["x_offset_m"][0] + t["x_offset_m"][1]) / 2.0,
         (size[0] + size[1]) / 2.0,
+        json.dumps(t, sort_keys=True),
     )
 
 
@@ -187,6 +189,9 @@ def build_feature_payload(
                 "x_offset_m": _pair(c.x_offset_min_m, c.x_offset_max_m),
                 "depth_m": _pair(c.depth_min_m, c.depth_max_m),
                 "radius_m": _pair(c.radius_min_m, c.radius_max_m),
+                "z_offset_m": _pair(c.z_offset_min_m or 0, c.z_offset_max_m or 0),
+                "length_m": _pair(c.length_min_m or 0, c.length_max_m or 0),
+                "axis": c.cylinder_axis or "z",
             }
             for c in tr.cylinders
         ),
@@ -199,6 +204,8 @@ def build_feature_payload(
                 "depth_m": _pair(b.depth_min_m, b.depth_max_m),
                 "width_m": _pair(b.width_min_m, b.width_max_m),
                 "height_m": _pair(b.height_min_m, b.height_max_m),
+                "z_offset_m": _pair(b.z_offset_min_m or 0, b.z_offset_max_m or 0),
+                "crossline_size_m": _pair(b.crossline_size_min_m or 0, b.crossline_size_max_m or 0),
             }
             for b in tr.boxes
         ),
@@ -206,7 +213,8 @@ def build_feature_payload(
     )
 
     return {
-        "version": 1,
+        "version": 2,
+        "contract_version": cfg.contract_version,
         "num_layers": lay.num_layers,
         "layers": layer_entries,
         "waveform": {
@@ -215,6 +223,7 @@ def build_feature_payload(
             "amplitude": float(wf.waveform_amplitude),
             "source_start_time": wf.source_start_time,
             "source_end_time": wf.source_end_time,
+            "center_freq_is_peak": cfg.center_freq_is_peak,
         },
         "antenna": {
             "kind": ant.antenna_kind,
@@ -222,6 +231,9 @@ def build_feature_payload(
             "tx_rx_offset_m": float(ant.tx_rx_offset_m),
             "source_height_m": ant.source_height_m,
             "resistance": ant.resistance,
+            "tx_rx_crossline_offset_m": ant.tx_rx_crossline_offset_m,
+            "rx_same_height": ant.rx_same_height,
+            "receiver_height_m": ant.receiver_height_m,
         },
         "grid_policy": {
             "dimensionality": cfg.dimensionality,
@@ -234,6 +246,7 @@ def build_feature_payload(
         "cylinders": cylinders,
         "boxes": boxes,
         "has_surface_roughness": adv.surface_roughness is not None,
+        "roughness": adv.surface_roughness.model_dump() if adv.surface_roughness else None,
     }
 
 
@@ -273,6 +286,8 @@ def build_vector(payload: dict) -> list[float]:
     vec.append(0.0 if h is None else 1.0)  # specified-flag: both-None pairs stay equal
     r = ant["resistance"]
     vec.append(0.0 if r is None else r / SCALES["resistance_ohm"])
+    vec += [ant.get("tx_rx_crossline_offset_m", 0), ant.get("receiver_height_m") or 0,
+            float(ant.get("receiver_height_m") is not None)]
 
     for i in range(MAX_CYLINDERS):
         if i < len(payload["cylinders"]):
@@ -280,6 +295,9 @@ def build_vector(payload: dict) -> list[float]:
             vec += [(x + 1.0) / SCALES["x_offset_m"] for x in c["x_offset_m"]]
             vec += [x / SCALES["depth_m"] for x in c["depth_m"]]
             vec += [x / SCALES["target_size_m"] for x in c["radius_m"]]
+            vec += [x / SCALES["x_offset_m"] for x in c["z_offset_m"]]
+            vec += [x / SCALES["target_size_m"] for x in c["length_m"]]
+            vec.append("xyz".index(c["axis"]) / 2)
         else:
             vec += [0.0] * CYL_DIMS
 
@@ -290,6 +308,8 @@ def build_vector(payload: dict) -> list[float]:
             vec += [x / SCALES["depth_m"] for x in b["depth_m"]]
             vec += [x / SCALES["target_size_m"] for x in b["width_m"]]
             vec += [x / SCALES["target_size_m"] for x in b["height_m"]]
+            vec += [x / SCALES["x_offset_m"] for x in b["z_offset_m"]]
+            vec += [x / SCALES["target_size_m"] for x in b["crossline_size_m"]]
         else:
             vec += [0.0] * BOX_DIMS
 
@@ -302,7 +322,13 @@ def hard_filters(payload: dict) -> dict:
     sessions categorically incomparable (different physics or different
     emitted decks), so they must never reach the numeric rescoring."""
     gp = payload["grid_policy"]
+    from backend.dataset_sampling.contract import digest
     return {
+        "feature_version": payload["version"],
+        "contract_version": payload.get("contract_version", 1),
+        "center_freq_is_peak": payload["waveform"].get("center_freq_is_peak", True),
+        "geometry_orientation": digest([c.get("axis", "z") for c in payload["cylinders"]]),
+        "roughness_digest": digest(payload.get("roughness")),
         "num_layers": payload["num_layers"],
         "waveform_kind": payload["waveform"]["kind"],
         "antenna_kind": payload["antenna"]["kind"],
@@ -426,8 +452,8 @@ def rescore(a: dict, b: dict) -> tuple[float, list[dict]]:
 
     # -- targets -------------------------------------------------------------
     slot_scores: list[float] = []
-    for kind, fields in (("cylinders", ("x_offset_m", "depth_m", "radius_m")),
-                         ("boxes", ("x_offset_m", "depth_m", "width_m", "height_m"))):
+    for kind, fields in (("cylinders", ("x_offset_m", "depth_m", "radius_m", "z_offset_m", "length_m")),
+                         ("boxes", ("x_offset_m", "depth_m", "width_m", "height_m", "z_offset_m", "crossline_size_m"))):
         m = max(len(a[kind]), len(b[kind]))
         for i in range(m):
             if i >= len(a[kind]) or i >= len(b[kind]):
@@ -483,6 +509,11 @@ class SimilarityIndex:
                 vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.EUCLID),
             )
         schema_by_key = {
+            "feature_version": PayloadSchemaType.INTEGER,
+            "contract_version": PayloadSchemaType.INTEGER,
+            "center_freq_is_peak": PayloadSchemaType.BOOL,
+            "geometry_orientation": PayloadSchemaType.KEYWORD,
+            "roughness_digest": PayloadSchemaType.KEYWORD,
             "session_id": PayloadSchemaType.KEYWORD,
             "waveform_kind": PayloadSchemaType.KEYWORD,
             "antenna_kind": PayloadSchemaType.KEYWORD,
@@ -605,6 +636,8 @@ def index_completed_session(
     if not REUSE_ENABLED:
         return False
     try:
+        if eligible_manifest(output_dir) is None:
+            return False
         payload = _payload_from_state(state)
         SimilarityIndex().index_session(session_id, payload, meta={
             "user_id": user_id,
@@ -626,12 +659,75 @@ def find_similar_session(state: dict, *, session_id: str) -> list[dict]:
     if not REUSE_ENABLED:
         return []
     try:
+        current_dir = (state.get("dataset_config") or {}).get("output_dir")
+        current = current_manifest(current_dir)
+        if current is None:
+            return []
         payload = _payload_from_state(state)
-        return SimilarityIndex().find_similar(payload, exclude_session_id=session_id)
+        candidates = SimilarityIndex().find_similar(payload, exclude_session_id=session_id)
+        matches = []
+        for candidate in candidates:
+            source = eligible_manifest(candidate.get("source_output_dir"))
+            if source is not None and equivalent_contracts(current, source):
+                matches.append(candidate)
+        return matches
     except Exception:
         logger.warning("similarity search failed for session %s", session_id,
                        exc_info=True)
         return []
+
+
+def current_manifest(output_dir):
+    import json
+    from backend.preflight import verify_contract
+    from backend.dataset_sampling.contract import file_digest
+    if not output_dir:
+        return None
+    path = Path(output_dir)
+    if not path.is_absolute():
+        path = Path(_project_root) / path
+    try:
+        manifest = json.loads((path / "emitted_files.json").read_text())
+        verify_contract(manifest["contract"])
+        for entry in manifest["files"]:
+            verify_contract(manifest["contract"], entry["resolved_scene"])
+            if Path(entry["filename"]).name != entry["filename"] or file_digest(path / "in_files" / entry["filename"]) != entry["input_sha256"]:
+                raise ValueError("Missing/stale current input artifact")
+        return manifest
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def equivalent_contracts(current, source):
+    """Exact experiment AND accepted physical population, independent of paths."""
+    if not current.get("contract") or not source.get("contract"):
+        return False
+    if current["contract"]["digest"] != source["contract"]["digest"]:
+        return False
+    def population(manifest):
+        return sorted((f["sample_id"], f["input_sha256"], f["resolved_scene"]["digest"]) for f in manifest["files"])
+    return population(current) == population(source)
+
+
+def eligible_manifest(output_dir):
+    from backend.signal_extraction import validate_output
+    from backend.qualification import qualification_status
+    manifest = current_manifest(output_dir)
+    if not manifest:
+        return None
+    try:
+        root = Path(output_dir)
+        if not root.is_absolute():
+            root = Path(_project_root) / root
+        if not qualification_status(root, manifest).get("reuse_eligible"):
+            return None
+        for entry in manifest["files"]:
+            validate_output(root / "out_files" / (Path(entry["filename"]).stem + ".out"),
+                            manifest["contract"], entry["resolved_scene"],
+                            input_sha256=entry["input_sha256"], require_receipt=True)
+        return manifest if manifest["files"] else None
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +749,11 @@ def backfill() -> None:
             total, incomplete = count_incomplete_simulations(row.id)
             if total == 0 or incomplete > 0:
                 print(f"skip {sid}: {incomplete}/{total} simulations incomplete")
+                skipped += 1
+                continue
+            output_dir = str((mc.get("artifacts") or {}).get("output_dir") or "")
+            if eligible_manifest(output_dir) is None:
+                print(f"skip {sid}: no current scientifically qualified artifacts")
                 skipped += 1
                 continue
             payload = build_feature_payload(

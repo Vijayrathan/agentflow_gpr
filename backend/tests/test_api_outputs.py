@@ -114,12 +114,12 @@ def test_output_endpoint_404s_when_missing(tmp_path):
         assert exc.value.status_code == 404
 
 
-def test_output_endpoint_ignores_path_components(tmp_path):
+def test_output_endpoint_rejects_names_outside_current_manifest(tmp_path):
     with _session(tmp_path, ["demo_0001.in"]) as (sid, out_dir):
         _write_out_file(out_dir / "demo_0001.out", {"Ez": [0.0]})
-        # traversal-ish names collapse to their basename inside the session dir
-        payload = api.get_dataset_output(sid, "../in_files/demo_0001.in")
-        assert payload["filename"] == "demo_0001.out"
+        with pytest.raises(HTTPException) as exc:
+            api.get_dataset_output(sid, "../in_files/demo_0001.in")
+        assert exc.value.status_code == 404
         with pytest.raises(HTTPException) as exc:
             api.get_dataset_output(sid, "../../etc/passwd")
         assert exc.value.status_code == 404

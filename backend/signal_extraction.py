@@ -21,6 +21,75 @@ COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 SIGNAL_KEYS = ("signal_ex", "signal_ey", "signal_ez",
                "signal_hx", "signal_hy", "signal_hz")
 
+
+def validate_output(filepath, contract, scene, *, input_sha256=None, require_receipt=False):
+    """Check actual HDF5 settings and vectors, never substitute planned values."""
+    import json
+    from backend.dataset_sampling.contract import file_digest
+    from backend.preflight import verify_contract
+    verify_contract(contract, scene)
+    grid = contract["grid"]
+    with h5py.File(filepath, "r") as f:
+        dt, iterations = float(f.attrs["dt"]), int(f.attrs["Iterations"])
+        counts = [int(v) for v in f.attrs["nx_ny_nz"]]
+        spacing = [float(v) for v in f.attrs["dx_dy_dz"]]
+        version = str(f.attrs["gprMax"])
+        if counts != [grid["nx"], grid["ny"], grid["nz"]] or not np.allclose(spacing, [grid["dx_m"]] * 3, rtol=1e-13, atol=0):
+            raise ValueError("Output grid differs from dataset contract")
+        if version != contract["solver"]["version"]:
+            raise ValueError("Output gprMax version differs from pinned contract")
+        if not np.isfinite(dt) or dt <= 0 or not np.isclose(dt, grid["dt_s"], rtol=1e-13, atol=0) or iterations != grid["iterations"]:
+            raise ValueError("Output time axis differs from dataset contract")
+        if str(f.attrs["Title"]) != scene["title"]:
+            raise ValueError("Output sample identity/title differs from resolved scene")
+        if int(f.attrs["nrx"]) != 1 or int(f.attrs["nsrc"]) != 1 or list(f["rxs"].keys()) != ["rx1"]:
+            raise ValueError("Output receiver/source count differs from single-pair acquisition")
+        if any(np.any(f.attrs[k]) for k in ("srcsteps", "rxsteps")):
+            raise ValueError("Output moved an acquisition position")
+        rx = f["rxs/rx1"]
+        if not np.allclose(rx.attrs["Position"], scene["receiver"]["position_m"], rtol=0, atol=1e-12):
+            raise ValueError("Output receiver position mismatch")
+        source_path = "tls/tl1" if scene["source"]["kind"] == "transmission_line" else "srcs/src1"
+        source = f[source_path]
+        if scene["source"]["kind"] == "transmission_line":
+            if source.attrs["Resistance"] != scene["source"]["resistance_ohm"] or not np.isclose(source.attrs["dl"], grid["dx_m"], rtol=1e-13, atol=0):
+                raise ValueError("Output transmission-line parameters mismatch")
+        elif str(source.attrs["Type"]) != {"hertzian_dipole": "HertzianDipole", "voltage_source": "VoltageSource"}[scene["source"]["kind"]]:
+            raise ValueError("Output source kind mismatch")
+        if not np.allclose(source.attrs["Position"], scene["source"]["position_m"], rtol=0, atol=1e-12):
+            raise ValueError("Output source position mismatch")
+        for component in COMPONENTS:
+            if component not in rx:
+                raise ValueError(f"Missing receiver component {component}")
+            data = np.asarray(rx[component])
+            if data.shape != (iterations,) or not np.isfinite(data).all():
+                raise ValueError(f"Invalid/nonfinite or mismatched {component} array")
+        metadata = {"status": "integrity_valid", "dt_s": dt, "iterations": iterations,
+                    "last_time_s": (iterations - 1) * dt, "cell_counts": counts,
+                    "cell_spacings_m": spacing, "solver_version": version,
+                    "receiver_position_m": [float(v) for v in rx.attrs["Position"]],
+                    "coordinate_frame": contract["coordinate_frame"],
+                    "components": list(COMPONENTS), "units": contract["field_units"],
+                    "contract_digest": contract["digest"], "scene_digest": scene["digest"]}
+    if require_receipt:
+        receipt_path = Path(filepath).with_suffix(".execution.json")
+        receipt = json.loads(receipt_path.read_text())
+        if (receipt.get("contract_digest") != contract["digest"] or receipt.get("scene_digest") != scene["digest"] or
+            receipt.get("input_sha256") != input_sha256 or receipt.get("output_sha256") != file_digest(filepath) or
+            receipt.get("preflight", {}).get("status") != "passed"):
+            raise ValueError("Missing/stale output execution receipt or file hash")
+        geometry_path = Path(filepath).with_suffix(".geometry.h5")
+        if not geometry_path.is_file() or receipt["preflight"].get("geometry_sha256") != file_digest(geometry_path):
+            raise ValueError("Missing/stale native geometry export or file hash")
+        records = {s["path"]: s["sha256"] for s in receipt.get("snapshots", [])}
+        expected = [str(Path(Path(filepath).stem + "_snaps") / (s["filename"] + ".vti")) for s in scene["snapshots"]]
+        if set(records) != set(expected):
+            raise ValueError("Snapshot artifact identities differ from the output specification")
+        for name in expected:
+            if records[name] != file_digest(Path(filepath).parent / name):
+                raise ValueError("Missing/stale snapshot artifact hash")
+    return metadata
+
 # Matches the trailing _NNNN in filenames like gpr_dataset_0001.out
 _SAMPLE_INDEX_RE = re.compile(r"_(\d+)$")
 
@@ -66,6 +135,8 @@ def extract_signals_from_hdf5(filepath: str | Path) -> dict[str, Any]:
         for comp, key in zip(COMPONENTS, SIGNAL_KEYS):
             if comp in rx_group:
                 arr = np.array(rx_group[comp], dtype=np.float64)
+                if arr.ndim != 1 or not np.isfinite(arr).all() or length and len(arr) != length:
+                    raise ValueError(f"Invalid field array {comp} in {filepath.name}")
                 signals[key] = arr.tolist()
                 length = max(length, len(arr))
             else:
@@ -112,6 +183,8 @@ def read_ascan(filepath: str | Path) -> dict[str, Any]:
 def extract_and_prepare_batch(
     output_dir: str | Path,
     session_id: str,
+    manifest=None,
+    outputs=None,
 ) -> dict[str, Any]:
     """Extract signals from all .out files and prepare DB update payloads.
 
@@ -154,13 +227,18 @@ def extract_and_prepare_batch(
     failed = 0
     errors: list[dict] = []
 
-    out_files = sorted(output_dir.glob("*.out"))
+    by_name = {item["filename"]: item for item in (manifest or {}).get("files", [])}
+    selected = {item["filename"]: Path(item["out_file"]) for item in outputs or []}
+    out_files = list(selected.values()) if outputs is not None else sorted(output_dir.glob("*.out"))
     if not out_files:
         logger.warning("[SIGNAL] No .out files found in %s", output_dir)
         return {"updates": [], "succeeded": 0, "failed": 0, "errors": []}
 
     for out_file in out_files:
-        sample_idx = _parse_sample_index(out_file.stem)
+        emitted = by_name.get(out_file.stem + ".in")
+        if manifest is not None and emitted is None:
+            continue
+        sample_idx = int(emitted["sample_id"]) if emitted else _parse_sample_index(out_file.stem)
         if sample_idx is None:
             logger.warning("[SIGNAL] Cannot parse sample_index from %s — skipping", out_file.name)
             continue
@@ -171,7 +249,14 @@ def extract_and_prepare_batch(
             continue
 
         try:
+            metadata = None
+            if (manifest or {}).get("contract"):
+                metadata = validate_output(out_file, manifest["contract"], emitted["resolved_scene"],
+                                           input_sha256=emitted["input_sha256"], require_receipt=True)
             signals = extract_signals_from_hdf5(out_file)
+            if metadata:
+                signals["executed_metadata"] = metadata
+                signals["qualification_status"] = "unqualified"
             signals["id"] = row_id
             signals["output_file_path"] = str(out_file)
             updates.append(signals)

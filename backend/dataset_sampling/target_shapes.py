@@ -11,7 +11,7 @@ Conventions (see backend/schema.py target-range block):
     y_center = ground_y - depth (grid required).
   - Feature/extent/bottom helpers take ONLY the target — no grid argument —
     which structurally guarantees the thin-z extent (one cell) can never leak
-    into the feature computation. All features are IN-PLANE dimensions.
+    into the feature computation. 2D features use the active plane; finite 3D length and crossline sides also constrain spacing.
 
 Dispatch is on the `kind` field, never isinstance: the codebase has dual
 import paths (`schema` vs `backend.schema`) that resolve to distinct module
@@ -48,29 +48,46 @@ def iter_ranges(tr: ExtractedTargetRanges) -> List:
     return list(tr.cylinders) + list(tr.boxes)
 
 
-def draw_target(spec, rng: random.Random) -> SampledTarget:
+def draw_target(spec, rng: random.Random, independent_seed=None) -> SampledTarget:
     """Draw one concrete target from its range spec (grid-independent).
 
     A static spec (all min == max) draws identically every time — degenerate
     uniform draws need no special-casing.
     """
+    def draw(field):
+        from backend.dataset_sampling.contract import stream_seed
+        lo, hi = getattr(spec, field + "_min_m"), getattr(spec, field + "_max_m")
+        if lo == hi:
+            if independent_seed is None:
+                rng.uniform(lo, hi)  # retain the legacy stream consumption
+            return lo
+        if independent_seed is not None:
+            return random.Random(stream_seed(independent_seed, field)).uniform(lo, hi)
+        return _round(rng.uniform(lo, hi))
+
     base = dict(
         kind=spec.kind,
         name=spec.name,
         material=spec.material,
-        x_offset_m=_round(rng.uniform(spec.x_offset_min_m, spec.x_offset_max_m)),
-        depth_m=_round(rng.uniform(spec.depth_min_m, spec.depth_max_m)),
+        x_offset_m=draw("x_offset"),
+        depth_m=draw("depth"),
     )
+    if spec.z_offset_min_m is not None:
+        base["z_offset_m"] = draw("z_offset")
     if spec.kind == "cylinder":
+        if spec.length_min_m is not None:
+            base.update(length_m=draw("length"), cylinder_axis=spec.cylinder_axis)
         return SampledTarget(
             **base,
-            radius_m=_round(rng.uniform(spec.radius_min_m, spec.radius_max_m)),
+            radius_m=draw("radius"),
         )
     if spec.kind == "box":
+        if spec.crossline_size_min_m is not None:
+            base["crossline_size_m"] = draw("crossline_size")
         return SampledTarget(
             **base,
-            width_m=_round(rng.uniform(spec.width_min_m, spec.width_max_m)),
-            height_m=_round(rng.uniform(spec.height_min_m, spec.height_max_m)),
+            width_m=draw("width"),
+            height_m=draw("height"),
         )
     raise ValueError(f"Unknown target kind '{spec.kind}'")
 
@@ -105,6 +122,8 @@ def static_x_halfwidth(tr: ExtractedTargetRanges):
 
 def half_extents(t: SampledTarget) -> Tuple[float, float]:
     """In-plane half extents (hx, hy) around the object center."""
+    if t.length_m is not None or t.crossline_size_m is not None:
+        return half_extents_3d(t)[:2]
     if t.kind == "cylinder":
         return t.radius_m, t.radius_m
     if t.kind == "box":
@@ -112,23 +131,27 @@ def half_extents(t: SampledTarget) -> Tuple[float, float]:
     raise ValueError(f"Unknown target kind '{t.kind}'")
 
 
+def half_extents_3d(t):
+    if t.kind == "box":
+        return t.width_m / 2, t.height_m / 2, (t.crossline_size_m / 2 if t.crossline_size_m else 0)
+    extents = [t.radius_m] * 3
+    extents["xyz".index(t.cylinder_axis or "z")] = t.length_m / 2 if t.length_m else 0
+    return tuple(extents)
+
+
 def smallest_feature(t: SampledTarget) -> float:
     """Smallest in-plane dimension (feeds the >=10-cells Δx tightening).
     Cylinder: the diameter. Box: the smaller side. Thin z NEVER enters."""
     if t.kind == "cylinder":
-        return 2.0 * t.radius_m
+        return min(2.0 * t.radius_m, t.length_m) if t.length_m is not None else 2.0 * t.radius_m
     if t.kind == "box":
-        return min(t.width_m, t.height_m)
+        return min(t.width_m, t.height_m, t.crossline_size_m or float("inf"))
     raise ValueError(f"Unknown target kind '{t.kind}'")
 
 
 def largest_extent(t: SampledTarget) -> float:
     """Horizontal (x) extent — widens domain_x."""
-    if t.kind == "cylinder":
-        return 2.0 * t.radius_m
-    if t.kind == "box":
-        return t.width_m
-    raise ValueError(f"Unknown target kind '{t.kind}'")
+    return 2 * half_extents(t)[0]
 
 
 def bottom_depth(t: SampledTarget) -> float:
@@ -146,6 +169,11 @@ def target_bbox(t: SampledTarget, grid: GlobalDerived):
     hx, hy = half_extents(t)
     x_abs = grid.domain_x_m / 2.0 + t.x_offset_m
     y_center = grid.ground_y_m - t.depth_m
+    if grid.dimensionality == "3D":
+        hx, hy, hz = half_extents_3d(t)
+        z_center = grid.domain_z_m / 2 + t.z_offset_m
+        return ((x_abs - hx, y_center - hy, z_center - hz),
+                (x_abs + hx, y_center + hy, z_center + hz))
     bbox_min = (x_abs - hx, y_center - hy, 0.0)
     bbox_max = (x_abs + hx, y_center + hy, grid.dx_m)
     return bbox_min, bbox_max
@@ -162,13 +190,19 @@ def placement_failures(
     Shared by the global-validation gate (static objects) and the per-sample
     placement pass (dynamic objects).
     """
+    if cfg.contract_version >= 2:
+        from backend.dataset_sampling.scene import resolve_target, validate_resolved_target
+        try:
+            return validate_resolved_target(resolve_target(t, grid, cfg), grid, cfg)
+        except ValueError as exc:
+            return [str(exc)]
     bbox_min, bbox_max = target_bbox(t, grid)
     e, w = validate_target(
         name=t.name,
         min_dimension_m=smallest_feature(t),
         bbox_min=bbox_min,
         bbox_max=bbox_max,
-        domain=(grid.domain_x_m, grid.domain_y_m, grid.dx_m),
+        domain=(grid.domain_x_m, grid.domain_y_m, grid.domain_z_m),
         max_cell_m=grid.dx_m,
         pml_cells=cfg.pml_cells,
     )

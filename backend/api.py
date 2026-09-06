@@ -47,7 +47,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Ensure imports work both under `uvicorn backend.api:app` and direct execution.
@@ -355,6 +355,7 @@ def list_dataset_outputs(session_id: str) -> dict[str, Any]:
         for f in manifest.get("files", [])
         if f.get("filename")
         and (outputs_dir / (Path(f["filename"]).stem + ".out")).is_file()
+        and _output_integrity_ok(outputs_dir, manifest, f)
     ]
     return {"files": files}
 
@@ -364,10 +365,15 @@ def get_dataset_output(session_id: str, filename: str) -> dict[str, Any]:
     """A-scan payload for one emitted file: rx1 field components + time axis
     read from the gprMax HDF5 output. `filename` is the .in name."""
     out_dir, _manifest = _session_emitted_manifest(session_id)
+    entry = next((f for f in _manifest.get("files", []) if f.get("filename") == filename), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="File is not in the current dataset manifest")
     # Only ever serve a bare filename's .out from the session's own dir.
     out_path = _out_files_dir(out_dir) / (Path(Path(filename).name).stem + ".out")
     if not out_path.is_file():
         raise HTTPException(status_code=404, detail="Output file not found")
+    if not _output_integrity_ok(_out_files_dir(out_dir), _manifest, entry):
+        raise HTTPException(status_code=422, detail="Output failed contract/receipt integrity validation")
     # Lazy import keeps h5py off the api import path.
     from signal_extraction import read_ascan
 
@@ -377,7 +383,38 @@ def get_dataset_output(session_id: str, filename: str) -> dict[str, Any]:
         raise HTTPException(
             status_code=422, detail=f"Could not read output file: {exc}"
         ) from exc
-    return {"filename": out_path.name, **data}
+    from backend.qualification import qualification_status
+    return {"filename": out_path.name, **data, "receiver": "rx1",
+            "qualification": qualification_status(out_dir, _manifest) if _manifest.get("contract") else {"status": "legacy_unverified"},
+            "geometry_url": f"/datasets/{session_id}/geometry/{filename}" if _manifest.get("contract") else None,
+            "coordinate_frame": (_manifest.get("contract") or {}).get("coordinate_frame"),
+            "field_units": {"E": "V/m", "H": "A/m"}}
+
+
+def _output_integrity_ok(outputs_dir, manifest, entry):
+    if not manifest.get("contract"):
+        return True
+    try:
+        from backend.signal_extraction import validate_output
+        validate_output(outputs_dir / (Path(entry["filename"]).stem + ".out"),
+                        manifest["contract"], entry["resolved_scene"],
+                        input_sha256=entry["input_sha256"], require_receipt=True)
+        return True
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+@app.get("/datasets/{session_id}/geometry/{filename}")
+def get_dataset_geometry(session_id: str, filename: str):
+    out_dir, manifest = _session_emitted_manifest(session_id)
+    entry = next((f for f in manifest.get("files", []) if f.get("filename") == filename), None)
+    output_dir = _out_files_dir(out_dir)
+    if not entry or not manifest.get("contract") or not _output_integrity_ok(output_dir, manifest, entry):
+        raise HTTPException(status_code=404, detail="No verified native geometry for this sample")
+    path = output_dir / (Path(filename).stem + ".geometry.h5")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Native geometry export is missing")
+    return FileResponse(path, filename=path.name, media_type="application/x-hdf5")
 
 
 @app.get("/datasets/{session_id}/download")
@@ -396,7 +433,17 @@ def download_dataset_zip(session_id: str) -> StreamingResponse:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in entries:
+            if manifest.get("contract"):
+                from backend.dataset_sampling.contract import file_digest
+                entry = next(f for f in manifest["files"] if f["filename"] == path.name)
+                if file_digest(path) != entry["input_sha256"]:
+                    raise HTTPException(status_code=409, detail="Input file differs from current contract")
             zf.write(path, arcname=path.name)
+        if manifest.get("contract"):
+            for name in ("dataset_contract.json", "emitted_files.json", "sampled_layers.json", "derived_layers.json", "global_derive.json", "dropped_targets.json"):
+                path = out_dir / name
+                if path.is_file():
+                    zf.write(path, arcname=name)
     buf.seek(0)
     zip_name = f"{out_dir.name}_input_deck.zip"
     return StreamingResponse(
@@ -631,12 +678,16 @@ async def _run_forward_model(
         )
 
     try:
+        if manifest.get("contract"):
+            from backend.dataset_sampling.contract import validate_release_access
+            validate_release_access(DatasetConfig.model_validate(manifest["contract"]["requested"]["dataset_config"]))
         result = await asyncio.to_thread(
             run_batch_simulation,
             input_dir=in_dir,
             output_dir=out_dir,
             filenames=filenames,
             progress=on_progress,
+            **({"manifest": manifest} if manifest.get("contract") else {}),
         )
     except Exception as exc:
         logger.exception("forward model failed for session %s", chat.session_id)
@@ -748,7 +799,8 @@ def _record_simulation_outputs(
         # Lazy import keeps h5py off the api import path.
         from signal_extraction import extract_and_prepare_batch
 
-        batch = extract_and_prepare_batch(Path(result["output_dir"]), session_uuid)
+        batch = extract_and_prepare_batch(Path(result["output_dir"]), session_uuid,
+                                          manifest=manifest, outputs=result.get("outputs", []))
         if batch.get("updates"):
             signals_updated = bulk_update_signals(batch["updates"])
     except Exception:
@@ -921,6 +973,11 @@ def _adopt_dataset_sync(chat: ChatSession, rec: dict[str, Any]) -> dict[str, Any
             status_code=409, detail="Source dataset directory no longer exists"
         )
     src_manifest = _read_json(manifest_path)
+    if cfg.contract_version >= 2 or src_manifest.get("contract"):
+        current = sim_similarity.current_manifest(str(cur_dir))
+        source = sim_similarity.eligible_manifest(str(src_dir))
+        if current is None or source is None or not sim_similarity.equivalent_contracts(current, source):
+            raise HTTPException(status_code=409, detail="Reuse requires qualified outputs and exact compatible experiment/population contracts")
     if src_manifest.get("source") == "upload":
         raise HTTPException(
             status_code=409, detail="Source dataset is an upload — nothing to reuse"
@@ -959,12 +1016,20 @@ def _adopt_dataset_sync(chat: ChatSession, rec: dict[str, Any]) -> dict[str, Any
         shutil.copy2(src_in_dir / name, cur_in_dir / name)
         out_name = Path(name).stem + ".out"
         shutil.copy2(src_out_dir / out_name, cur_out_dir / out_name)
+        for suffix in (".execution.json", ".geometry.h5"):
+            extra = src_out_dir / (Path(name).stem + suffix)
+            if extra.exists():
+                shutil.copy2(extra, cur_out_dir / extra.name)
+        for snapshot in (f.get("resolved_scene") or {}).get("snapshots", []):
+            relative = Path(Path(name).stem + "_snaps") / (snapshot["filename"] + ".vti")
+            (cur_out_dir / relative).parent.mkdir(exist_ok=True)
+            shutil.copy2(src_out_dir / relative, cur_out_dir / relative)
         entry = dict(f)
         entry["path"] = str(cur_in_dir / name)
         new_files.append(entry)
     # These manifests contain no absolute paths — copied verbatim they make
     # the samples viz and any regeneration bookkeeping consistent on disk.
-    for m in ("sampled_layers.json", "derived_layers.json", "global_derive.json"):
+    for m in ("sampled_layers.json", "derived_layers.json", "global_derive.json", "dataset_contract.json", "dropped_targets.json", "qualification.json"):
         if (src_dir / m).is_file():
             shutil.copy2(src_dir / m, cur_dir / m)
     new_manifest = dict(src_manifest)
@@ -1696,9 +1761,14 @@ async def _run_derive_chain(chat: ChatSession) -> None:
         if not ok:
             return
 
-    await _run_deterministic(chat, "Peplinski Derive", peplinski_derive_node)
-    await _run_deterministic(chat, "Global Derive", global_derive_node)
-    await _run_deterministic(chat, "Global Validation", global_validation_node)
+    chat.state["global_validation_passed"] = False
+    try:
+        await _run_deterministic(chat, "Peplinski Derive", peplinski_derive_node)
+        await _run_deterministic(chat, "Global Derive", global_derive_node)
+        await _run_deterministic(chat, "Global Validation", global_validation_node)
+    except ValueError as exc:
+        chat.state["global_validation_errors"] = [f"[deterministic_planning] {exc}"]
+        chat.viz_flags.update(grid=False, placed=False, emitted=False)
 
     if chat.state.get("global_validation_passed"):
         await _finish_dataset(chat)
@@ -1896,6 +1966,19 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
     sampled_manifest = _read_json(sampled_path)
     global_derive = _read_json(global_path)
     emitted_manifest = _read_json(emitted_path)
+    if cfg.contract_version >= 2:
+        from backend.preflight import verify_contract
+        from backend.dataset_sampling.contract import file_digest
+        if not emitted_manifest.get("files") or emitted_manifest.get("errors"):
+            raise ValueError("Cannot complete a dataset without a consistent accepted manifest")
+        contract = emitted_manifest["contract"]
+        verify_contract(contract)
+        if global_derive != contract["grid"] or cfg.model_dump(exclude={"output_dir", "num_threads"}) != contract["requested"]["dataset_config"]:
+            raise ValueError("Collected state/global plan differs from the emitted contract")
+        for entry in emitted_manifest["files"]:
+            verify_contract(contract, entry["resolved_scene"])
+            if file_digest(Path(artifacts["in_dir"]) / entry["filename"]) != entry["input_sha256"]:
+                raise ValueError("Input artifact changed before database finalization")
     # eps/sigma labels. Tolerated as absent (rows keep derived_layers = NULL)
     # rather than failing the finalize — a dataset without labels is still a
     # dataset, and the derive chain is what guarantees the manifest exists.
@@ -1925,6 +2008,7 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
             "global_derive": global_derive,
             "artifacts": artifacts,
             "emission": payload.emission,
+            "dataset_contract": emitted_manifest.get("contract"),
         }
         row.advanced_params = payload.advanced_params
         row.num_samples_requested = cfg.num_samples
@@ -1999,6 +2083,9 @@ def _build_simulation_rows(
         # degenerate ranges, so they appear here too). Advanced params no
         # longer carry geometry.
         tgts = sample.get("targets") or []
+        scene = emitted.get("resolved_scene")
+        if scene:
+            tgts = scene["targets"]
         cylinders = [t for t in tgts if t.get("kind") == "cylinder"]
         boxes = [t for t in tgts if t.get("kind") == "box"]
 
@@ -2008,7 +2095,7 @@ def _build_simulation_rows(
             "user_id": user_id,
             "sample_index": sample_id,
             "antenna_kind": ant.antenna_kind,
-            "antenna_axis": ant.antenna_axis or "x",
+            "antenna_axis": scene["source"]["axis"] if scene else ant.antenna_axis,
             "tx_rx_offset_m": ant.tx_rx_offset_m,
             "resistance": ant.resistance,
             "source_start_time": wf.source_start_time,
@@ -2022,6 +2109,15 @@ def _build_simulation_rows(
             "source_height_m": global_derive["source_height_m"],
             "domain_x": global_derive["domain_x_m"],
             "domain_y": global_derive["domain_y_m"],
+            "domain_z": global_derive.get("domain_z_m", global_derive["dx_m"] if cfg.dimensionality == "2D" else None),
+            "dimensionality": cfg.dimensionality,
+            "coordinate_frame": cfg.coordinate_frame,
+            "contract_version": cfg.contract_version,
+            "contract_digest": emitted.get("contract_digest"),
+            "input_sha256": emitted.get("input_sha256"),
+            "resolved_scene": scene,
+            "requested_sample": sample,
+            "qualification_status": "unqualified" if scene else "legacy_unverified",
             "cells_per_wavelength": cfg.cells_per_wavelength,
             "max_cell_m": global_derive["dx_m"],
             "rx_same_height": True if ant.rx_same_height is None else ant.rx_same_height,

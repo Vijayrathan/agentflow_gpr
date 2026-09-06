@@ -50,8 +50,8 @@ from backend.schema import (
     SampledTarget,
 )
 from backend.validation_tools_new import PML_GAP_CELLS
-from dataset_sampling.layer_sampler import MAX_TARGET_ATTEMPTS
-from dataset_sampling.target_shapes import iter_ranges, placement_failures
+from backend.dataset_sampling.layer_sampler import MAX_TARGET_ATTEMPTS
+from backend.dataset_sampling.target_shapes import iter_ranges, placement_failures
 
 # tiny inward margin (in cells) so envelope edges sit strictly inside the (pml+15)
 # gap despite floating-point noise at the boundary.
@@ -214,9 +214,12 @@ def validate_and_place(
     cfg: DatasetConfig,
     target_ranges: Optional[ExtractedTargetRanges],
     seed: Optional[int] = 1234,
+    advanced=None,
 ) -> PlacementResult:
     """Validate each sample's dynamic objects against the FIXED grid; redraw or
     drop the whole sample. Static objects are skipped (gate-validated once)."""
+    if cfg.contract_version >= 2:
+        return _place_v2(samples, grid, cfg, target_ranges, advanced)
     result = PlacementResult()
     rng = random.Random(seed)
     specs = iter_ranges(target_ranges) if target_ranges is not None else []
@@ -277,6 +280,113 @@ def validate_and_place(
     return result
 
 
+def _place_v2(samples, grid, cfg, target_ranges, advanced=None):
+    from backend.dataset_sampling.contract import stream_seed, validate_capabilities
+    from backend.dataset_sampling.scene import resolve_target, validate_resolved_target, bounds_overlap
+    from backend.dataset_sampling.target_shapes import half_extents_3d
+    validate_capabilities(cfg, target_ranges=target_ranges, advanced=advanced)
+    from backend.dataset_sampling.numerics import cell_index
+    rough = advanced.surface_roughness if advanced else None
+    surface_min = cell_index(grid.ground_y_m - rough.amplitude_m, grid.dx_m) * grid.dx_m if rough else grid.ground_y_m
+    specs = iter_ranges(target_ranges) if target_ranges else []
+    result = PlacementResult()
+    margin = _clearance(grid, cfg) + grid.dx_m  # conservative quantization enclosure
+
+    def dimensions(t):
+        return (["radius"] + (["length"] if t.length_m is not None else [])) if t.kind == "cylinder" else (
+            ["width", "height"] + (["crossline_size"] if t.crossline_size_m is not None else []))
+
+    def in_ranges(t, spec):
+        fields = ["x_offset", "depth"] + (["z_offset"] if cfg.dimensionality == "3D" else []) + dimensions(t)
+        return all(getattr(spec, f"{f}_min_m") - 1e-12 <= getattr(t, f"{f}_m") <= getattr(spec, f"{f}_max_m") + 1e-12 for f in fields)
+
+    def issues(t, spec, occupied):
+        if not in_ranges(t, spec):
+            return ["target left requested ranges"]
+        try:
+            resolved = resolve_target(t, grid, cfg)
+            errors = validate_resolved_target(resolved, grid, cfg, surface_min)
+            if any(bounds_overlap(resolved, other, cfg.dimensionality) for other in occupied):
+                errors.append("target bounds overlap another required target")
+            return errors
+        except ValueError as exc:
+            return [str(exc)]
+
+    def candidate(original, spec, rng, floor_only=False):
+        values = original.model_dump()
+        for name in dimensions(original):
+            lo, hi = getattr(spec, f"{name}_min_m"), getattr(spec, f"{name}_max_m")
+            floor = max(lo, (5 if name == "radius" else 10) * grid.dx_m)
+            ceiling = min(hi, getattr(original, name + "_m"))
+            if floor > ceiling + 1e-12:
+                return None
+            values[name + "_m"] = lo if lo == hi else (floor if floor_only else rng.uniform(floor, ceiling))
+        sized = SampledTarget.model_validate(values)
+        hx, hy, hz = half_extents_3d(sized)
+        physical = {"x_offset": (-grid.domain_x_m / 2 + margin + hx, grid.domain_x_m / 2 - margin - hx),
+                    "depth": (grid.ground_y_m - surface_min + hy + grid.dx_m, grid.ground_y_m - margin - hy)}
+        if cfg.dimensionality == "3D":
+            physical["z_offset"] = (-grid.domain_z_m / 2 + margin + hz, grid.domain_z_m / 2 - margin - hz)
+        for name, (pmin, pmax) in physical.items():
+            requested_lo, requested_hi = getattr(spec, name + "_min_m"), getattr(spec, name + "_max_m")
+            lo, hi = max(pmin, requested_lo), min(pmax, requested_hi)
+            # A fixed coordinate may be valid after quantization on the exact
+            # boundary; only the final resolved check is authoritative for it.
+            if requested_lo == requested_hi:
+                values[name + "_m"] = requested_lo
+            elif lo > hi:
+                return None
+            else:
+                values[name + "_m"] = rng.uniform(lo, hi)
+        return SampledTarget.model_validate(values)
+
+    for sample in samples:
+        pairs = _pair_targets(sample, specs)
+        targets = list(sample.targets)
+        occupied = []
+        attempts = [0] * len(pairs)
+        changed = 0
+        failure = None
+        # Reserve fixed geometry first, independent of canonical object order.
+        order = sorted(range(len(pairs)), key=lambda j: not pairs[j][1].is_static)
+        for j in order:
+            target, spec = pairs[j]
+            reasons = issues(target, spec, occupied)
+            if reasons and spec.is_static:
+                raise ValueError(f"static target '{target.name}': {'; '.join(reasons)}; fixed objects are never redrawn")
+            if reasons:
+                rng = random.Random(stream_seed(cfg.seed, sample.sample_id, "placement", j))
+                floor = candidate(target, spec, rng, floor_only=True)
+                if floor is None:
+                    failure = f"object #{j} '{target.name}': no feasible size/position within requested ranges"
+                    break
+                accepted = None
+                for attempt in range(1, MAX_TARGET_ATTEMPTS + 1):
+                    trial = candidate(target, spec, rng)
+                    attempts[j] = attempt
+                    if trial is not None and not issues(trial, spec, occupied):
+                        accepted = trial
+                        break
+                if accepted is None:
+                    failure = f"object #{j} '{target.name}': failed {attempts[j]} range-preserving attempts; {'; '.join(reasons)}"
+                    break
+                target = targets[j] = accepted
+                changed += 1
+            occupied.append(resolve_target(target, grid, cfg))
+        if failure:
+            result.dropped.append({"sample_id": sample.sample_id, "reason": failure,
+                                   "placement_attempts": attempts, "original_targets": sample.provenance.get("original_targets", [t.model_dump() for t in sample.targets])})
+        else:
+            provenance = dict(sample.provenance)
+            provenance.setdefault("original_targets", [t.model_dump() for t in sample.targets])
+            provenance.update(placement_attempts=attempts, acceptance_policy="bounded range-preserving placement; no backfill")
+            survivor = SampledSample.model_validate({**sample.model_dump(), "targets": [t.model_dump() for t in targets], "provenance": provenance})
+            result.surviving.append(survivor)
+            result.n_redrawn += changed
+            result.n_unchanged += int(changed == 0)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # File-IO orchestration (reads/writes the dataset manifests)
 # ---------------------------------------------------------------------------
@@ -288,6 +398,20 @@ def _resolve(output_dir: str, filename: str) -> Path:
     return path / filename
 
 
+def distribution_summary(samples):
+    """Observed marginals; acceptance is not advertised as uniform sampling."""
+    from collections import defaultdict
+    from statistics import mean, pstdev
+    values = defaultdict(list)
+    for sample in samples:
+        for category in ("layers", "targets"):
+            for i, record in enumerate(getattr(sample, category)):
+                for name, value in record.model_dump().items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        values[f"{category}.{i}.{name}"].append(value)
+    return {key: {"n": len(v), "min": min(v), "max": max(v), "mean": mean(v), "std": pstdev(v)} for key, v in values.items()}
+
+
 def run_placement(
     output_dir: str,
     cfg: DatasetConfig,
@@ -296,6 +420,7 @@ def run_placement(
     seed: Optional[int] = 1234,
     samples_filename: str = "sampled_layers.json",
     dropped_filename: str = "dropped_targets.json",
+    advanced=None,
 ) -> PlacementResult:
     """Load the sampled manifest, place/redraw/drop targets, rewrite the manifest.
 
@@ -308,11 +433,15 @@ def run_placement(
         payload = json.load(f)
     samples = [SampledSample.model_validate(s) for s in payload["samples"]]
 
-    result = validate_and_place(samples, grid, cfg, target_ranges, seed=seed)
+    result = validate_and_place(samples, grid, cfg, target_ranges, seed=seed, advanced=advanced)
 
     payload["num_samples"] = len(result.surviving)
     payload["samples"] = [s.model_dump() for s in result.surviving]
     payload["dropped_targets"] = result.dropped
+    if cfg.contract_version >= 2:
+        payload["sampling_summary"] = {"original_draws": distribution_summary(samples),
+            "accepted_draws": distribution_summary(result.surviving),
+            "notice": "Constraints and bounded placement alter the survivor distribution; no backfill"}
     with open(samples_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 

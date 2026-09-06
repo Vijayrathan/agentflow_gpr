@@ -1036,6 +1036,8 @@ function DatasetOutcomeView({ view, onClose }) {
         <Icon name="wave" size={15} style={{ color: "var(--accent)" }} />
         <span className="fileview-name mono">{outName}</span>
         <span className="badge mono">.out</span>
+        {view.data && <span className="badge">{view.data.receiver || "rx1"} · {view.data.qualification?.status || "legacy unverified"}</span>}
+        {view.data?.geometry_url && <a className="hbtn" href={`${window.getApiHttpBase()}${view.data.geometry_url}`} download title="Download the native voxel material map (HDF5)">Native geometry</a>}
         {comps.length > 1 && (
           <select
             className="vsel"

@@ -162,6 +162,16 @@ class Simulation(SQLModel, table=True):
     )
     domain_x: float = Field(sa_column=Column(Float, nullable=False))
     domain_y: float = Field(sa_column=Column(Float, nullable=False))
+    domain_z: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    dimensionality: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    coordinate_frame: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    contract_version: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
+    contract_digest: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    input_sha256: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    resolved_scene: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    requested_sample: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    executed_metadata: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    qualification_status: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     cells_per_wavelength: float = Field(
         sa_column=Column(Float, nullable=False)
     )
@@ -404,6 +414,9 @@ def bulk_update_signals(
                 sim.signal_hy = u.get("signal_hy")
                 sim.signal_hz = u.get("signal_hz")
                 sim.signal_length = u.get("signal_length")
+                if "executed_metadata" in u:
+                    sim.executed_metadata = u["executed_metadata"]
+                    sim.qualification_status = u.get("qualification_status", "unqualified")
                 if "output_file_path" in u:
                     sim.output_file_path = u["output_file_path"]
                 sim.simulation_completed_at = datetime.now(timezone.utc)

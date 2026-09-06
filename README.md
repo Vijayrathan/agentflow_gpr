@@ -4,6 +4,8 @@ This project turns a conversation about soil layers, buried objects, and radar s
 
 The central design choice is **one computational grid, domain, waveform, and transmitter/receiver arrangement per generated dataset**. Soil properties and object geometry vary inside that shared measurement setup. This makes signals directly comparable without changing their time axis or computational boundaries for each sample.
 
+**3D is implemented as an experimental capability, gated by `GPR_ENABLE_EXPERIMENTAL_3D=1`.** General release remains blocked on reviewed scientific tolerances and population coverage. See [implementation and qualification status](docs/3D_IMPLEMENTATION_STATUS.md). Existing 2D datasets remain readable.
+
 The active implementation uses one conversational collection agent, a supporting knowledge agent, and a deterministic Python pipeline. The README describes the implemented behavior; differences between the design notes and the current code are called out below.
 
 ## What the application can do
@@ -14,7 +16,7 @@ The active implementation uses one conversational collection agent, a supporting
 - Show a live subsurface preview, switch between range overviews and individual samples, inspect generated input files, and download dataset artifacts.
 - Run gprMax on CPU or NVIDIA CUDA, stream progress and per-file failures, and display receiver signals from the resulting HDF5 files.
 - Import ZIP archives of existing `.in` files after command-syntax checks.
-- Recommend reusing a sufficiently similar completed dataset, with a choice to adopt it or simulate anyway.
+- Find similar configurations and offer substitution only for scientifically qualified results with exact experiment and population compatibility.
 - Keep separate chats and datasets per user ID and restore saved conversations after reconnecting or restarting the backend.
 
 Dataset generation ends with input files and labels. **Forward simulation is a separate action**, started with **Run forward model** or the simulation CLI. The repository provides dataset infrastructure, not an end-to-end trained soil-inversion model.
@@ -39,9 +41,9 @@ The order follows information dependencies: validate a choice as soon as its inp
 
 | Stage | What happens | Why it belongs here |
 | --- | --- | --- |
-| 1. Dataset configuration | Collect sample count, naming, grid-resolution policy, PML thickness, buffer size, material-bin count, and whether frequency means peak or band center. | These settings control every later stage, but do not require a soil calculation. The server fixes the output location, 2D mode, and deployment-controlled threading. |
+| 1. Dataset configuration | Collect sample count, naming, grid-resolution policy, PML thickness, buffer size, material-bin count, and whether frequency means peak or band center. | These settings control every later stage, but do not require a soil calculation. The server fixes output location, contract version 2, and deployment-controlled threading. It preserves the selected mode; experimental 3D requires the deployment flag. |
 | 2. Layer ranges | Collect layers from the surface downward: thickness, sand and clay percentages, moisture band, and bulk/particle density ranges. | Soil defines the material model and its feasibility constraints. Texture and density must exist before concrete realizations can be drawn. |
-| 3. Target ranges | Collect zero or more cylinders and boxes, with size, center depth, and horizontal offset ranges. | Objects affect the eventual grid and domain, so they must be drawn before global sizing. Coordinates are relative to the surface and domain center because absolute bounds do not yet exist. |
+| 3. Target ranges | Collect zero or more cylinders and boxes, with size, center depth, and horizontal offset ranges; 3D also requires crossline offsets, finite cylinder length/axis or box crossline size. | Objects affect the eventual grid and domain, so they must be drawn before global sizing. Coordinates are relative to the surface and domain center because absolute bounds do not yet exist. |
 | 4. Layer and target sampling | Draw concrete realizations, reject infeasible soil draws, and save the accepted samples. | Actual sampled compositions determine material properties. Drawing first avoids deriving a separate grid for every sample or sizing from a composition that was never used. Grid-independent checks can already run. |
 | 5. Waveform | Collect pulse kind, amplitude, frequency, name, and optional source timing. | The soil model establishes the frequency-validity policy; the waveform supplies the spectral band needed for wavelengths and resolution. Band edges depend on the waveform, not soil permittivity. |
 | 6. Antenna and cross-stage gate | Collect source type, polarization, Tx/Rx separation, and optional settings; validate waveform bandwidth and antenna configuration. | These checks need both excitation and source settings. A bad shared frequency band invalidates the entire dataset, so it is rejected before numerical sizing. |
@@ -50,153 +52,75 @@ The order follows information dependencies: validate a choice as soon as its inp
 | 9. Global derivation | Resolve frequency conventions, wavelengths, cell size, clearances, depth, domain, antenna coordinates, time step, and time window once. | Each quantity depends on earlier results. In particular, cell size must be final before converting boundary clearances from cells to meters. |
 | 10. Global validation | Check grid/domain fundamentals, then placement and layers, then computational feasibility. | Placement requires meaningful domain dimensions, and cost estimates require valid cell counts. Cascading gates avoid reporting secondary failures caused by one upstream problem. |
 | 11. Target placement | Validate varying objects against the frozen grid; shrink/reposition invalid draws or drop the sample. | Absolute placement becomes possible only after the domain is known. Keeping the grid fixed prevents object placement from changing the measurement setup. Fixed targets were checked at the global gate. |
-| 12. Emission and storage | Write one `.in` file per surviving sample, record emitted geometry labels, and store generated samples in PostgreSQL through the API. | The writer consumes resolved physics and shared settings. It performs geometry transcription and cell snapping, not a new material or grid solve. |
+| 12. Emission and storage | Write one `.in` file per surviving sample, record emitted geometry labels, and store generated samples in PostgreSQL through the API. | The writer consumes resolved physics and shared settings. Geometry is snapped and validated in a resolved-scene stage before pure serialization; native preflight then checks the built model before field updates. |
 | 13. Forward simulation | On request, run the emitted decks, store output paths, and extract receiver signals. | Generation can be reviewed before spending solver time. Solver errors remain deterministic execution failures and are reported per file. |
 
-## Physics choices and derived quantities
+## Physical and numerical contract
 
-### Soil composition and heterogeneity
+New collection sessions use contract version 2. Version 1 remains the historical planar implementation for reading/reproducing old artifacts; its assumptions must not be applied to a new 3D scene. A valid configuration, successful native field execution, and scientific qualification are three distinct states.
 
-gprMax uses finite-difference time-domain (FDTD) simulation: it advances electric and magnetic fields through a spatial grid over successive time steps. Changes in soil electrical properties and buried conductors alter propagation and produce reflections. Relative permittivity affects propagation speed and wavelength; conductivity contributes to loss.
+### Material and excitation
 
-This pipeline uses **gprMax's native Peplinski soil model** throughout. It passes sand fraction, clay fraction, bulk density, particle density, and a moisture band to `#soil_peplinski`. Using the solver's own material construction avoids disagreement between an independent dielectric approximation used for sizing and the materials actually simulated.
+The deterministic order is sampling → native material response at the chosen excitation → one spectral/grid budget → domain/acquisition → native CFL step → common recording window. No numerical error is sent to an LLM to repair the scene.
 
-The initial sampler draws thickness, sand, clay, and both densities uniformly from their ranges. It derives silt as the percentage remaining after sand and clay. It derives porosity from the two densities to check whether the specified water content can physically fit in the pore space. Infeasible draws are rejected rather than silently changing the user's moisture band. Each layer gets up to 200 attempts before sampling returns a remediation error.
+Only gprMax-native Peplinski supplies dielectric properties. Each layer's entire moisture band is preserved across samples; it is neither a scalar nor a randomly narrowed sub-band. Densities, texture and thickness are drawn first, with up to 200 attempts. Every actual native material bin must be finite and passive, with positive ordered densities and moisture within porosity and the 0.30 calibration cap. At least two bins are required. The wettest instantiated bin is half a bin above the supplied maximum; the validator includes this shift. Texture excursions outside the chosen calibration envelope remain recorded warnings, and never imply empirical qualification.
 
-**Current moisture behavior:** each layer's full `theta_v_min`–`theta_v_max` band is passed unchanged into every sample. Although some prompts and design comments describe drawing a different sub-band per sample, the active sampler does not do that. Moisture still varies spatially within a realization: `#fractal_box` distributes the Peplinski material bins through the layer. The default is 50 bins, fractal dimension 1.5, and equal directional weights. These are discretized heterogeneous materials, not one scalar water content for the whole layer.
+`Material.calculate_er(f)` supplies the complex response. Dry/wet permittivity labels are evaluated at the resolved peak frequency; `Material.se` is the native conductivity coefficient in S/m, not a claim that it equals total frequency-dependent loss. Resolution uses every native bin over the declared design band, including conductivity and relaxation in a conservative bound on the phase index. Sampled phase wavelengths and attenuation lengths are also recorded. The derived coefficient table is hashed and compared with the table built by the native solver.
 
-Silt is stored as a derived label; porosity is calculated for validation. Neither is an additional Peplinski command input. Temperature, salinity, organic content, and porewater conductivity are not independently modeled by the active extraction pipeline. Density inputs use **g/cm³**, texture uses **percent**, moisture uses **volume fraction**, and geometry, frequency, and time use meters, hertz, and seconds.
+Version 2 supports Ricker excitation only. The entered frequency can mean peak or Wang band center; a band center is divided by 1.059095 before emission. The Wang useful-band edges (0.481623 and 1.636567 times the peak) must lie in 0.3–1.3 GHz. Resolution separately uses `high_freq_factor × actual peak` (default 3, minimum 2.5). Those spectral tails use the native model's extrapolation; useful-band validity does not certify the entire tail empirically. An explicit start requires an end; an end alone starts at zero. The interval must include the native pulse duration, and the recording window covers both excitation and returns.
 
-### Frequency convention and bandwidth
+### Geometry and the shared grid
 
-A Ricker pulse's peak frequency and band-center frequency are different. `center_freq_is_peak` records which meaning the user supplied. The deterministic code converts a band center to the peak expected by gprMax and derives the lower and upper Wang band edges. The writer uses that resolved peak directly.
+Coordinates are always `(x, y, z)`, with **y vertical** and x/z horizontal. In 2D TMz, z is one cell and its two PML thicknesses are zero. In 3D, all three dimensions contain more than one cell, with six active PML faces. `soil_depth_m` is the vertical soil sizing depth; `domain_z_m` is the physical crossline extent. Historical `depth_z_m` remains a vertical-depth compatibility alias.
 
-The Peplinski gate checks that the **entire derived −6 dB band** lies within the project's 0.3–1.3 GHz validity window. Checking only the entered frequency would miss pulses whose upper band edge exceeds the model's range. For example, an **825 MHz band center** becomes approximately **779 MHz peak**, with edges near **375 and 1275 MHz**. Treating 825 MHz as the peak would put the upper edge near 1350 MHz and fail the gate.
+One cubic grid, domain, ground reference, acquisition and time axis serve every accepted sample. The shortest spectral wavelength, smallest intrinsic target feature and thinnest drawn layer constrain spacing. Targets need at least ten cells per intrinsic feature; finite layers need at least three after quantization. The grid reserves a cell for endpoint quantization. Source/receiver field locations account for Yee staggering, and sources/targets/receivers clear every applicable face by PML + 15 cells. Configured larger buffers can enlarge the domain further.
 
-Grid sizing uses a separate, higher frequency to account for significant spectral content beyond the −6 dB band. The derivation defaults to three times the entered frequency through `high_freq_factor`; the independent resolution validator also applies a waveform-specific significant-frequency factor. The validity band and the grid-resolution frequency serve different purposes and must not be interchanged. The current band calculation is Ricker-based even when another waveform name is selected; this limitation is listed below.
+The lateral floor is 1.5 longest wavelengths, including PML. It is enlarged independently in x and z for target and acquisition extents. The source-height floor is half the longest air wavelength; an explicit override cannot violate it. Source and receiver positions, including crossline separation and a distinct receiver height when requested, are resolved once. Requested and effective positions remain separate.
 
-### Material properties before a grid exists
+`numerics.py` uses the bundled solver's rounding convention, with two active CFL terms for TMz and three for 3D. The actual step must be below every material relaxation time; failure requires a revised common grid, never a per-sample time adjustment. The recording estimate bounds Tx → interior ROI corners → receiver-component paths, includes source delay/removal and explicit return margins, then resolves one integer iteration count. The final time is `(iterations - 1) × dt`. This conservative timing policy requires scene-specific scientific qualification.
 
-For each sampled layer, `peplinski_derive.py` creates a `PeplinskiSoil` and asks `calculate_debye_properties` to build its material bins on a minimal temporary grid object. This operation needs a material list, not a finalized spatial grid or time step, so it avoids a circular dependency.
+Layers cover full x/z volumes and continue through lateral and bottom boundaries. The final layer is a terminal half-space; its sampled thickness is not an independently realized bottom interface. Both nominal and effective layer geometry are stored. Native fractal generation produces a volume, not repeated copies of a 2D slice. Fractal weights are not advertised as physical correlation lengths.
 
-The code evaluates `Material.calculate_er(f).real` on the driest and wettest bins. That includes the Debye material's frequency response. Reading the raw stored `er` instead would use its infinite-frequency value, potentially underestimating permittivity and allowing cells that are too large. The active code evaluates these labels at the **resolved peak frequency**, recorded as `frequency_hz` in the derived manifest.
+PEC boxes have x width, y height and finite z crossline size. Cylinders have radius, finite axial length and explicit x/y/z axis. Positions use signed offsets from the domain center in x/z and center depth below nominal ground. Arbitrary rotations, spheres and other target materials are unsupported. Quantization is either declared nearest-cell or exact; exact mode rejects required snapping. The resolved scene records endpoint changes and conservative bounds; native preflight records occupied voxels separately.
 
-Each layer receives dry/wet relative-permittivity labels and the corresponding effective-conductivity labels from `Material.se`. Conductivity is recorded in S/m and remains part of gprMax's material behavior, but it does not set this pipeline's wavelength budget. The wettest actual bin is used for sizing because gprMax's bin construction places it half a bin above the requested moisture maximum; the remaining porosity-check limitation is documented below.
+Every fixed range field stays fixed, including fields of otherwise varying targets. Placement can shrink sizes only within the original bounds and the ten-cell floor, and reposition only inside the intersection of requested and physically valid ranges. The overlap policy conservatively forbids touching or overlapping target bounds. After at most 20 attempts, failure drops the whole sample without backfill. Static-target failure stops the shared gate. Original draws, rejection reasons, attempts and accepted marginal distributions are retained. The common grid stays fixed even when a dropped sample supplied an extreme.
 
-### Why the domain is fixed across samples
+### Supported scope and release gate
 
-Changing the grid for each sample would change numerical dispersion, time-step spacing, signal length, and the distance to absorbing boundaries alongside the soil properties being studied. Changing antenna positions would also change the acquisition geometry. Those differences would complicate comparison and could introduce unintended cues into an ML dataset.
-
-The pipeline therefore aggregates the most demanding properties before deriving anything global:
-
-| Aggregate | How it influences the shared setup |
+| Option | Version 2 behavior |
 | --- | --- |
-| Largest wet-bin permittivity across all drawn layers | Supplies the slowest medium and shortest wavelength for spatial resolution and travel-time budgeting. |
-| Smallest dry-bin permittivity, also considering air | Supplies the longest wavelength. In the normal air-over-soil layout, air determines this limit. |
-| Smallest drawn target feature | Can tighten the grid beyond the wavelength requirement so the object spans at least ten cells. |
-| Largest drawn horizontal target extent | Can widen the domain to fit the object and its boundary clearance. |
-| Deepest drawn target bottom | Can deepen the soil region enough to preserve bottom-boundary clearance. |
-| Largest fixed-object footprint about the domain center | Widens the domain symmetrically to accommodate objects pinned to either side. |
-| Sum of the maximum requested layer thicknesses | Reserves enough depth for the deepest permitted layer stack. |
+| 2D TMz | One-cell z, z-polarized single-pair A-scan. |
+| 3D | Experimental layered Peplinski volume with finite PEC boxes/cylinders and x/y/z source polarization. |
+| Source kinds | Hertzian dipole, voltage source, transmission line, honored exactly. Resistive sources require the existing resistance bounds. Transmission lines are CPU-only. |
+| Receiver layout | One static receiver; signed x/z separation and explicit receiver height are honored. Arrays and scans are rejected. |
+| Roughness | 2D roughness has resolved height limits, seeded native construction, trough burial/interface and peak acquisition checks. 3D roughness is explicitly rejected. |
+| Unsupported options | Other waveform families, surface water, vegetation, arbitrary rotations, new target materials and realistic antenna assemblies are rejected or absent from collection. |
+| Inspection | Three orthogonal 3D slices with explicit positions, finite-object intersections, PML and acquisition coordinates. Native voxel geometry is downloadable. |
 
-The dielectric and varying-target extremes come from the **drawn dataset**, not an exhaustive search over every possible combination in the input ranges. The layer-stack bound uses the range maxima. Independent extremes can come from different samples; combining them is deliberately conservative for the realizations being emitted.
+A full 3D field simulation still produces a single receiver A-scan. Field charts select among Ex/Ey/Ez/Hx/Hy/Hz and use actual HDF5 timing, with E in V/m, H in A/m and time displayed in ns.
 
-`global_derive.py` then resolves the shared quantities in this order:
+### Execution, persistence and reuse
 
-1. **Wavelength limits and cell size.** Use the high significant frequency and largest soil permittivity for the shortest wavelength. Allocate ten cells per wavelength by default. Tighten further if the smallest target needs it. A cylinder's feature is its diameter; a box's feature is its smaller in-plane side. The single-cell thickness in z never counts as a target feature.
-2. **Boundary distances.** After cell size is frozen, convert PML and buffer cells into physical distances. Perfectly matched layers (PML) absorb outgoing waves to reduce artificial reflections from the computational boundary. Domain padding uses the configured buffer, while source/object clearance requires an additional 15 cells beyond the PML. With defaults, padding is 20 cells and required clearance is 25 cells; these are distinct distances.
-3. **Soil depth.** Fit the maximum layer stack, a bandwidth-based range-resolution floor, and the deepest target with any missing bottom clearance. The range-resolution floor is a sizing policy, not proof that all interfaces will be distinguishable in a simulated signal.
-4. **Antenna height and domain width.** Default the source height to half the longest air wavelength. Start the horizontal span at one and a half longest wavelengths, then enlarge it for Tx/Rx separation and target footprints. An explicit source-height override is accepted by the current schema but must pass the same minimum-height and clearance checks.
-5. **Domain height and coordinates.** Place soil below the ground reference and air above it, with room for the antenna and top clearance. Round domain dimensions upward to whole cells, then place Tx and Rx symmetrically around the horizontal midpoint at the same height.
-6. **Time step.** Derive the 2D Courant–Friedrichs–Lewy (CFL) stability step from the final cell size. Smaller cells require shorter steps so field propagation remains numerically stable. The time step is an output of spatial resolution, never an input used to select soil or grid settings. gprMax sets its actual step when building the model.
-7. **Time window.** Budget a round trip to the deepest reflector using the slowest soil speed, include source height conservatively at that speed, and add a pulse-duration margin. Source start/end times control excitation separately; they are not the simulation duration.
+Admission estimates host memory, per-device VRAM, material coefficient capacity, output and scratch space separately. It includes native arrays, FFT work and runtime reserves; estimates are not measured capacity guarantees. Build receipts record observed RSS. Available host RAM is reduced by a configurable reserve. Scheduling may reduce workers or queue a batch, but never coarsens or truncates the experiment. At most one version-2 model runs per GPU; local batches share an OS resource lock and device identities stay reserved until completion. CPU version-2 execution also uses isolated worker processes.
 
-These results are written once to `global_derive.json` and reused by every emitted file. The common geometry is **x horizontal, y vertical, z one cell thick**. Despite its historical name, `depth_z_m` stores soil depth along y. The 2D PML command has zero thickness on both z faces; applying the in-plane PML there would consume the whole thin dimension.
-
-The grid stays fixed after target redraws or dropped samples. A sample that later disappears may have set an extreme; retaining its more conservative grid avoids a circular resize-and-revalidate process. A regenerated dataset may receive a new global grid when its inputs change.
-
-### Layer and target geometry in the emitted model
-
-Layers begin at the surface and stack downward. The emitter snaps the ground and layer interfaces to cell boundaries, and extends the **deepest layer to the bottom of the domain**. This provides a continuous soil background through the lower padding instead of leaving an artificial air pocket beneath a shorter sampled stack. Consequently, the last layer's emitted thickness generally differs from its sampled thickness. Use the geometry labels in `emitted_files.json` when the target label must match the simulated layer extent; database `layers` currently retains the original sampled values.
-
-Each object is specified by a signed horizontal offset from the domain center and the depth of its center below ground. A cylinder appears as a circular cross-section with its axis along z; a box is a rectangle spanning the same thin z cell. Both are **perfect electric conductors (PEC)**. Their geometry affects grid sizing, but they do not contribute a sampled dielectric permittivity. Targets are emitted after the fractal soil, with dielectric smoothing disabled, so the conductor replaces the soil at its boundary.
-
-Objects with every range endpoint equal are fixed. Their placement is validated once, and a failure returns to the user rather than moving their chosen coordinates. Other objects are dynamic. Invalid placements can be redrawn up to 20 times, shrinking sizes while preserving the user's minimum size and the ten-cell resolution floor. If the smallest allowed object cannot fit, the sample is dropped immediately. Failure of any object drops the **whole sample**, preserving the requested object set in every surviving file. Drops reduce the delivered count; there is no backfill.
-
-Dynamic repositioning currently draws a new center from the whole physically valid domain envelope, which can go outside the originally requested offset/depth ranges. Redraws and rejection also mean final accepted distributions are not necessarily uniform. The updated sampled manifest is the record of the geometry actually passed to emission.
-
-## Validation coverage
-
-Validation is split by when the required information becomes available: schema checks are Tier 0, collection checks Tier 1, concrete soil draws Tier 2, global checks Tier 3, and emission checks Tier 4. Errors stop the relevant gate or reject a draw; warnings are retained without automatically changing inputs.
-
-| Location | Checks currently performed | Result |
-| --- | --- | --- |
-| Section schemas and completeness | Positive sample count and grid-policy values; nonnegative PML/buffer counts; ordered ranges; feasible minimum sand/clay sum; moisture envelope fitting the loosest density-derived porosity; matching layer count; required section content. | Invalid saves are rejected; incomplete sections do not advance. |
-| Target schemas | Ordered size/position ranges, positive radius/box dimensions, supported shapes, and PEC-only material. | Reject invalid target configurations before sampling. |
-| Antenna schema and collection gate | Supported source type; required positive resistance below 376.73 ohms for voltage/transmission-line configurations; valid axis; finite/ranged resistance; source start/end ordering and missing end time. | Reject invalid configurations. |
-| Each soil draw | Texture closure; real moisture band; bulk density below particle density; physical porosity; moisture maximum no greater than that draw's porosity; Peplinski moisture ceiling of 0.30. | Reject and redraw; exhausted attempts return to remediation. |
-| Calibration warnings | Sand outside 15–50%, silt outside 35–65%, or clay outside 5–20%. | Warn that composition lies outside the project's Peplinski calibration envelope; texture excursions alone do not reject a draw. |
-| Waveform gate | Recognized waveform name, positive frequency, finite amplitude, and derived band edges inside 0.3–1.3 GHz. | Stop before material/grid derivation; the band gate is also reasserted during global derivation. |
-| Global phase 1: grid/domain | Wavelength resolution; Debye relaxation time versus computed step; integer-cell domain alignment; opposing PML faces leaving an interior region. | Stop before placement checks if fundamentals fail. |
-| Global phase 2: placement/layers | Static Tx/Rx clearance; source height and top clearance; fixed-target placement; maximum layer stack fitting the shared depth; travel-time window; receiver-array steps at least one cell when positive. | Stop on errors. Layer thickness below three cells produces a warning. |
-| Global phase 3: feasibility | Estimated memory against a default 32 GiB budget; positive grid/time inputs and estimated iteration count; very fine target-driven grids. | Memory-budget excess is an error. More than 50,000 estimated iterations, or a grid over three times finer than the wavelength budget, produces an advisory. These are estimates, not device-memory measurements. |
-| Dynamic target placement | Entire bounding box inside the domain, 15-cell clearance beyond PML, at least ten cells across, and full burial below the ground reference. | Resolution/clearance warnings from the shared helper become placement failures; redraw or drop the whole sample. |
-| Emission | Required domain/grid/time commands are constructed; layer identifiers are sanitized and disambiguated; inverted, zero-height, or below-floor layer boxes are rejected; roughness peaks must stay below the source and top clearance. | Skip failed samples and record emission errors. |
-| Uploaded decks | UTF-8 text, gprMax command names and syntax, mandatory commands, duplicate single-use commands, duplicate archive basenames, and limits of 2,000 accepted decks and 5 MiB per deck. Embedded Python and include-file directives are rejected. | Accept valid `.in` members and report rejected members individually. This is syntax validation, not the generated-dataset physics pipeline. |
-
-The current preflight is **not exhaustive**. These implementation boundaries matter when interpreting a passing result:
-
-- Soil range schemas do not uniformly enforce positive thickness/density, finite values, or every lower/upper physical bound. Per-draw checks add constraints but do not constitute complete input-domain validation.
-- The porosity check caps the requested moisture maximum, without reserving the extra half-bin margin used by gprMax's wettest material. Material sizing uses the actual wettest bin, but a near-saturation configuration is not fully protected by the porosity gate.
-- Global thin-layer checks use maximum requested thicknesses, not every realized or minimum thickness. Emission prevents invalid layer boxes but does not enforce three cells for every drawn layer.
-- CFL iteration and Debye helpers currently calculate a three-axis step, while global derivation and the emitted solver geometry use 2D. Their reported step/iteration diagnostics therefore differ from the solver, and the relaxation-time check is not an exact check of the emitted 2D step. Actual output timing comes from HDF5 metadata.
-- Standalone validators for material names, mandatory commands, and snapshot times exist in `validation_tools_new.py`, but the generated-file writer does not call those helpers. It builds mandatory commands and handles identifiers itself; snapshot-window validation is not currently wired into that emission path.
-- The source-timing gate accepts an end time without a start time, but the writer emits explicit timing only when both are supplied. Specify both to preserve an intended source cutoff.
-- Target checks use bounding boxes and the flat ground reference. They do not check object-object overlap, confinement to a particular layer, or burial relative to every rough-surface trough. Optional snapshot bounds/resolution and source timing against the total simulation window are also not fully checked.
-
-## Artifacts, labels, and reproducibility
-
-API-generated datasets live under `dataset/<sanitized-user>/<basename>__<session-hash>/`. CLI generation uses `dataset/<basename>/`. The pipeline writes these artifacts, with placement and solver files appearing only when those stages run:
+Execution uses current manifest entries and input hashes, with `n=1`. Native preflight verifies mode, grid, timing, six PML faces, source kind/axis/timing, receiver location, snapshot settings, material-table parity, half-space continuation and target voxel occupancy before field updates. Missing/stale decks fail admission. HDF5 ingestion checks actual grid, solver version, sample title, acquisition, timing and all six finite equal-length components. Zero-valued components are valid. Raw output, native geometry and requested snapshots are bound by hashes in an execution receipt; stale or failed results cannot become reusable output.
 
 | Artifact | Contents |
 | --- | --- |
-| `sampled_layers.json` | Accepted soil values, derived silt labels, moisture bands, current targets, warnings, and surviving sample IDs; placement updates this file. |
-| `derived_layers.json` | Per-layer dry/wet permittivity and conductivity labels, their evaluation frequency and bin count, and the global material/target extremes. It can still include samples subsequently dropped. |
-| `global_derive.json` | Shared spectral quantities, wavelength limits, cell size, domain, nominal ground and antenna positions, time-step estimate, and time window. |
-| `dropped_targets.json` | Sample IDs and reasons for target-placement drops, when target placement runs. |
-| `emitted_files.json` | Successfully written files, delivered count, common grid summary, snapped layer geometry labels, and emission errors. |
-| `in_files/` | One gprMax `.in` deck per successfully emitted sample. |
-| `out_files/` | Solver `.out` HDF5 files and associated generated outputs after a run. |
+| `dataset_contract.json` | Immutable common mode/frame, solver identity, policies, spectral/grid/acquisition/time settings, requested ranges, output plan, seeds and resource estimates. |
+| `sampled_layers.json` | Accepted draws, original target draws, soil/placement rejection provenance and accepted distributions. |
+| `derived_layers.json` | Native material tables, hashes, labels, spectral evaluations and aggregate extrema; ghost-corner samples may remain. |
+| `global_derive.json` | Common numerical plan and derivation reasons. |
+| `dropped_targets.json` | Whole-sample drops and reasons; no backfill. |
+| `emitted_files.json` | Current accepted identities, hashes, full resolved scenes, requested/delivered counts and warnings. |
+| `out_files/*.out`, `*.geometry.h5`, `*.execution.json` | Native field arrays, lossless voxel material maps and verified execution metadata. Requested snapshots are retained in per-sample folders. |
+| `qualification.json` | Separate reviewed attestation binding evidence, tolerances, intended use, permitted backends and executed artifacts. It does not change the experiment digest. |
 
-Join records by **sample ID**, not list position: dropped samples can leave gaps, and concurrent simulations finish out of order. Check emitted counts and drop records rather than assuming the requested count was delivered. Preserve both sampled labels and emitted geometry labels when constructing training targets.
+PostgreSQL stores requested values, resolved scenes and actual execution metadata separately, with domain z, version/frame and digests. Apply the new nullable migration before starting the updated backend. Historical records are left readable without invented finite dimensions or overwritten source metadata. Their provenance is unverified until established from artifacts.
 
-The pipeline uses seed 42 for initial parameter sampling, seed 1234 for target placement, and deterministic per-sample/per-layer seeds for fractal soil. Surface roughness has its own optional seed. Reproducibility also depends on retaining the configuration, manifests, and solver environment; unchanged seeds alone do not identify a dataset after its inputs change.
+The versioned Qdrant collection `sim_sessions_v2` includes mode, frequency interpretation, crossline geometry, orientation and acquisition details. Similarity scores identify candidates; substitution requires exact contract and accepted-population compatibility plus verified scientifically qualified outputs. Unqualified runs are not indexed for automatic reuse. Qualification has no default tolerance or automatic certification: see [the implementation record](docs/3D_IMPLEMENTATION_STATUS.md) for measured results, limitations and reviewer workflow.
 
-PostgreSQL stores collected ranges in `ExtractionSession`, one generated-sample record in `Simulation`, and resumable application state in `ChatSession`. After simulation, available `Ex`, `Ey`, `Ez`, `Hx`, `Hy`, and `Hz` arrays from the **first receiver** are attached to simulation records. The output viewer reads the actual time step and iteration count from each HDF5 file. Imported decks can be run and viewed, but the upload path does not create the generated dataset's structured simulation-label rows.
-
-## Simulation execution and reuse
-
-The batch runner defaults to CPU/OpenMP. NVIDIA CUDA is available through PyCUDA on a suitably configured host; there is no Metal backend. Parallelism runs independent input files in separate processes. Each concurrent model holds its own field arrays, so worker count affects memory use as well as throughput. Individual failures are reported, gprMax state is cleared after failed models, and the batch continues where possible.
-
-Before a generated dataset is simulated, the application can search for a completed compatible dataset in Qdrant's separate `sim_sessions` collection. This search uses normalized numerical configuration features, categorical filters, and deterministic weighted range-overlap scoring. It does not use language-model embeddings or ask the agent to judge physical equivalence. The default recommendation threshold is 0.95; similarity is a reuse heuristic, not proof that two configurations produce identical signals.
-
-Adoption requires the user's choice and a verified source dataset with completed outputs. It copies source files and labels into the current session and records provenance. The user's requested ranges remain available for later regeneration, so adopted artifacts describe the source realization. A Qdrant failure disables the recommendation for that attempt and allows normal simulation to proceed.
-
-## Current supported scope
-
-The generated model is a **2D, z-polarized, static single-Tx/single-Rx A-scan** with Peplinski soil and optional PEC cylinders/boxes. Several fields exposed by schemas or prompts are broader than what the emitter currently implements:
-
-| Setting | Current behavior |
-| --- | --- |
-| 3D, spheres, dielectric targets, sampled target material | Not supported by the active generated-dataset path. |
-| Source type | Hertzian dipole, voltage source, and transmission line are emitted as selected. Case and whitespace are normalized (e.g. `Hertzian Dipole` becomes `hertzian_dipole`). Unsupported, empty, or null types are rejected; omitting the field uses the Hertzian default. Transmission lines require CPU solving: GPU batches with an explicit `#transmission_line` command in a pending deck are rejected before any models or workers start. |
-| Polarization and receiver height | Emission forces z polarization; derivation places Rx at Tx height even if `rx_same_height` is false. Stored requested metadata can therefore differ from the deck. |
-| Receiver array | Can be collected and step-checked, but the emitter writes one `#rx`; it does not emit the array. |
-| Waveform families | Several names are accepted, but band conversion/gating always uses Ricker coefficients. Other families do not yet have a matching spectral derivation. |
-| Surface water | `add_water` and `water_depth_m` can be collected but are not emitted. Surface roughness itself is emitted. |
-| Moving-antenna B-scans | The generated files contain no antenna stepping. A dataset of different soil samples is not a spatial B-scan. |
-
-The fixed grid controls numerical consistency; it does not establish agreement with a laboratory antenna or real soil measurements. Antenna calibration, noise, attenuation-based detectability, and sim-to-real validation require additional work. The web application currently uses typed user IDs for organization without authentication, assumes one backend worker, and does not automatically recover an interrupted solver run after a server crash.
+The app uses typed user IDs for organization without authentication, assumes one backend worker, and does not automatically recover an interrupted run after a server crash. CLI `--skip-existing` can resume only artifacts whose current receipts validate.
 
 ## Run locally
 
@@ -259,7 +183,10 @@ The first command generates decks through the CLI conversation. The second runs 
 | `QDRANT_URL` | Retrieval and reuse service; defaults to `http://localhost:6333`. |
 | `GPR_GPU` | Enable CUDA; off by default. |
 | `GPR_GPU_IDS` | Comma-separated CUDA device IDs; specifying IDs enables GPU mode. |
-| `GPR_SIM_WORKERS` | Concurrent models; defaults to one on CPU or two per GPU. |
+| `GPR_SIM_WORKERS` | Requested concurrency; version 2 caps at admitted host capacity and one model per GPU. Legacy GPU default is two. |
+| `GPR_ENABLE_EXPERIMENTAL_3D` | Set to `1` only on a developer deployment to collect/run experimental 3D. Off by default. |
+| `GPR_HOST_RESERVE_BYTES`, `GPR_HOST_BUDGET_BYTES` | Host reserve (default 2 GiB) and optional additional execution budget. |
+| `GPR_RESOURCE_LOCK_PATH` | Shared local batch-admission lock; all API/CLI processes on a host must use the same path. |
 | `OMP_NUM_THREADS` | Host OpenMP thread budget, divided across concurrent workers. |
 | `SIM_REUSE_ENABLED` | Enable reuse recommendations; on by default. |
 | `SIM_REUSE_THRESHOLD` | Minimum recommendation score; defaults to `0.95`. |
@@ -279,7 +206,7 @@ On a CUDA host, install PyCUDA separately with `uv pip install pycuda` after ins
 | `backend/simulate.py`, `backend/signal_extraction.py`, `backend/deck_validation.py` | Solver execution, HDF5 signal extraction, and upload syntax checks. |
 | `backend/viz_projection.py`, `frontend/` | Live scene projection, chat, dataset inspection, and signal viewing. |
 | `db/`, `gprMax/` | Database models/migrations and the bundled electromagnetic solver. |
-| `AGENT.md` | Physics design invariants and rationale; some intended behaviors differ from the implementation documented here. |
+| `docs/PIPELINE_CONTRACT_V2.md` | Versioned physics invariants and implementation guidance. |
 
 Run the existing backend and geometry regression suites from the repository root:
 

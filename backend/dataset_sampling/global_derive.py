@@ -1,18 +1,10 @@
-"""
-STAGE 7 — global derive.
+"""Derive one spatial/acquisition/time plan for an entire sampled dataset.
 
-Runs ONCE over the whole sampling space, after the per-sample Peplinski eps derive
-(STAGE 6) and after all collect stages. Turns the aggregated eps_r corners + the
-waveform / antenna / layers + the buried-target corners into the ONE global grid,
-domain, depth and time window shared by every sample, so all N input files sit on
-the same Yee grid and are directly comparable for ML. The target corners (from the
-STAGE 6 aggregation over all drawn objects) are the ONLY geometry input.
-
-Order is strict: f_peak -> Wang band (Peplinski gate) -> lambda -> dx -> domain ->
-depth -> dt -> time window. eps corners come from STAGE 6:
-  eps_r_max = max wettest-bin eps  -> smallest lambda_min -> finest dx
-  eps_r_min = min driest-bin eps   -> largest  lambda_max -> biggest domain
-Free space (eps=1) is folded into eps_min here (air sets the largest lambda).
+Version 2 consumes all-bin spectral and finite-target bounds, freezes cubic
+spacing, resolves the integer domain and acquisition with native rounding, then
+uses native mode-aware CFL and a declared recording-path envelope. Requested
+placement ranges reserve geometry without changing the grid after rejection.
+The legacy v1 scalar-corner planar sizing path remains explicitly separate.
 """
 from __future__ import annotations
 
@@ -52,6 +44,11 @@ def derive_global(
     deepest_target_bottom_global_m: Optional[float] = None,
     static_x_halfwidth_global_m: Optional[float] = None,
     enforce_peplinski_gate: bool = True,
+    z_halfwidth_global_m: Optional[float] = None,
+    spectral_lambda_min_m: Optional[float] = None,
+    spectral_index_max: Optional[float] = None,
+    min_layer_thickness_m: Optional[float] = None,
+    min_relaxation_time_s: Optional[float] = None,
 ) -> GlobalDerived:
     """Size the single global grid/domain/depth/time window from the aggregated
     eps_r corners and the buried-target corners.
@@ -63,6 +60,14 @@ def derive_global(
     staying identical for every sample. `clearance = (pml_cells + PML_GAP_CELLS)*Δx`
     is the object/source PML gap and is DISTINCT from the domain
     `pad = (pml_cells + buffer_cells)*Δx`."""
+    if cfg.contract_version >= 2:
+        return _derive_contract(cfg, wf, ant, layers, eps_r_max_over_samples,
+                                eps_r_min_over_samples, smallest_feature_global_m,
+                                static_x_halfwidth_global_m or (largest_extent_global_m or 0) / 2,
+                                z_halfwidth_global_m or 0, deepest_target_bottom_global_m or 0,
+                                spectral_lambda_min_m, spectral_index_max,
+                                min_layer_thickness_m, min_relaxation_time_s,
+                                enforce_peplinski_gate)
     # 7a. peak frequency (what #waveform actually takes).
     if cfg.center_freq_is_peak:
         f_peak = wf.waveform_center_freq_hz
@@ -174,6 +179,105 @@ def derive_global(
     )
 
 
+def _derive_contract(cfg, wf, ant, layers, eps_max, eps_min, feature, half_x,
+                     half_z, target_bottom, spectral_lambda, spectral_index,
+                     min_layer, min_tau, enforce_gate):
+    from itertools import product
+    from backend.dataset_sampling.contract import validate_capabilities, component_positions
+    from backend.dataset_sampling.numerics import excitation, native_dt, cell_index, time_axis
+    from backend.validation_tools_new import PEPLINSKI_WATER_TAU_S
+    validate_capabilities(cfg, waveform=wf, antenna=ant)
+    spectrum = excitation(cfg, wf)
+    fp = spectrum["peak_hz"]
+    flo, fhi = spectrum["useful_band_hz"]
+    high = spectrum["design_band_hz"][1]
+    gate_ok = PEPLINSKI_FMIN_HZ <= flo and fhi <= PEPLINSKI_FMAX_HZ
+    if enforce_gate and not gate_ok:
+        raise ValueError(f"Peplinski useful-band gate failed: [{flo}, {fhi}] Hz")
+    if min(eps_min, eps_max) <= 0:
+        raise ValueError("positive finite native permittivity bounds required")
+    lam_min = spectral_lambda or C0 / (high * math.sqrt(eps_max))
+    lam_max = C0 / (flo * math.sqrt(min(1.0, eps_min)))
+    wavelength_dx = lam_min / max(10, cfg.cells_per_wavelength)
+    limits = {"wavelength_m": wavelength_dx}
+    if feature is not None:
+        # One cell of allowance for endpoint quantization; validate the result.
+        limits["target_feature_m"] = feature / 11
+    min_layer = min_layer or min(L.thickness_m_min for L in layers.layers)
+    limits["layer_thickness_m"] = min_layer / 4  # >=3 after endpoint rounding
+    dx = min(limits.values())
+    clearance = (cfg.pml_cells + PML_GAP_CELLS) * dx
+    pad = (cfg.pml_cells + cfg.buffer_cells) * dx
+    geometric_margin = max(pad, clearance) + dx  # rounding + Yee staggering
+    bandwidth = fhi - flo
+    depth = max(sum(L.thickness_m_max for L in layers.layers),
+                C0 / (2 * bandwidth * math.sqrt(eps_max)),
+                target_bottom + max(0, geometric_margin - pad))
+    ground_cells = math.ceil((pad + depth) / dx)
+    ground = ground_cells * dx
+    height = ant.source_height_m if ant.source_height_m is not None else lam_max / 2
+    if height < lam_max / 2 - 1e-12:
+        raise ValueError("source_height_m violates the lambda_max/2 policy")
+    tx_y = ground + (math.ceil(height / dx) if ant.source_height_m is None else cell_index(height, dx)) * dx
+    ry = ant.receiver_height_m if ant.rx_same_height is False else (
+        height if ant.source_height_m is not None else tx_y - ground)
+    rx_y = ground + cell_index(ry, dx) * dx
+    lateral_floor = 1.5 * lam_max
+    def lateral_cells(halfwidth, separation):
+        n = math.ceil(max(lateral_floor, 2 * (halfwidth + geometric_margin),
+                          abs(separation) + 2 * geometric_margin) / dx)
+        return n + n % 2  # center is an integer cell, even with signed offsets
+    nx = lateral_cells(half_x, ant.tx_rx_offset_m)
+    nz = lateral_cells(half_z, ant.tx_rx_crossline_offset_m) if cfg.dimensionality == "3D" else 1
+    ny = math.ceil((max(tx_y, rx_y) + geometric_margin) / dx)
+    dom_x, dom_y, dom_z = nx * dx, ny * dx, nz * dx
+    requested_tx = [dom_x / 2 - ant.tx_rx_offset_m / 2, ground + height if ant.source_height_m is not None else tx_y,
+                    dom_z / 2 - ant.tx_rx_crossline_offset_m / 2 if nz > 1 else 0]
+    requested_rx = [dom_x / 2 + ant.tx_rx_offset_m / 2, ground + ry,
+                    dom_z / 2 + ant.tx_rx_crossline_offset_m / 2 if nz > 1 else 0]
+    tx = [cell_index(v, dx) * dx for v in requested_tx]
+    rx = [cell_index(v, dx) * dx for v in requested_rx]
+    if cfg.quantization_policy == "exact" and any(abs(a - b) > 1e-12 for a, b in zip(tx + rx, requested_tx + requested_rx)):
+        raise ValueError("Acquisition coordinates require quantization under exact policy")
+    dt = native_dt(dx, cfg.dimensionality)
+    tau = min_tau or PEPLINSKI_WATER_TAU_S
+    if tau <= dt:
+        raise ValueError(f"Debye tau {tau} <= native dt {dt}; replan the common grid at finer resolution")
+    # Bound the ROI by all interior interfaces and permitted target locations.
+    bounds = [(clearance, dom_x - clearance), (clearance, ground),
+              (clearance, dom_z - clearance) if nz > 1 else (0, 0)]
+    tx_field = component_positions(tx, dx)["E" + ant.antenna_axis]
+    rx_fields = component_positions(rx, dx).values()
+    path = max(math.dist(tx_field, p) + math.dist(r, p)
+               for p in product(*bounds) for r in rx_fields)
+    slow_index = spectral_index or math.sqrt(eps_max)
+    travel = path * slow_index / C0
+    pulse_end = spectrum["start_s"] + spectrum["pulse_duration_s"]
+    requested_window = max(pulse_end, spectrum["stop_s"] or 0) + 1.2 * travel + 2 / fp
+    iterations, final_time = time_axis(dt, requested_window)
+    derivation = {"excitation": spectrum, "grid_limits": limits,
+                  "limiting_grid_rule": min(limits, key=limits.get),
+                  "bound_scope": "drawn sizes/materials plus every permitted placement range; retained after rejection",
+                  "lateral_floor_includes_pml": True, "target_halfwidth_x_m": half_x,
+                  "target_halfwidth_z_m": half_z, "target_bottom_depth_m": target_bottom,
+                  "roi_bounds_m": bounds, "path_bound_m": path, "travel_estimate_s": travel,
+                  "late_return_factor": 1.2, "pulse_margin_s": 2 / fp,
+                  "timing_status": "conservative planning estimate; scene qualification required",
+                  "minimum_tau_s": tau, "requested_tx_m": requested_tx, "requested_rx_m": requested_rx}
+    return GlobalDerived(f_peak_hz=fp, f_min_hz=flo, f_max_hz=fhi, bandwidth_hz=bandwidth,
+                         f_high_hz=high, eps_r_max_global=eps_max, eps_r_min_global=min(1, eps_min),
+                         dx_m=dx, lambda_min_m=lam_min, lambda_max_m=lam_max,
+                         surface_xy_m=lateral_floor, source_height_m=tx[1] - ground,
+                         depth_z_m=depth, soil_depth_m=depth, domain_x_m=dom_x,
+                         domain_y_m=dom_y, domain_z_m=dom_z, ground_y_m=ground,
+                         tx_x_m=tx[0], tx_y_m=tx[1], tx_z_m=tx[2],
+                         rx_x_m=rx[0], rx_y_m=rx[1], rx_z_m=rx[2],
+                         nx=nx, ny=ny, nz=nz, dt_s=dt, iterations=iterations,
+                         time_window_s=final_time, requested_time_window_s=requested_window,
+                         peplinski_gate_ok=gate_ok, contract_version=2,
+                         dimensionality=cfg.dimensionality, derivation=derivation)
+
+
 def write_global(
     grid: GlobalDerived,
     output_dir: str,
@@ -218,6 +322,7 @@ def derive_and_write_global(
     deepest_target_bottom_global_m: Optional[float] = None,
     static_x_halfwidth_global_m: Optional[float] = None,
     enforce_peplinski_gate: bool = True,
+    **bounds,
 ):
     """Derive the global grid/domain/depth/time window and persist it.
 
@@ -231,6 +336,7 @@ def derive_and_write_global(
         deepest_target_bottom_global_m=deepest_target_bottom_global_m,
         static_x_halfwidth_global_m=static_x_halfwidth_global_m,
         enforce_peplinski_gate=enforce_peplinski_gate,
+        **bounds,
     )
     path = write_global(grid, output_dir, filename=filename)
     return grid, path

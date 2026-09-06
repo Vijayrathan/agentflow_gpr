@@ -296,6 +296,7 @@ def _project_grid(out_dir: Path) -> Optional[dict]:
     if not g:
         return None
     return {
+        **{k: g.get(k) for k in ("domain_z_m", "soil_depth_m", "dimensionality", "contract_version", "nx", "ny", "nz", "tx_y_m", "rx_y_m", "tx_z_m", "rx_z_m", "dt_s", "iterations")},
         "domain_x_m": g.get("domain_x_m"),
         "domain_y_m": g.get("domain_y_m"),
         "depth_z_m": g.get("depth_z_m"),
@@ -335,6 +336,23 @@ def build_scene(
             samples = _project_samples(out_dir, flags, range_layers)
         if flags.get("grid"):
             grid = _project_grid(out_dir)
+        if flags.get("emitted") and samples:
+            emitted = _load_json(out_dir / "emitted_files.json") or {}
+            resolved = {int(f["sample_id"]): f.get("resolved_scene") for f in emitted.get("files", [])}
+            samples["items"] = [s for s in samples["items"] if s["sample_id"] in resolved]
+            samples["total"] = len(resolved)
+            samples["included"] = len(samples["items"])
+            for sample in samples["items"]:
+                actual = resolved.get(sample["sample_id"])
+                if actual:
+                    sample["resolved_scene"] = {key: actual[key] for key in ("sample_id", "title", "targets", "source", "receiver", "status")}
+                    sample["resolved_scene"]["layers"] = [{key: layer[key] for key in ("name", "start_m", "end_m", "thickness_m", "terminal_halfspace", "sampled_thickness_m")} for layer in actual["layers"]]
+                    for layer, resolved_layer in zip(sample["layers"], actual["layers"]):
+                        layer["thickness_m"] = resolved_layer["thickness_m"]
+                        layer["sampled_thickness_m"] = resolved_layer["sampled_thickness_m"]
+                    for target, r in zip(sample["targets"], actual["targets"]):
+                        target["x_offset_m"] = (r["start_m"][0] + r["end_m"][0]) / 2 - grid["domain_x_m"] / 2
+                        target["depth_m"] = grid["ground_y_m"] - (r["start_m"][1] + r["end_m"][1]) / 2
 
     if grid:
         domain = {
@@ -364,6 +382,9 @@ def build_scene(
             break
 
     return {
+        "dimensionality": (store.get("dataset_config") or {}).get("dimensionality", "2D"),
+        "coordinate_frame": "x-horizontal_y-up_z-crossline",
+        "pml_cells": (store.get("dataset_config") or {}).get("pml_cells", 10),
         "phase": phase,
         "stage": stage,
         "project": (store.get("dataset_config") or {}).get("model_basename") or "untitled",

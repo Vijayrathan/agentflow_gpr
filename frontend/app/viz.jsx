@@ -3,6 +3,94 @@
    ============================================================ */
 
 /* color utils */
+// Command-geometry sections, explicitly distinguished from native occupied
+// voxels. The plane intersection is computed before drawing each finite object.
+function targetSection(target, normal, position, u, v) {
+  const a = target.start_m, b = target.end_m;
+  if (target.kind === "box") {
+    if (position < a[normal] || position > b[normal]) return null;
+    return { kind: "rect", lo: [a[u], a[v]], hi: [b[u], b[v]] };
+  }
+  const axis = "xyz".indexOf(target.cylinder_axis);
+  const radius = target.radius_m;
+  const center = a.map((value, i) => (value + b[i]) / 2);
+  if (axis === normal) {
+    if (position < a[normal] || position > b[normal]) return null;
+    return { kind: "circle", center: [center[u], center[v]], radius };
+  }
+  const distance = position - center[normal];
+  if (Math.abs(distance) > radius) return null;
+  const half = Math.sqrt(Math.max(0, radius * radius - distance * distance));
+  return { kind: "rect", lo: [u === axis ? a[u] : center[u] - half, v === axis ? a[v] : center[v] - half],
+    hi: [u === axis ? b[u] : center[u] + half, v === axis ? b[v] : center[v] + half] };
+}
+
+function OrthogonalSlices({ scene, sampleIndex = 0 }) {
+  const grid = scene.grid;
+  const sample = scene.samples?.items?.[sampleIndex]?.resolved_scene;
+  const [fractions, setFractions] = React.useState([0.5, 0.5, 0.5]);
+  if (!grid || !sample) return <div style={{ padding: 32, color: "#8faaa8" }}>
+    <strong>3D scene · provisional</strong>
+    <p>Orthogonal slices appear when the common grid and sample geometry are resolved.</p>
+    <p>x and z are horizontal; y is vertical. One fixed transmitter and receiver.</p>
+  </div>;
+  const dims = [grid.domain_x_m, grid.domain_y_m, grid.domain_z_m];
+  const planes = [{ label: "x–y", u: 0, v: 1, n: 2 }, { label: "z–y", u: 2, v: 1, n: 0 }, { label: "x–z", u: 0, v: 2, n: 1 }];
+  const margin = (scene.pml_cells + 15) * grid.dx_m;
+  const pml = scene.pml_cells * grid.dx_m;
+  return <div style={{ height: "100%", padding: "16px 20px", boxSizing: "border-box", overflow: "auto", color: "#becbc9" }}>
+    <div style={{ marginBottom: 14 }}><strong>3D · Resolved sample {sample.sample_id}</strong>
+      <span style={{ marginLeft: 14, fontSize: 12 }}>Single Tx/Rx · {sample.source.axis.toUpperCase()} polarization · scientific qualification separate</span>
+    </div>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(245px, 1fr))", gap: 16 }}>
+      {planes.map(({ label, u, v, n }) => {
+        const position = Math.round(fractions[n] * dims[n] / grid.dx_m) * grid.dx_m;
+        const scale = Math.min(260 / dims[u], 270 / dims[v]);
+        const x = value => 30 + value * scale;
+        const y = value => 315 - value * scale;
+        const width = dims[u] * scale, height = dims[v] * scale;
+        return <div key={label} style={{ border: "1px solid #334648", borderRadius: 8, padding: 12, background: "#18282b" }}>
+          <strong>{label} section</strong>
+          <label style={{ display: "block", fontSize: 12, marginTop: 8 }}>{"xyz"[n]} = {position.toFixed(4)} m
+            <input aria-label={`${label} slice position`} type="range" min="0" max="1" step={grid.dx_m / dims[n]} value={fractions[n]}
+              onChange={e => setFractions(values => values.map((value, i) => i === n ? Number(e.target.value) : value))}
+              style={{ display: "block", width: "100%" }} />
+          </label>
+          <svg viewBox="0 0 330 350" role="img" aria-label={`${label} slice at ${"xyz"[n]} ${position.toFixed(4)} meters`} style={{ width: "100%", maxHeight: 400 }}>
+            <rect x={x(0)} y={y(dims[v])} width={width} height={height} fill="#293d47" stroke="#687d7c" />
+            {sample.layers.map((layer, i) => {
+              if (position < layer.start_m[n] || position > layer.end_m[n]) return null;
+              return <rect key={i} x={x(layer.start_m[u])} y={y(layer.end_m[v])}
+                width={(layer.end_m[u] - layer.start_m[u]) * scale} height={(layer.end_m[v] - layer.start_m[v]) * scale}
+                fill={["#89775b", "#655d4a", "#544d40"][i % 3]} stroke="#a1957b" strokeWidth="0.5"><title>{layer.name}{layer.terminal_halfspace ? " · terminal half-space" : ""}</title></rect>;
+            })}
+            <path d={`M ${x(0)} ${y(dims[v])} h ${width} v ${height} h ${-width} Z M ${x(pml)} ${y(dims[v] - pml)} v ${(dims[v] - 2 * pml) * scale} h ${(dims[u] - 2 * pml) * scale} v ${-(dims[v] - 2 * pml) * scale} Z`}
+              fill="#d16c6c" opacity="0.3" fillRule="evenodd"><title>Absorbing PML cells</title></path>
+            {Number.isFinite(margin) && dims[u] > 2 * margin && dims[v] > 2 * margin && <rect x={x(margin)} y={y(dims[v] - margin)}
+              width={(dims[u] - 2 * margin) * scale} height={(dims[v] - 2 * margin) * scale} fill="none" stroke="#d6b66a" strokeDasharray="4 4"><title>PML + 15-cell interior</title></rect>}
+            {sample.targets.map((target, i) => {
+              const section = targetSection(target, n, position, u, v);
+              if (!section) return null;
+              return section.kind === "circle" ? <circle key={i} cx={x(section.center[0])} cy={y(section.center[1])} r={section.radius * scale} fill="#db9b56" stroke="#ffe1aa"><title>{target.name}</title></circle> :
+                <rect key={i} x={x(section.lo[0])} y={y(section.hi[1])} width={(section.hi[0] - section.lo[0]) * scale} height={(section.hi[1] - section.lo[1]) * scale} fill="#db9b56" stroke="#ffe1aa"><title>{target.name}</title></rect>;
+            })}
+            {[["Tx", sample.source.component_position_m, "#70ddba"], ["Rx", sample.receiver.position_m, "#7dc7ff"]].map(([name, point, color]) =>
+              Math.abs(point[n] - position) <= grid.dx_m / 2 + 1e-12 ? <g key={name}><circle cx={x(point[u])} cy={y(point[v])} r="4" fill={color} /><text x={x(point[u]) + 6} y={y(point[v]) - 6} fill={color} fontSize="11">{name}</text></g> : null)}
+            <text x="30" y="338" fill="#b8c8c6" fontSize="11">{"xyz"[u]}: 0 → {dims[u].toFixed(3)} m</text>
+            <text x="30" y="18" fill="#b8c8c6" fontSize="11">{"xyz"[v]}: 0 → {dims[v].toFixed(3)} m</text>
+          </svg>
+          {(position < pml || position > dims[n] - pml) && <div style={{ fontSize: 11, color: "#eab1a4" }}>This plane lies within a PML face.</div>}
+        </div>;
+      })}
+    </div>
+    <p style={{ fontSize: 12, color: "#97aaa7", lineHeight: 1.5 }}>Only objects intersecting the chosen plane are shown. Red shading marks PML; the dashed line marks the additional 15-cell clearance. These are resolved command sections; native voxel staircasing is recorded in the geometry export. Rx marks its grid anchor; field components have distinct Yee offsets.</p>
+    <p style={{ fontSize: 12 }}>Tx ({sample.source.component_position_m.map(v => v.toFixed(4)).join(", ")}) m · {sample.source.axis.toUpperCase()} axis; Rx anchor ({sample.receiver.position_m.map(v => v.toFixed(4)).join(", ")}) m</p>
+    <p style={{ fontSize: 12 }}>Grid {grid.nx} × {grid.ny} × {grid.nz} · Δ {Number(grid.dx_m * 1000).toFixed(3)} mm · Δt {Number(grid.dt_s * 1e12).toFixed(3)} ps · {grid.iterations} time samples</p>
+  </div>;
+}
+window.OrthogonalSlices = OrthogonalSlices;
+window.targetSection = targetSection;
+
 function hexToRgb(h) {
   h = h.replace("#", "");
   if (h.length === 3)

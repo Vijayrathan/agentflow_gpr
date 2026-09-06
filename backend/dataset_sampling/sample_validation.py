@@ -58,6 +58,11 @@ def validate_waveform_antenna(
     every sample.
     """
     report = SampleValidationReport(num_samples=dataset_config.num_samples)
+    from backend.dataset_sampling.contract import validate_capabilities
+    try:
+        validate_capabilities(dataset_config, waveform=waveform, antenna=antenna)
+    except ValueError as exc:
+        report.errors.append(f"[capabilities] {exc}")
 
     # Peplinski frequency gate — the waveform band must lie inside the model's
     # 0.3-1.3 GHz validity window. This gates the WHOLE dataset.

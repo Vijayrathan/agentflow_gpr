@@ -32,6 +32,7 @@ import concurrent.futures as futures
 import contextlib
 import gc
 import io
+import json
 import logging
 import multiprocessing
 import os
@@ -45,6 +46,8 @@ from typing import Any, Callable, Optional
 
 # Bootstrap: gprMax lives as a source checkout at the repo root.
 GPRMAX_ROOT = Path(__file__).resolve().parent.parent / "gprMax"
+if str(GPRMAX_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(GPRMAX_ROOT.parent))
 if str(GPRMAX_ROOT) not in sys.path:
     sys.path.insert(0, str(GPRMAX_ROOT))
 
@@ -261,10 +264,40 @@ def _execute_one(task: dict[str, Any]) -> dict[str, Any]:
 
     t0 = time.perf_counter()
     try:
-        tmp_in.write_text(inject_output_dir(in_file.read_text(), output_dir))
-        run_simulation(
-            tmp_in, n=task["n"], gpu_arg=task["gpu_arg"], verbose=task["verbose"]
-        )
+        content = in_file.read_text()
+        output_path = output_dir / f"{in_file.stem}.out"
+        contract = task.get("contract")
+        if contract:
+            from backend.dataset_sampling.contract import file_digest
+            from backend.preflight import validate_deck_contract, native_build_checks
+            from backend.signal_extraction import validate_output
+            if file_digest(in_file) != task["entry"]["input_sha256"]:
+                raise ValueError("Input changed after manifest admission")
+            scene = task["entry"]["resolved_scene"]
+            validate_deck_contract(content, contract, scene)
+            output_path.unlink(missing_ok=True)
+            output_path.with_suffix(".execution.json").unlink(missing_ok=True)
+        tmp_in.write_text(inject_output_dir(content, output_dir))
+        with native_build_checks(contract, scene, output_path) if contract else contextlib.nullcontext() as preflight:
+            run_simulation(tmp_in, n=task["n"], gpu_arg=task["gpu_arg"], verbose=task["verbose"])
+        if contract:
+            if preflight["backend"] != ("gpu" if task["gpu_arg"] else "cpu"):
+                raise ValueError("Native execution backend differs from the admitted backend")
+            snapshots = []
+            for snapshot in scene["snapshots"]:
+                relative = Path(in_file.stem + "_snaps") / (snapshot["filename"] + ".vti")
+                target_path = output_dir / relative
+                target_path.parent.mkdir(exist_ok=True)
+                (tmp_dir / relative).replace(target_path)
+                snapshots.append({"path": str(relative), "sha256": file_digest(target_path)})
+            with contextlib.suppress(OSError):
+                (tmp_dir / (in_file.stem + "_snaps")).rmdir()
+            metadata = validate_output(output_path, contract, scene)
+            receipt = {"contract_digest": contract["digest"], "scene_digest": scene["digest"],
+                       "input_sha256": task["entry"]["input_sha256"], "output_sha256": file_digest(output_path),
+                       "preflight": preflight, "actual": metadata, "qualification_status": "unqualified",
+                       "backend": "gpu" if task["gpu_arg"] else "cpu", "snapshots": snapshots}
+            output_path.with_suffix(".execution.json").write_text(json.dumps(receipt, indent=2))
         result = {
             "status": "ok",
             "out_file": str(output_dir / f"{in_file.stem}.out"),
@@ -313,6 +346,10 @@ def _make_pool(plan: ExecutionPlan) -> futures.Executor:
     )
 
 
+from backend.resources import reserve_batch
+
+
+@reserve_batch
 def run_batch_simulation(
     input_dir: str | Path,
     output_dir: str | Path | None = None,
@@ -326,6 +363,7 @@ def run_batch_simulation(
     stop_on_first_error: bool = False,
     progress: Optional[ProgressCallback] = None,
     filenames: Optional[list[str]] = None,
+    manifest: Optional[dict] = None,
 ) -> dict:
     """Run gprMax simulations on .in files in input_dir.
 
@@ -364,10 +402,43 @@ def run_batch_simulation(
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
+    # Generated v2 CLI runs inherit manifest scoping too. Never glob stale decks.
+    manifest_path = input_dir.parent / "emitted_files.json"
+    if manifest is None and manifest_path.exists():
+        candidate = json.loads(manifest_path.read_text())
+        if candidate.get("contract"):
+            manifest = candidate
+    contract = (manifest or {}).get("contract")
+    entries = {entry["filename"]: entry for entry in (manifest or {}).get("files", [])}
+    if contract:
+        from backend.dataset_sampling.contract import file_digest, solver_identity
+        from backend.preflight import verify_contract
+        from backend.resources import admit
+        verify_contract(contract)
+        if len(entries) != len(manifest["files"]) or len({e["sample_id"] for e in entries.values()}) != len(entries):
+            raise ValueError("Manifest filenames and sample identities must be unique")
+        if n != 1:
+            raise ValueError("Contract execution is one fixed acquisition per physical sample (n=1)")
+        if solver_identity() != contract["solver"]:
+            raise ValueError("Pinned solver implementation changed; regenerate and requalify")
+        filenames = filenames if filenames is not None else list(entries)
+        if len(set(filenames)) != len(filenames) or any(name not in entries for name in filenames):
+            raise ValueError("Execution filenames must be unique current manifest entries")
+        for name in filenames:
+            if Path(name).name != name or not (input_dir / name).is_file() or file_digest(input_dir / name) != entries[name]["input_sha256"]:
+                raise ValueError(f"Missing/stale input file or hash: {name}")
+            verify_contract(contract, entries[name]["resolved_scene"])
+            if entries[name]["sample_id"] != entries[name]["resolved_scene"]["sample_id"] or Path(name).stem != entries[name]["resolved_scene"]["title"]:
+                raise ValueError("Manifest filename/sample identity differs from resolved scene")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     in_files = sorted(input_dir.glob("*.in"))
     if filenames is not None:
         wanted = {Path(name).name for name in filenames}
         in_files = [p for p in in_files if p.name in wanted]
+        missing = wanted - {p.name for p in in_files}
+        if missing:
+            raise FileNotFoundError(f"Manifest input files missing: {sorted(missing)}")
     if not in_files:
         raise FileNotFoundError(f"No .in files found in {input_dir}")
 
@@ -397,6 +468,8 @@ def run_batch_simulation(
                 )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    if contract:
+        plan = admit(plan, contract["resources"], output_dir, len(in_files))
     tmp_dir = output_dir / "_tmp"
     tmp_dir.mkdir(exist_ok=True)
 
@@ -418,6 +491,7 @@ def run_batch_simulation(
     completed = 0   # files finished (ok/failed/skipped) — monotonic progress
     cursor = 0      # position in in_files of the next file to consider
     halted = False  # stop_on_first_error tripped
+    available_devices = list(plan.gpu_ids or [0]) if contract and plan.gpu else []
 
     logger.info(
         f"[SIMULATE] {total} input file(s) in {input_dir} -> {output_dir} "
@@ -434,6 +508,10 @@ def run_batch_simulation(
             idx = cursor + 1
             cursor += 1
             expected_out = output_dir / f"{in_file.stem}.out"
+            if contract and skip_existing and expected_out.exists():
+                from backend.signal_extraction import validate_output
+                validate_output(expected_out, contract, entries[in_file.name]["resolved_scene"],
+                                input_sha256=entries[in_file.name]["input_sha256"], require_receipt=True)
             if skip_existing and expected_out.exists():
                 logger.info(f"[SIMULATE] [{idx}/{total}] SKIP {in_file.name}")
                 skipped += 1
@@ -447,16 +525,19 @@ def run_batch_simulation(
                     "status": "skipped", "out_file": str(expected_out),
                 })
                 continue
+            device = available_devices.pop(0) if available_devices else None
             return {
                 "in_file": str(in_file),
                 "output_dir": str(output_dir),
                 "tmp_dir": str(tmp_dir / f"{idx:06d}_{in_file.stem}"),
                 "n": n,
                 # position-based so concurrent workers spread over the devices
-                "gpu_arg": plan.gpu_arg_for(idx - 1),
+                "gpu_arg": [[device]] if device is not None else plan.gpu_arg_for(idx - 1),
+                "reserved_device": device,
                 "verbose": verbose,
                 "index": idx,
                 "filename": in_file.name,
+                **({"contract": contract, "entry": entries[in_file.name]} if contract else {}),
             }
         return None
 
@@ -469,6 +550,8 @@ def run_batch_simulation(
     def _finish(task: dict[str, Any], res: dict[str, Any]) -> None:
         nonlocal succeeded, failed, completed, halted
         completed += 1
+        if task.get("reserved_device") is not None:
+            available_devices.append(task["reserved_device"])
         idx, name = task["index"], task["filename"]
         elapsed = res.get("elapsed_s", 0.0)
         if res.get("status") == "ok":
@@ -505,7 +588,7 @@ def run_batch_simulation(
     # from a thread of the uvicorn process, and a CUDA context must never be
     # built there — a solver failure can leave one on the stack, which makes
     # pycuda abort the whole server at interpreter exit.
-    if plan.workers == 1 and not plan.gpu:
+    if plan.workers == 1 and not plan.gpu and not contract:
         while not halted and (task := _next_task()) is not None:
             _start(task)
             _finish(task, _execute_one(task))

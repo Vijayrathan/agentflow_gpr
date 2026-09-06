@@ -263,7 +263,7 @@ def validate_debye_tau_vs_dt(
         return ["dx,dy,dz must be > 0"], []
     dt = 1.0 / (C0 * math.sqrt(1/dx**2 + 1/dy**2 + 1/dz**2))
     if tau_s <= dt:
-        return [f"Debye tau {tau_s:.3e} s <= dt {dt:.3e} s (unstable); coarsen grid to raise dt"], []
+        return [f"Debye tau {tau_s:.3e} s <= dt {dt:.3e} s (unstable); replan a finer common grid to lower dt"], []
     return [], []
 
 

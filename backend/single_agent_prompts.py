@@ -63,7 +63,7 @@ you cannot talk to the user.
 # stripped from the JSON schema shown to the agent, and save_section
 # force-overrides them regardless (see agentflow_single_agent.py).
 SERVER_FIXED_FIELDS = {
-    "dataset_config": ("output_dir", "dimensionality", "num_threads"),
+    "dataset_config": ("output_dir", "num_threads", "contract_version", "coordinate_frame", "overlap_policy"),
 }
 
 
@@ -224,10 +224,22 @@ SECTION_KICKOFF = {
         schema_class=DatasetConfig,
         batches="""
    **Dataset size & naming:**
+   - dimensionality: explicitly select 2D TMz or full 3D. Keep y vertical;
+     x is horizontal and z is crossline. 3D requires substantially more memory
+     and runtime. It remains an experimental dataset until its scene family is
+     scientifically qualified; never equate solver success with qualification.
+     3D collection is available only on developer deployments with
+     GPR_ENABLE_EXPERIMENTAL_3D=1. If save_section reports it disabled, explain
+     the release boundary; do not silently switch modes or change deployment settings.
    - num_samples: number of input files / data samples to generate \
 (required, > 0). NOTE: this is the number of .in files, NOT time samples.
    - model_basename: base name for the #title and output filename stem \
 (default: "soil_sample")
+   - seed: reproducible dataset seed (default: 42).
+   - quantization_policy: explain that nearest_cell (default) maps command
+     coordinates to the solver grid with at most half a cell per endpoint;
+     fixed fields are not randomly moved. Collect exact if any rounding is
+     unacceptable; infeasible exact coordinates are rejected.
 
    **FDTD grid / boundary policy:**
    - pml_cells: number of in-plane PML absorbing boundary cells (default: 10).
@@ -237,11 +249,11 @@ SECTION_KICKOFF = {
    - cells_per_wavelength: cells per minimum wavelength, the λ/N rule \
 (default: 10; higher = more accurate but slower)
    - fractal_nbins: number of materials in the #soil_peplinski fractal series \
-(default: 50)
+(default: 50, minimum: 2; actual shifted native bins must fit pore space)
 
    **Resolution & frequency policy:**
    - high_freq_factor: highest SIGNIFICANT frequency as a multiple of the \
-centre frequency, used for the λ_min / Δx resolution check (default: 3.0)
+emitted peak frequency, used for the λ_min / Δx resolution check (default: 3.0, minimum: 2.5)
    - center_freq_is_peak: whether the waveform's centre frequency is the gprMax \
 #waveform PEAK frequency (True) or Wang's band-centre frequency (False). \
 Default: True.
@@ -249,9 +261,8 @@ Default: True.
    **Note:** the dielectric model is fixed to **Peplinski** in this pipeline. \
 Domain size, cell size, depth, time window and source height are DERIVED \
 downstream from the soil + waveform parameters — do NOT collect them here.
-   If the user asks where files are stored or about running 3D: the output \
-location is managed by the server and only 2D simulation is currently \
-supported — neither is configurable.
+   The output location and threading are managed by the server. New runs use
+   contract v2. Historical 2D datasets keep their physical meaning.
 """,
         skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
@@ -297,7 +308,7 @@ user should explicitly tell to skip. You should not skip on your own\
         schema_class=ExtractedTargetRanges,
         batches="""
    The user may bury ZERO OR MORE objects of two kinds — **cylinders** and \
-**boxes** (spheres are not supported in the 2D model). Every field is a RANGE \
+**boxes** (spheres and arbitrary rotations are not supported). Every field is a RANGE \
 (min/max): each object's geometry is DRAWN fresh for every sample over its \
 ranges, while the FDTD grid stays identical across the whole dataset. All \
 objects are PEC (metallic) — do not offer a material choice.
@@ -318,9 +329,17 @@ radius_min_m / radius_max_m (radius_min_m must be > 0)
    - Box (rectangle in the 2D x–y plane): name, x_offset range, depth range, \
 width_min_m / width_max_m (horizontal extent), height_min_m / height_max_m \
 (vertical extent); both must be > 0
+   - In 3D, BOTH kinds also require z_offset_min_m / z_offset_max_m, a signed
+     crossline center offset. A box additionally requires finite
+     crossline_size_min_m / crossline_size_max_m. A cylinder additionally
+     requires finite length_min_m / length_max_m and cylinder_axis x/y/z.
+     Never invent a finite extent from an old 2D cross-section.
+     For y-axis cylinders burial depends on half the length; for x/z cylinders
+     it depends on radius. Distinct objects must have disjoint bounding boxes.
 
    **Fixed objects:** to pin an object in place (identical in every sample), \
-set min = max on EVERY field. Fixed objects are never repositioned — their \
+set min = max on EVERY field. Every individually fixed field also stays fixed
+inside an otherwise dynamic object. Fixed objects are never repositioned — their \
 placement is checked once against the derived grid, and a violation comes back \
 as a validation error to fix here.
 
@@ -343,11 +362,8 @@ collect complete ranges for every object the user describes\
         schema_class=ExtractedWaveform,
         batches="""
    **Waveform configuration:**
-   - waveform_kind: type of waveform (default: "ricker"). Valid types: \
-"ricker", "gaussian", "gaussiandot", "gaussiandotnorm", "gaussiandotdot", \
-"gaussiandotdotnorm", "gaussianprime", "gaussiandoubleprime", "sine", \
-"contsine". Note: "ricker" and "gaussiandotdot" are spectrally equivalent \
-in gprMax.
+   - waveform_kind: Ricker is the supported v2 family. Other families need
+     their own validated spectrum and are rejected, never silently converted.
    - waveform_amplitude: signal amplitude (default: 1.0)
    - waveform_center_freq_hz: centre frequency in Hz (e.g. 900e6 for 900 MHz)
    - waveform_name: descriptive name for the waveform (required)
@@ -377,8 +393,8 @@ alternatives: "voltage_source", "transmission_line")
      dipole for another requested antenna. Explain unsupported types and ask
      the user to choose a supported source. Transmission lines require CPU
      solving because the bundled gprMax CUDA solver does not support them.
-   - antenna_axis: polarisation axis ("x", "y", or "z"; default: "x"). \
-Conventionally perpendicular to the B-scan survey direction.
+   - antenna_axis: z for 2D TMz; selected x/y/z for 3D. y is vertical and z is
+     horizontal crossline. The selected axis is emitted exactly.
    - tx_rx_offset_m: transmitter-receiver offset in metres (required)
    - resistance: internal resistance in ohms. REQUIRED when \
 antenna_kind="voltage_source" or "transmission_line", and must satisfy \
@@ -387,14 +403,14 @@ antenna_kind="voltage_source" or "transmission_line", and must satisfy \
    **Receiver placement:**
    - rx_same_height: whether the receiver is at the same height as the \
 transmitter (true/false, default: true)
+   - receiver_height_m: required above-ground height when rx_same_height=false.
+   - tx_rx_crossline_offset_m: signed Rx-minus-Tx separation in z (3D only,
+     default 0). tx_rx_offset_m is the signed x separation.
    - source_height_m: antenna height above the ground surface in metres \
 (optional — if omitted it is DERIVED downstream as ≥ half the maximum \
 wavelength)
 
-   **Receiver array (optional):**
-   - rx_array: start position (x1, y1, z1), end position (x2, y2, z2), and \
-step sizes (dx, dy, dz) — all in metres. This replaces the default single \
-receiver. Skip unless the user wants a multi-receiver survey.
+   One fixed receiver is supported. Receiver arrays and B-/C-scans are rejected.
 """,
         skip_policy="""\
 the user should explicitly say to skip. Do not skip on your own\
@@ -417,14 +433,14 @@ completion and allows the pipeline to advance to dataset generation.\
 """,
         batches="""
    **Surface roughness:**
+   Surface roughness is explicitly unavailable in the initial 3D contract.
+   For 3D offer snapshots only; never silently retain a 2D roughness profile.
    - fractal_dim: fractal dimension (1.0–3.0; default: 1.5). Values below \
 1.0 are not physically meaningful for surface roughness.
    - weight_x: weight in X direction (default: 1.0)
    - weight_y: weight in Y direction (default: 1.0)
    - amplitude_m: roughness amplitude in metres (default: 0.01)
-   - add_water: whether to add a water layer on top (true/false, default: false)
-   - water_depth_m: water depth in metres (default: 0.005, must be < \
-amplitude_m when add_water=true)
+   Water and vegetation have no supported emission path and are rejected.
    - seed: optional random seed for reproducibility
 
    **Snapshots:**

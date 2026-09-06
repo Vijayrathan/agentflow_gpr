@@ -1,42 +1,12 @@
-"""
-STAGE 8 — gprMax .in file emitter.
+"""Emit one input per accepted sample under a frozen dataset contract.
 
-Turns the staged manifests into N gprMax input files, one per surviving sample,
-all on the ONE global grid derived upstream. NOTHING here re-derives grid size,
-physics, or frequency: the emitter only *transcribes* already-resolved values
-into gprMax command syntax.
-
-Inputs consumed
----------------
-  * global_derive.json  (via read_global)  -> the fixed grid / domain / Tx-Rx /
-    time window shared by every sample. In particular ``grid.f_peak_hz`` is the
-    ALREADY-converted peak frequency (see global_derive.py:85-88); the emitter
-    uses it verbatim and NEVER reads the raw collected centre frequency.
-  * sampled_layers.json (via read_samples) -> per-sample concrete layers (+ the
-    already-placed buried objects, cylinders and boxes). This is the
-    post-target-placement survivor set. Object x positions are stored as SIGNED
-    offsets from the domain center and resolved here (x_abs = domain_x/2 +
-    x_offset); depths resolve against ground_y.
-  * the collected waveform / antenna / advanced sections (graph state), for the
-    #waveform, source, #rx and optional surface roughness / snapshots. Advanced
-    geometry objects no longer exist — ALL buried objects come from the sampled
-    targets (a fixed object is a degenerate min==max range).
-
-Geometry conventions (see the approved plan / verified user_models examples)
---------------------------------------------------------------------------
-  * 2D, thin z: #domain is (domain_x, domain_y, dx) so z spans exactly one cell.
-  * x = horizontal (survey), y = vertical (positive up), z = thin/invariant.
-  * The Hertzian dipole is polarised along the thin invariant axis (z) — exactly
-    as in the known-good cylinder_Ascan_2D.in. The collected antenna_axis has no
-    meaning in 2D and is overridden to 'z'.
-  * Ground surface at grid.ground_y_m; soil fills [0, ground_y]; free_space above
-    is implicit. Layers anchor at the surface, stack down, and the DEEPEST layer
-    is extended to y=0 (continuous half-space, no air pocket).
-  * Layer interfaces are snapped to whole Δy (= dx) cells so labels match the grid
-    gprMax actually builds.
-  * Each file is a single A-scan (one static Tx/Rx).
-
-3D is out of scope: global_derive produces no z-domain.
+Version 2 first calls the deterministic resolved-scene stage, joins native
+material provenance, and validates the canonical manifest. serialize_scene is
+pure string assembly: it neither derives, snaps nor repairs physical settings.
+Coordinates remain x horizontal, y vertical, z crossline. 2D TMz uses one z cell;
+3D uses finite volumes/targets and honors source polarization. Terminal layers
+continue to y=0. Native model-build preflight verifies the serialized scene
+before field updates. The older writer remains a version-1 compatibility path.
 """
 from __future__ import annotations
 
@@ -58,8 +28,8 @@ from backend.schema import (
     SnapshotConfigSchema,
 )
 from backend.validation_tools_new import PML_GAP_CELLS
-from dataset_sampling.global_derive import read_global
-from dataset_sampling.layer_sampler import read_samples
+from backend.dataset_sampling.global_derive import read_global
+from backend.dataset_sampling.layer_sampler import read_samples
 
 # gprMax builtins / reserved identifiers a layer name must not collide with.
 RESERVED_MATERIAL_NAMES = {"pec", "free_space", "grass", "water"}
@@ -74,7 +44,7 @@ FRACTAL_WEIGHT_Z = 1.0
 
 def _g(v: float) -> str:
     """Format a float for a gprMax command (compact, high precision)."""
-    return f"{v:.10g}"
+    return f"{v:.17g}"
 
 
 def _sanitize(name: str) -> str:
@@ -262,6 +232,10 @@ def build_in_text(
     adv: Optional[ExtractedAdvancedParams],
 ) -> tuple[str, List[LayerLabel]]:
     """Build the .in text for one sample and the snapped per-layer labels."""
+    if cfg.contract_version >= 2:
+        from backend.dataset_sampling.scene import resolve_scene, token
+        scene = resolve_scene(sample, grid, cfg, wf, ant, adv)
+        return serialize_scene(scene, grid, cfg, wf), [LayerLabel(l["name"], l["thickness_m"], l["y_top_m"], l["y_bottom_m"]) for l in scene["layers"]]
     dx = grid.dx_m
     title = f"{_sanitize(cfg.model_basename)}_{sample.sample_id}"
 
@@ -369,6 +343,45 @@ def build_in_text(
     return "\n".join(lines) + "\n", labels
 
 
+def serialize_scene(scene, grid, cfg, wf):
+    """Pure serialization of validated v2 coordinates. No snapping or repairs."""
+    def xyz(values):
+        return " ".join(_g(v) for v in values)
+    lines = [f"#title: {scene['title']}"]
+    if cfg.num_threads is not None:
+        lines.append(f"#num_threads: {cfg.num_threads}")
+    lines += [f"#domain: {xyz([grid.domain_x_m, grid.domain_y_m, grid.domain_z_m])}",
+              f"#dx_dy_dz: {xyz([grid.dx_m] * 3)}", f"#time_window: {grid.iterations}",
+              f"#pml_cells: {' '.join(map(str, cfg.gprmax_pml_cells()))}", _waveform_line(wf, grid)]
+    for layer in scene["layers"]:
+        lines.append(_soil_peplinski_line(SampledLayer.model_validate(layer["requested"]), layer["soil_id"]))
+        lines.append(_fractal_box_line(*layer["start_m"], *layer["end_m"], cfg.fractal_nbins,
+                                      layer["soil_id"], layer["box_id"], layer["seed"]))
+    rough = scene.get("roughness")
+    if rough:
+        lines.append(f"#add_surface_roughness: {xyz(rough['start_m'])} {xyz(rough['end_m'])} "
+                     f"{_g(rough['fractal_dim'])} {xyz(rough['surface_weights_x_z'])} "
+                     f"{_g(rough['height_min_m'])} {_g(rough['height_max_m'])} {rough['box_id']} {rough['seed']}")
+    source = scene["source"]
+    timing = grid.derivation["excitation"]
+    suffix = ""
+    if timing["stop_s"] is not None:
+        suffix = f" {_g(timing['start_s'])} {_g(timing['stop_s'])}"
+    resistance = f" {_g(source['resistance_ohm'])}" if source["kind"] != "hertzian_dipole" else ""
+    lines.append(f"#{source['kind']}: {source['axis']} {xyz(source['position_m'])}{resistance} {_sanitize(wf.waveform_name)}{suffix}")
+    lines.append(f"#rx: {xyz(scene['receiver']['position_m'])}")
+    for target in scene["targets"]:
+        radius = f" {_g(target['radius_m'])}" if target["kind"] == "cylinder" else ""
+        lines.append(f"#{target['kind']}: {xyz(target['start_m'])} {xyz(target['end_m'])}{radius} pec n")
+    for snapshot in scene["snapshots"]:
+        lines.append(f"#snapshot: {xyz(snapshot['start_m'])} {xyz(snapshot['end_m'])} {xyz(snapshot['strides_m'])} {snapshot['iteration']} {snapshot['filename']}")
+    # Native geometry hook verifies the full material map before field updates.
+    # This view is a declared inspection output, separate from the solver grid.
+    view = scene["geometry_view"]
+    lines.append(f"#geometry_view: 0 0 0 {xyz(view['end_m'])} {xyz(view['strides_m'])} {view['filename']} n")
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -397,18 +410,14 @@ def emit_dataset(
     adv: Optional[ExtractedAdvancedParams] = None,
     in_subdir: str = "in_files",
     manifest_filename: str = "emitted_files.json",
+    layers=None,
+    target_ranges=None,
 ) -> EmissionResult:
     """Write one gprMax .in file per surviving sample onto the global grid.
 
     Reads global_derive.json + sampled_layers.json from `output_dir`, writes the
     .in files into `output_dir/in_subdir`, and records an emission manifest.
     """
-    if cfg.dimensionality == "3D":
-        raise NotImplementedError(
-            "The emitter targets the 2D global grid; global_derive produces no "
-            "z-domain, so 3D emission is not supported."
-        )
-
     grid = read_global(output_dir)
     samples = read_samples(output_dir)
 
@@ -417,14 +426,64 @@ def emit_dataset(
     in_dir.mkdir(parents=True, exist_ok=True)
 
     result = EmissionResult(output_dir=str(out_dir), in_dir=str(in_dir), n_written=0)
+    contract = None
+    if cfg.contract_version >= 2:
+        from backend.dataset_sampling.contract import digest, solver_identity, POLICY_VERSION, validate_capabilities
+        from backend.dataset_sampling.scene import resolve_scene, token
+        from backend.resources import estimate_resources
+        from backend.dataset_sampling.target_placement import distribution_summary
+        validate_capabilities(cfg, target_ranges=target_ranges, waveform=wf, antenna=ant, advanced=adv)
+        derived_data = json.loads((out_dir / "derived_layers.json").read_text())
+        derived_by_id = {s["sample_id"]: s for s in derived_data["samples"]}
+        summary = json.loads((out_dir / "sampled_layers.json").read_text()).get("sampling_summary") or {
+            "accepted_draws": distribution_summary(samples),
+            "notice": "Observed marginals after soil validation and placement; no uniformity claim"}
+        contract = {"version": 2, "physics_policy": POLICY_VERSION, "dimensionality": cfg.dimensionality,
+                    "coordinate_frame": cfg.coordinate_frame, "solver": solver_identity(),
+                    "grid": grid.model_dump(), "pml_faces": list(cfg.gprmax_pml_cells()),
+                    "clearance_cells": cfg.pml_cells + PML_GAP_CELLS,
+                    "requested": {"dataset_config": cfg.model_dump(exclude={"output_dir", "num_threads"}),
+                                  "waveform": wf.model_dump(), "antenna": ant.model_dump(),
+                                  "layers": layers.model_dump() if layers else None,
+                                  "target_ranges": target_ranges.model_dump() if target_ranges else None,
+                                  "advanced": adv.model_dump() if adv else None},
+                    "source_normalization": "native amplitude; Hertzian current moment = amplitude * cell spacing along selected axis",
+                    "field_units": {"E": "V/m", "H": "A/m", "time": "s", "coordinates": "m"},
+                    "terminal_layer": "bottom half-space; no independently realized last interface",
+                    "resources": estimate_resources(grid, cfg, len(samples[0].layers) if samples else 0, adv),
+                    "qualification": {"status": "unqualified", "training_eligible": False, "reuse_eligible": False},
+                    "num_requested": cfg.num_samples, "placement_attempt_limit": 20,
+                    "sampling_policy": "independent identity streams; fixed moisture band; rejection changes survivor distribution"}
+        contract["digest"] = digest(contract)
+        (out_dir / "dataset_contract.json").write_text(json.dumps(contract, indent=2))
 
     for sample in samples:
-        filename = f"{_sanitize(cfg.model_basename)}_{sample.sample_id}.in"
+        basename = token(cfg.model_basename) if contract else _sanitize(cfg.model_basename)
+        filename = f"{basename}_{sample.sample_id}.in"
         path = in_dir / filename
         try:
-            text, labels = build_in_text(sample, grid, cfg, wf, ant, adv)
-        except Exception as exc:  # emit what we can; log the rest
+            scene = None
+            if contract is not None:
+                scene = resolve_scene(sample, grid, cfg, wf, ant, adv)
+                for layer, derived in zip(scene["layers"], derived_by_id[sample.sample_id]["layers"], strict=True):
+                    layer["material_provenance"] = derived["material_provenance"]
+                scene["contract_digest"] = contract["digest"]
+                scene["digest"] = digest(scene)
+                text = serialize_scene(scene, grid, cfg, wf)
+                labels = [LayerLabel(l["name"], l["thickness_m"], l["y_top_m"], l["y_bottom_m"]) for l in scene["layers"]]
+                from backend.preflight import validate_deck_contract
+                validate_deck_contract(text, contract, scene)
+            else:
+                text, labels = build_in_text(sample, grid, cfg, wf, ant, adv)
+        except Exception as exc:
             result.errors.append(f"sample {sample.sample_id}: {exc}")
+            if contract is not None:
+                # A scene inconsistent with the frozen contract is not another
+                # placement rejection. Invalidate the manifest for the batch.
+                (out_dir / manifest_filename).write_text(json.dumps({
+                    "contract": contract, "files": [], "n_written": 0,
+                    "status": "invalid", "errors": result.errors}, indent=2))
+                raise ValueError("Contract emission failed: " + result.errors[-1]) from exc
             continue
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
@@ -437,6 +496,8 @@ def emit_dataset(
                  "y_top_m": l.y_top_m, "y_bottom_m": l.y_bottom_m}
                 for l in labels
             ],
+            **({"contract_digest": contract["digest"], "input_sha256": __import__("hashlib").sha256(text.encode()).hexdigest(),
+                "resolved_scene": scene} if contract else {}),
         })
         result.n_written += 1
 
@@ -455,6 +516,10 @@ def emit_dataset(
         },
         "files": result.files,
         "errors": result.errors,
+        **({"contract": contract, "contract_digest": contract["digest"],
+            "num_requested": cfg.num_samples, "num_accepted": result.n_written,
+            "qualification": contract["qualification"],
+            "acceptance": {"distributions": summary, "dropped": json.loads((out_dir / "dropped_targets.json").read_text()).get("dropped_targets", []) if (out_dir / "dropped_targets.json").exists() else []}} if contract else {}),
     }
     with open(out_dir / manifest_filename, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)

@@ -289,14 +289,24 @@ def _make_section_tools(store: dict, output_dir_fn=None):
         if section == "dataset_config" and isinstance(data, dict):
             # Server-fixed fields, never user-selected: output lands in a
             # per-dataset directory derived from the model basename (scoped
-            # per user/chat for API sessions), only 2D runs are supported,
+            # per user/chat for API sessions),
             # and OpenMP threading is a deployment concern (None -> gprMax
             # default). Any value the agent passes through is overridden here.
             data["output_dir"] = output_dir_fn(data.get("model_basename"))
-            data["dimensionality"] = "2D"
+            data["contract_version"] = 2
             data["num_threads"] = None
         try:
             model = SECTION_SCHEMA[section].model_validate(data)
+            if section == "dataset_config":
+                from backend.dataset_sampling.contract import validate_capabilities, validate_release_access
+                validate_release_access(model)
+                validate_capabilities(model)
+            if section != "dataset_config" and store.get("dataset_config"):
+                from backend.dataset_sampling.contract import validate_capabilities
+                cfg = DatasetConfig.model_validate(store["dataset_config"])
+                key = {"target_ranges": "target_ranges", "waveform": "waveform", "antenna": "antenna", "advanced_params": "advanced"}.get(section)
+                if key:
+                    validate_capabilities(cfg, **{key: model})
         except (ValueError, TypeError) as e:
             return json.dumps({"error": "validation_failed", "detail": str(e)})
 
@@ -755,8 +765,9 @@ def layer_sampling_node(state: PipelineState) -> dict:
         extracted=layers,
         num_samples=dataset_cfg.num_samples,
         output_dir=dataset_cfg.output_dir,
-        seed=42,
+        seed=dataset_cfg.seed,
         target_ranges=target_ranges,
+        dataset_config=dataset_cfg,
     )
     print(f"  Wrote {len(samples)} sampled parameter set(s) to:\n    {path}")
     if warnings:
@@ -844,6 +855,11 @@ def global_derive_node(state: PipelineState) -> dict:
         largest_extent_global_m=aggregate.largest_extent_global_m,
         deepest_target_bottom_global_m=aggregate.deepest_target_bottom_global_m,
         static_x_halfwidth_global_m=aggregate.static_x_halfwidth_global_m,
+        z_halfwidth_global_m=aggregate.z_halfwidth_global_m,
+        spectral_lambda_min_m=aggregate.spectral_lambda_min_m,
+        spectral_index_max=aggregate.spectral_index_max,
+        min_layer_thickness_m=aggregate.min_layer_thickness_m,
+        min_relaxation_time_s=aggregate.min_relaxation_time_s,
     )
 
     print(
@@ -851,7 +867,7 @@ def global_derive_node(state: PipelineState) -> dict:
         f"{grid.eps_r_max_global:.3f}]:"
     )
     print(f"  dx           = {grid.dx_m*1e3:.3f} mm")
-    print(f"  domain (x,y) = {grid.domain_x_m:.3f} x {grid.domain_y_m:.3f} m")
+    print(f"  domain (x,y,z) = {grid.domain_x_m:.3f} x {grid.domain_y_m:.3f} x {grid.domain_z_m:.3f} m ({grid.dimensionality})")
     print(f"  depth        = {grid.depth_z_m:.3f} m")
     print(f"  ground / Tx  = ground_y={grid.ground_y_m:.3f} m  Tx=({grid.tx_x_m:.3f}, {grid.tx_y_m:.3f})  Rx=({grid.rx_x_m:.3f}, {grid.rx_y_m:.3f})")
     print(f"  dt           = {grid.dt_s*1e12:.3f} ps")
@@ -877,6 +893,7 @@ def global_validation_node(state: PipelineState) -> dict:
 
     report = validate_global(
         grid, dataset_cfg, waveform, antenna, layers,
+        adv=ExtractedAdvancedParams.model_validate(state["advanced_params"]) if state.get("advanced_params") else None,
         target_ranges=target_ranges,
     )
 
@@ -917,7 +934,8 @@ def target_placement_node(state: PipelineState) -> dict:
     dataset_cfg = DatasetConfig.model_validate(state["dataset_config"])
     grid = read_global(dataset_cfg.output_dir)
 
-    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_ranges, seed=1234)
+    advanced = ExtractedAdvancedParams.model_validate(state["advanced_params"]) if state.get("advanced_params") else None
+    result = run_placement(dataset_cfg.output_dir, dataset_cfg, grid, target_ranges, seed=1234, advanced=advanced)
 
     print(
         f"Placed objects: {result.n_unchanged} sample(s) kept as-is, "
@@ -946,10 +964,14 @@ def dataset_generation_node(state: PipelineState) -> dict:
     )
 
     result = emit_dataset(
-        dataset_cfg.output_dir, dataset_cfg, waveform, antenna, advanced
+        dataset_cfg.output_dir, dataset_cfg, waveform, antenna, advanced,
+        layers=ExtractedLayers.model_validate(state["layers"]),
+        target_ranges=ExtractedTargetRanges.model_validate(state["target_ranges"]) if state.get("target_ranges") else None,
     )
 
     print(f"Emitted {result.n_written} gprMax .in file(s) to:\n    {result.in_dir}")
+    if dataset_cfg.contract_version >= 2 and (result.errors or not result.n_written):
+        raise ValueError("Dataset emission blocked: " + "; ".join(result.errors or ["no accepted samples"]))
     if result.errors:
         print("\n  Errors (samples skipped):")
         for e in result.errors:
