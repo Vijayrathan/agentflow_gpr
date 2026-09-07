@@ -104,15 +104,25 @@ def derive_global(
     lambda_max = C0 / (f_min * (eps_min ** 0.5))
     surface_xy = 1.5 * lambda_max
 
-    # 7g. GLOBAL depth: deepest stack OR range-resolution floor OR deep enough that
-    #     the deepest+largest buried target still clears the BOTTOM PML gap.
+    # 7g. GLOBAL depth: the COLLECTED soil depth, floored by the deepest stack
+    #     that must fit under it, the range-resolution limit, and the depth at
+    #     which the deepest+largest buried target still clears the BOTTOM PML gap.
     #     target bottom = ground_y - deepest_bottom, ground_y = pad + depth_z;
     #     require target_bottom >= clearance. The bottom `pad` already supplies
     #     (pml+buffer), so add only the shortfall to the (pml+15) clearance, i.e.
     #     max(0, clearance - pad)  (0 when buffer already covers the gap).
-    max_stack = sum(L.thickness_m_max for L in layers.layers)
+    #
+    #     Only the layers ABOVE the terminal one contribute a stack: the terminal
+    #     layer is a half-space extended to the domain floor and carries no
+    #     collected thickness. It must still be a real layer rather than a PML
+    #     lining, so it reserves `clearance` — the same (pml+15)-cell rule every
+    #     other feature clears active faces by — leaving at least PML_GAP_CELLS
+    #     of labelled soil outside the absorber.
+    upper_stack = layers.upper_thickness_max_sum()
+    terminal_min = clearance
+    max_stack = upper_stack + terminal_min
     range_res = C0 / (2.0 * bandwidth * (eps_max ** 0.5))   # slowest medium
-    depth_z = max(max_stack, range_res)
+    depth_z = max(layers.soil_depth_m, max_stack, range_res)
     if deepest_target_bottom_global_m is not None:
         target_depth_floor = deepest_target_bottom_global_m + max(0.0, clearance - pad)
         depth_z = max(depth_z, target_depth_floor)

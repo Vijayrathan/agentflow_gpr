@@ -31,10 +31,11 @@ def make_sections(*, with_targets: bool = True) -> dict:
         "bulk_density_gcm3_min": 1.5, "bulk_density_gcm3_max": 1.7,
         "particle_density_gcm3_min": 2.6, "particle_density_gcm3_max": 2.7,
     }
-    layer2 = dict(layer, name="subsoil", thickness_m_min=0.5, thickness_m_max=0.8)
+    # the deepest layer is the terminal half-space: no thickness of its own
+    layer2 = dict(layer, name="subsoil", thickness_m_min=None, thickness_m_max=None)
     sections = {
         "dataset_config": {"num_samples": 20, "model_basename": "soil"},
-        "layers": {"num_layers": 2, "layers": [layer, layer2]},
+        "layers": {"num_layers": 2, "soil_depth_m": 1.2, "layers": [layer, layer2]},
         "waveform": {
             "waveform_center_freq_hz": 900e6,
             "waveform_name": "ricker900",
@@ -115,8 +116,11 @@ def test_target_sort_is_input_order_independent():
 def test_over_capacity_raises():
     sections = make_sections()
     layer = sections["layers"]["layers"][0]
-    sections["layers"] = {"num_layers": ss.MAX_LAYERS + 1,
-                          "layers": [dict(layer) for _ in range(ss.MAX_LAYERS + 1)]}
+    terminal = dict(layer, thickness_m_min=None, thickness_m_max=None)
+    sections["layers"] = {
+        "num_layers": ss.MAX_LAYERS + 1, "soil_depth_m": 5.0,
+        "layers": [dict(layer) for _ in range(ss.MAX_LAYERS)] + [terminal],
+    }
     with pytest.raises(ValueError):
         ss.build_feature_payload(
             dataset_config=sections["dataset_config"], layers=sections["layers"],
@@ -191,6 +195,7 @@ def test_rescore_zero_targets_redistributes_weight():
     assert score == pytest.approx(1.0)   # vacuous target agreement never inflates
 
     # A known single-field diff must renormalize over the remaining groups.
+    a["layers"][1]["thickness_m"] = [0.5, 0.8]
     b["layers"][1]["thickness_m"] = [0.6, 0.9]   # vs [0.5, 0.8]: IoU = 0.2/0.4
     score, _ = ss.rescore(a, b)
     layer2 = 0.75 + ss.LAYER_FIELD_WEIGHTS["thickness_m"] * 0.5

@@ -170,14 +170,17 @@ function SubsurfaceView({
     my = (d) => oY + d * scale;
 
   const visLayers = model.layers.filter((l) => l.visible !== false);
-  // cumulative layer rects
+  // cumulative layer rects. The DEEPEST layer is a terminal half-space: the
+  // emitted model extends it to the domain floor, so it always fills the rest
+  // of the column. There is no background medium beneath it to draw.
   let acc = 0;
   const rects = [];
-  for (const l of model.layers) {
+  model.layers.forEach((l, i) => {
     const top = acc;
-    acc += l.thickness;
+    acc += l.thickness || 0;
+    if (i === model.layers.length - 1) acc = Math.max(acc, dom.depth);
     rects.push({ l, top, bot: acc });
-  }
+  });
   const filled = acc;
 
   // thickness-uncertainty bands (ranges overview): boundary k's spread is the
@@ -412,8 +415,9 @@ function SubsurfaceView({
         );
       })}
 
-      {/* half-space below modelled layers */}
-      {filled < dom.depth - 1e-6 && (
+      {/* empty state only — once layers exist the terminal layer runs to the
+          floor, so there is never unmodelled ground below the stack */}
+      {model.layers.length === 0 && (
         <g>
           <rect
             x={oX}
@@ -438,9 +442,7 @@ function SubsurfaceView({
             fontSize="10"
             fill="var(--ink-3)"
           >
-            {model.layers.length === 0
-              ? "no layers yet — describe the subsurface in chat"
-              : "half-space (background medium)"}
+            no layers yet — describe the subsurface in chat
           </text>
         </g>
       )}

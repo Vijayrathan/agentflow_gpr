@@ -167,10 +167,20 @@ def validate_global(
     ))
     _add(report, "source_height_vs_domain", _check_source_height_vs_domain(grid, clearance))
     _add(report, "static_target_placement", _check_static_targets(target_ranges, grid, cfg))
+    # Only the layers ABOVE the terminal half-space have collected thicknesses;
+    # the terminal layer reserves `clearance` of the depth budget instead (see
+    # global_derive 7g), and its realized extent is whatever depth_z leaves.
+    upper = layers.layers[:-1] if layers.layers else []
     _add(report, "layer_thickness_and_stack", validate_layer_thickness_and_stack(
-        layer_names=[L.name or f"layer_{i+1}" for i, L in enumerate(layers.layers)],
-        thicknesses_m=[L.thickness_m_max for L in layers.layers],
+        layer_names=[L.name or f"layer_{i+1}" for i, L in enumerate(upper)],
+        thicknesses_m=[L.thickness_m_max for L in upper],
         max_cell_m=dx, global_depth_m=grid.depth_z_m,
+        terminal_min_m=clearance,
+        requested_depth_m=layers.soil_depth_m,
+        terminal_name=(
+            layers.layers[-1].name if layers.layers and layers.layers[-1].name
+            else "terminal half-space"
+        ),
     ))
     _add(report, "time_window", validate_time_window(
         grid.time_window_s, grid.depth_z_m, grid.eps_r_max_global,

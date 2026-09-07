@@ -87,6 +87,8 @@ stage by stage, and persists them to an in-memory store.
 
 - `"dataset_config"` — dataset size/naming, FDTD grid & boundary policy, resolution policy
 - `"layers"` — soil layer sampling RANGES (thickness, texture, moisture, densities)
+  plus the total `soil_depth_m`. The deepest layer is a terminal half-space and
+  carries NO thickness.
 - `"target_ranges"` — buried object sampling ranges: cylinders + boxes (OPTIONAL)
 - `"waveform"` — waveform kind, amplitude, centre frequency, source timing
 - `"antenna"` — antenna kind/axis, Tx-Rx offset, receiver placement
@@ -263,9 +265,11 @@ the user should explicitly say to skip. Do not skip on your own\
         title="Layer Extraction",
         schema_class=ExtractedLayers,
         batches="""\
-   Ask the user for the number of layers first, then collect one layer at a time:
+   Ask the user for the number of layers first, then the total soil depth
+   (soil_depth_m, in metres — how deep below the ground surface the model
+   extends), then collect one layer at a time:
    - layer name (optional) and thickness range (thickness_m_min / \
-thickness_m_max, in metres)
+thickness_m_max, in metres) for every layer EXCEPT the deepest one
    - texture fraction ranges — sand (sand_pct_min/max) and clay \
 (clay_pct_min/max), in percent. Do NOT collect silt — it is derived as \
 100 - sand - clay downstream.
@@ -276,8 +280,19 @@ sub-band inside it per sample.
 particle_density_gcm3_min/max (g/cm³). These are REQUIRED (porosity is \
 derived from them).
 
+   **The deepest layer takes NO thickness.** It is a terminal half-space: the
+   emitted model extends it down to the domain floor, so it has no bottom
+   interface and a thickness collected for it could never be realized or
+   labelled. Its extent is whatever soil_depth_m leaves over the layers above.
+   Omit thickness_m_min/thickness_m_max for that layer entirely — do not ask the
+   user for it, and do not invent one. If the user offers a thickness for the
+   deepest layer, explain that the bottom layer continues to the base of the
+   model and ask whether they meant the total soil depth instead.
+
    **Physics constraints** (enforce during collection — the schema also checks \
 these at store time):
+   - soil_depth_m must exceed the sum of the thickness_m_max values of the
+     layers above the deepest one, or the terminal layer has no room
    - sand_pct_min + clay_pct_min must be ≤ 100 (leave room for silt)
    - bulk_density must be < particle_density (typical: bulk 1.1–1.8, \
 particle ~2.66 g/cm³)
@@ -373,6 +388,10 @@ the user should explicitly say to skip. Do not skip on your own\
    **Antenna configuration:**
    - antenna_kind: type of antenna (default: "hertzian_dipole"; \
 alternatives: "voltage_source", "transmission_line")
+     Only these three source types are supported; never substitute a Hertzian
+     dipole for another requested antenna. Explain unsupported types and ask
+     the user to choose a supported source. Transmission lines require CPU
+     solving because the bundled gprMax CUDA solver does not support them.
    - antenna_axis: polarisation axis ("x", "y", or "z"; default: "x"). \
 Conventionally perpendicular to the B-scan survey direction.
    - tx_rx_offset_m: transmitter-receiver offset in metres (required)
@@ -490,7 +509,7 @@ current ranges:
 
 This is corrected by changing one or more of:
   dataset_config  (usually num_samples if the request itself is invalid)
-  layers          (soil texture, moisture, thickness, or density ranges)
+  layers          (soil texture, moisture, thickness, soil depth, or density ranges)
   target_ranges   (buried-object ranges, if the error mentions targets)
 
 For layer feasibility, use these rules when explaining the fix:
@@ -529,7 +548,7 @@ resolved by adjusting one of:
   dataset_config  (cells_per_wavelength, pml_cells, buffer_cells)
   antenna         (source_height_m, tx_rx_offset_m)
   waveform        (center frequency)
-  layers          (thicknesses)
+  layers          (thicknesses, soil depth)
   target_ranges   (fixed-object position/size — [static_target_placement]
                    errors always point here: a fixed object is never moved
                    automatically, the user must adjust its ranges)

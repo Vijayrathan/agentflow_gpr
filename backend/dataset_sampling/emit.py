@@ -127,20 +127,24 @@ def _fractal_box_line(
 def _source_line(ant: ExtractedAntenna, grid: GlobalDerived, wf: ExtractedWaveform) -> str:
     """Transmitter line, polarised along the thin invariant axis (z).
 
-    Emits #hertzian_dipole (default) or #voltage_source. The optional [start end]
-    timing pair is written only when BOTH are set (gprMax requires the pair).
+    Preserve the selected Hertzian, voltage or transmission-line source;
+    reject unknown kinds instead of substituting a different excitation.
+    The optional [start end] timing pair is written only when BOTH are set
+    (gprMax requires the pair). Transmission lines require CPU solving.
     """
-    kind = (ant.antenna_kind or "hertzian_dipole").lower()
+    kind = ant.antenna_kind
     timing = ""
     if wf.source_start_time is not None and wf.source_end_time is not None:
         timing = f" {_g(wf.source_start_time)} {_g(wf.source_end_time)}"
     pos = f"{_g(grid.tx_x_m)} {_g(grid.tx_y_m)} 0"
     name = _sanitize(wf.waveform_name)
-    if kind == "voltage_source":
+    if kind == "hertzian_dipole":
+        return f"#hertzian_dipole: z {pos} {name}{timing}"
+    if kind in ("voltage_source", "transmission_line"):
         if ant.resistance is None:
-            raise ValueError("voltage_source requires a resistance value")
-        return f"#voltage_source: z {pos} {_g(ant.resistance)} {name}{timing}"
-    return f"#hertzian_dipole: z {pos} {name}{timing}"
+            raise ValueError(f"{kind} requires a resistance value")
+        return f"#{kind}: z {pos} {_g(ant.resistance)} {name}{timing}"
+    raise ValueError(f"Unsupported antenna_kind {kind!r}; no source was substituted")
 
 
 def _rx_line(grid: GlobalDerived) -> str:
@@ -243,10 +247,22 @@ def _unique_soil_id(raw: str, index: int, used: set) -> str:
 
 @dataclass
 class LayerLabel:
+    """What was ACTUALLY emitted for one layer — the training label, not the draw.
+
+    ``thickness_m`` is the EFFECTIVE thickness: the soil that occupies the
+    non-PML computational domain. For every layer but the last it equals the
+    emitted box height. The terminal layer is a half-space whose box runs to the
+    domain floor (y=0) and therefore straight through the bottom PML, so its
+    effective thickness excludes that absorber. Its SAMPLED thickness is never a
+    realized interface (see AGENT.md, terminal half-space) and must never be
+    labelled as one.
+    """
     name: Optional[str]
-    thickness_m: float   # SNAPPED thickness (matches the emitted geometry)
+    thickness_m: float        # EFFECTIVE (non-PML) extent — this is the label
     y_top_m: float
-    y_bottom_m: float
+    y_bottom_m: float         # emitted box floor (0.0 for the terminal layer)
+    box_thickness_m: float    # full emitted box height, bottom PML included
+    is_terminal: bool = False
 
 
 def build_in_text(
@@ -283,6 +299,7 @@ def build_in_text(
     # --- soil layers (snapped to whole cells; deepest extended to y=0) ---
     ground_cells = round(grid.ground_y_m / dx)
     ground_y = ground_cells * dx
+    pml_thickness = cfg.pml_cells * dx   # bottom absorber; excluded from labels
     top_cells = ground_cells
     used_ids: set = set()
     labels: List[LayerLabel] = []
@@ -321,7 +338,22 @@ def build_in_text(
                 cfg.fractal_nbins, soil_id, box_id, seed,
             )
         )
-        labels.append(LayerLabel(layer.name, y2 - y1, y2, y1))
+        # The terminal layer's box reaches y=0, i.e. through the bottom PML, so
+        # its LABEL is the non-absorber extent, not the box height.
+        if is_last:
+            effective = y2 - pml_thickness
+            if effective <= 0.0:
+                raise ValueError(
+                    f"sample {sample.sample_id} terminal layer ('{layer.name}') has "
+                    f"no soil outside the bottom PML: box top y={y2:.4f} m is within "
+                    f"the {cfg.pml_cells}-cell PML ({pml_thickness:.4f} m). The layer "
+                    "stack consumes the whole soil depth — increase the global depth."
+                )
+        else:
+            effective = y2 - y1
+        labels.append(
+            LayerLabel(layer.name, effective, y2, y1, y2 - y1, is_last)
+        )
         top_cells = bottom_cells
     lines.append("")
 
@@ -430,7 +462,9 @@ def emit_dataset(
             "path": str(path),
             "layers": [
                 {"name": l.name, "thickness_m": l.thickness_m,
-                 "y_top_m": l.y_top_m, "y_bottom_m": l.y_bottom_m}
+                 "y_top_m": l.y_top_m, "y_bottom_m": l.y_bottom_m,
+                 "box_thickness_m": l.box_thickness_m,
+                 "is_terminal": l.is_terminal}
                 for l in labels
             ],
         })

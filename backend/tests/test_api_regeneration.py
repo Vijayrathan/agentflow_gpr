@@ -27,10 +27,9 @@ class FakeWS:
 COMPLETE_STORE = {
     "dataset_config": {"num_samples": 3, "model_basename": "demo"},
     "layers": {
-        "num_layers": 1,
+        "num_layers": 1, "soil_depth_m": 0.5,
         "layers": [{
             "name": "sandy_loam",
-            "thickness_m_min": 0.3, "thickness_m_max": 0.5,
             "sand_pct_min": 30.0, "sand_pct_max": 40.0,
             "clay_pct_min": 5.0, "clay_pct_max": 15.0,
             "theta_v_min": 0.05, "theta_v_max": 0.20,
@@ -217,11 +216,7 @@ def _pipeline_recorder(monkeypatch):
 def test_sampling_input_edit_resamples_in_canonical_order(monkeypatch):
     calls, finishes = _pipeline_recorder(monkeypatch)
     chat = _completed_chat()
-    layers = {
-        "num_layers": 1,
-        "layers": [dict(COMPLETE_STORE["layers"]["layers"][0],
-                        thickness_m_max=0.8)],
-    }
+    layers = dict(COMPLETE_STORE["layers"], soil_depth_m=0.8)
     chat.agent_session.store["layers"] = layers
     asyncio.run(api._check_regeneration(chat))
     # Exactly the first-run node order: gate, THEN resample before anything

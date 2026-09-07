@@ -232,7 +232,13 @@ def _section_is_complete(section: str, model) -> bool:
         # only hinges on the user-collected core.
         return model.num_samples > 0 and model.center_freq_is_peak is not None
     if section == "layers":
-        return model.num_layers > 0 and len(model.layers) > 0
+        # soil_depth_m is required by the schema, but a zero/absent column is
+        # still not a collected one; the terminal half-space needs real room.
+        return (
+            model.num_layers > 0
+            and len(model.layers) > 0
+            and model.soil_depth_m > 0
+        )
     if section == "waveform":
         return (
             model.waveform_center_freq_hz > 0

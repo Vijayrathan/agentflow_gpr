@@ -33,13 +33,13 @@ from dataset_sampling.emit import build_in_text  # noqa: E402
 
 def _layers():
     L = ExtractedLayerParams(
-        name="topsoil", thickness_m_min=0.2, thickness_m_max=0.5,
+        name="topsoil",
         sand_pct_min=30, sand_pct_max=45, clay_pct_min=6, clay_pct_max=18,
         theta_v_min=0.05, theta_v_max=0.20,
         bulk_density_gcm3_min=1.4, bulk_density_gcm3_max=1.6,
         particle_density_gcm3_min=2.6, particle_density_gcm3_max=2.7,
     )
-    return ExtractedLayers(num_layers=1, layers=[L])
+    return ExtractedLayers(num_layers=1, soil_depth_m=0.5, layers=[L])
 
 
 def _fixture():

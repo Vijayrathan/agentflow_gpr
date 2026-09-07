@@ -218,12 +218,148 @@ def test_execution_plan_spreads_models_over_devices(monkeypatch):
     assert simulate.resolve_execution(gpu=True).gpu_arg_for(0) == [[]]
 
 
+@pytest.mark.parametrize("gpu_source", ["argument", "environment", "device_ids", "env_device_ids"])
+@pytest.mark.parametrize("workers", [1, 3])
+def test_gpu_transmission_line_preflight_rejects_entire_batch(tmp_path, monkeypatch, gpu_source, workers):
+    _clear_backend_env(monkeypatch)
+    kwargs = {}
+    if gpu_source == "argument":
+        kwargs["gpu"] = True
+    elif gpu_source == "environment":
+        monkeypatch.setenv("GPR_GPU", "1")
+    elif gpu_source == "device_ids":
+        kwargs["gpu_ids"] = [0]
+    else:
+        monkeypatch.setenv("GPR_GPU_IDS", "0")
+
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["a_dipole.in", "z_transmission.in"])
+    (in_dir / "z_transmission.in").write_text("#transmission_line: z 0 0 0 75 pulse\n")
+    out_dir = tmp_path / "out_files"
+    events = []
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("preflight must reject before creating workers or executing a model")
+
+    monkeypatch.setattr(simulate, "_make_pool", unexpected)
+    monkeypatch.setattr(simulate, "_execute_one", unexpected)
+    with pytest.raises(ValueError, match="z_transmission.in: transmission_line sources require CPU solving"):
+        simulate.run_batch_simulation(
+            in_dir, output_dir=out_dir, workers=workers, progress=events.append, **kwargs
+        )
+
+    assert events == []
+    assert not out_dir.exists()
+
+
+def test_cpu_transmission_line_runs_with_source_preserved(tmp_path, monkeypatch):
+    _clear_backend_env(monkeypatch)
+    # Explicit CPU settings must also work on a GPU-configured deployment.
+    monkeypatch.setenv("GPR_GPU", "1")
+    monkeypatch.setenv("GPR_GPU_IDS", "0")
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["transmission.in"])
+    source = "#transmission_line: z 0 0 0 75 pulse\n"
+    (in_dir / "transmission.in").write_text(source)
+    out_dir = tmp_path / "out_files"
+    runner = _fake_runner(out_dir)
+    seen = []
+
+    def spy(tmp_in, n, gpu_arg, verbose):
+        seen.append((gpu_arg, tmp_in.read_text()))
+        return runner(tmp_in, n, gpu_arg, verbose)
+
+    monkeypatch.setattr(simulate, "run_simulation", spy)
+    result = simulate.run_batch_simulation(
+        in_dir, output_dir=out_dir, gpu=False, gpu_ids=[], workers=1
+    )
+    assert (result["mode"], result["succeeded"], result["failed"]) == ("cpu", 1, 0)
+    assert len(seen) == 1
+    assert seen[0][0] is None
+    assert source in seen[0][1]
+
+
+@pytest.mark.parametrize("exclude_transmission", ["manifest", "skip_existing"])
+def test_gpu_preflight_ignores_transmission_lines_not_pending(tmp_path, monkeypatch, exclude_transmission):
+    import concurrent.futures as futures
+
+    _clear_backend_env(monkeypatch)
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["dipole.in", "transmission.in"])
+    (in_dir / "transmission.in").write_text("#transmission_line: z 0 0 0 75 pulse\n")
+    out_dir = tmp_path / "out_files"
+    out_dir.mkdir()
+    kwargs = {}
+    if exclude_transmission == "manifest":
+        kwargs["filenames"] = ["dipole.in"]
+    else:
+        (out_dir / "transmission.out").write_bytes(b"existing output")
+        kwargs["skip_existing"] = True
+
+    seen = []
+    runner = _fake_runner(out_dir)
+
+    def spy(tmp_in, n, gpu_arg, verbose):
+        seen.append(tmp_in.name)
+        return runner(tmp_in, n, gpu_arg, verbose)
+
+    monkeypatch.setattr(simulate, "run_simulation", spy)
+    monkeypatch.setattr(
+        simulate, "_make_pool", lambda plan: futures.ThreadPoolExecutor(plan.workers)
+    )
+    result = simulate.run_batch_simulation(in_dir, output_dir=out_dir, gpu=True, **kwargs)
+    assert seen == ["dipole.in"]
+    assert (result["succeeded"], result["failed"]) == (1, 0)
+    assert result["skipped"] == (1 if exclude_transmission == "skip_existing" else 0)
+
+
+def test_cli_reports_gpu_transmission_line_preflight_error(tmp_path, monkeypatch, capsys):
+    _clear_backend_env(monkeypatch)
+    _write_in_files(tmp_path, ["transmission.in"])
+    (tmp_path / "transmission.in").write_text("#transmission_line: z 0 0 0 75 pulse\n")
+    monkeypatch.setattr(sys, "argv", [
+        "simulate.py", "--input-dir", str(tmp_path), "--gpu",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        simulate.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr()
+    assert "[ERROR] transmission.in: transmission_line sources require CPU solving" in output.out
+    assert "Disable GPU execution" in output.out
+    assert "Traceback" not in output.err
+
+
+def test_gpu_preflight_preserves_per_file_read_failures(tmp_path, monkeypatch):
+    import concurrent.futures as futures
+
+    _clear_backend_env(monkeypatch)
+    in_dir = tmp_path / "in_files"
+    _write_in_files(in_dir, ["invalid.in", "valid.in"])
+    (in_dir / "invalid.in").write_bytes(b"\xff")
+    out_dir = tmp_path / "out_files"
+    monkeypatch.setattr(simulate, "run_simulation", _fake_runner(out_dir))
+    monkeypatch.setattr(
+        simulate, "_make_pool", lambda plan: futures.ThreadPoolExecutor(plan.workers)
+    )
+    result = simulate.run_batch_simulation(in_dir, output_dir=out_dir, gpu=True)
+    assert (result["succeeded"], result["failed"]) == (1, 1)
+    assert result["errors"][0]["filename"] == "invalid.in"
+    assert "UnicodeDecodeError" in result["errors"][0]["error"]
+    assert result["outputs"][0]["filename"] == "valid.in"
+
+
 def test_run_batch_passes_gpu_arg_to_solver(tmp_path, monkeypatch):
     import concurrent.futures as futures
 
     _clear_backend_env(monkeypatch)
     in_dir = tmp_path / "in_files"
     _write_in_files(in_dir, ["demo_1.in"])
+    (in_dir / "demo_1.in").write_text(
+        "## #transmission_line: z 0 0 0 75 pulse\n"
+        "#title: transmission_line example\n"
+        "#hertzian_dipole: z 0 0 0 pulse\n"
+        "#voltage_source: z 0 0 0 50 pulse\n"
+    )
     out_dir = tmp_path / "out_files"
     out_dir.mkdir()
     # GPU mode always uses the pool; swap in threads so the stub applies
@@ -806,6 +942,31 @@ def _forward_model_chat(tmp_path, session_id):
         "num_samples": 1, "model_basename": "demo", "output_dir": str(tmp_path),
     }
     return chat
+
+
+def test_forward_model_reports_gpu_transmission_line_preflight_once(tmp_path, monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GPR_GPU", "1")
+    chat = _forward_model_chat(tmp_path, "preflight-session")
+    chat.simulating = True
+    in_dir = tmp_path / "in_files"
+    names = ["a.in", "b.in"]
+    _write_in_files(in_dir, names)
+    for name in names:
+        (in_dir / name).write_text("#transmission_line: z 0 0 0 75 pulse\n")
+    manifest = {"files": [{"sample_id": i, "filename": name} for i, name in enumerate(names, 1)]}
+
+    monkeypatch.setattr(api, "run_batch_simulation", simulate.run_batch_simulation)
+    monkeypatch.setattr(api, "_persist_chat", _noop_persist)
+    asyncio.run(api._run_forward_model(chat, manifest, in_dir, tmp_path / "out_files", names))
+
+    assert chat.simulating is False
+    complete = [e for e in chat.transcript if e["type"] == "simulation_complete"]
+    assert len(complete) == 1
+    assert "Forward model failed to start" in complete[0]["content"]
+    assert "transmission_line sources require CPU solving" in complete[0]["content"]
+    assert len(complete[0]["result"]["errors"]) == 1
+    assert not any(e["type"] == "simulation_progress" for e in chat.transcript)
 
 
 def test_forward_model_indexes_successful_run(tmp_path, monkeypatch):

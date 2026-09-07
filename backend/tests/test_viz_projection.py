@@ -8,6 +8,8 @@ Run: pytest backend/tests/test_viz_projection.py -v
 """
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 # Mirror the runtime path setup: repo root for `backend.*`, `backend/` for the
@@ -32,11 +34,10 @@ NO_FLAGS = {"sampled": False, "derived": False, "grid": False,
 
 LAYERS_SECTION = {
     "num_layers": 1,
+    "soil_depth_m": 0.5,
     "layers": [
         {
             "name": "sandy_loam",
-            "thickness_m_min": 0.3,
-            "thickness_m_max": 0.5,
             "sand_pct_min": 30.0,
             "sand_pct_max": 40.0,
             "clay_pct_min": 5.0,
@@ -166,8 +167,11 @@ def test_layers_ranges_midpoints_and_provisional_eps():
     scene = vz.build_scene(_store(layers=LAYERS_SECTION), NO_FLAGS, None, stage="layers")
     assert scene["stage"] == "layers"
     (layer,) = scene["ranges"]["layers"]
-    assert layer["thickness_mid_m"] == 0.4
-    assert layer["thickness_min_m"] == 0.3
+    # the only layer is the terminal half-space: its extent is the whole
+    # collected soil column, with no spread of its own
+    assert layer["terminal"] is True
+    assert layer["thickness_mid_m"] == 0.5
+    assert layer["thickness_min_m"] == 0.5
     assert layer["thickness_max_m"] == 0.5
     assert layer["sand_pct_mid"] == 35.0
     assert layer["silt_pct_mid"] == 55.0
@@ -292,3 +296,54 @@ def test_missing_manifests_do_not_break(tmp_path):
     assert scene is not None
     assert scene["samples"] is None
     assert scene["grid"] is None
+
+
+def test_terminal_layer_preview_is_soil_depth_minus_stack_above():
+    """The terminal half-space collects no thickness; the canvas previews it as
+    whatever soil_depth_m leaves over the layers above, with the min extent
+    pairing with the DEEPEST stack above it and vice versa."""
+    upper = dict(LAYERS_SECTION["layers"][0], name="topsoil",
+                 thickness_m_min=0.3, thickness_m_max=0.5)
+    terminal = dict(LAYERS_SECTION["layers"][0], name="subsoil")
+    section = {"num_layers": 2, "soil_depth_m": 2.0, "layers": [upper, terminal]}
+    scene = vz.build_scene(_store(layers=section), NO_FLAGS, None, stage="layers")
+    top, bottom = scene["ranges"]["layers"]
+    assert top["terminal"] is False
+    assert (top["thickness_min_m"], top["thickness_max_m"]) == (0.3, 0.5)
+    assert bottom["terminal"] is True
+    assert bottom["thickness_min_m"] == 2.0 - 0.5   # deepest stack above
+    assert bottom["thickness_max_m"] == 2.0 - 0.3   # shallowest stack above
+    assert bottom["thickness_mid_m"] == 2.0 - 0.4
+
+
+def test_terminal_layer_leaves_no_gap_above_the_plot_floor(tmp_path):
+    """The canvas must never show unmodelled ground under the deepest layer.
+
+    The terminal half-space is emitted down to the domain floor, so the
+    projected stack has to fill the plotted soil column exactly — before the
+    grid exists (collected soil_depth_m) and after it (derived depth_z_m, which
+    may be DEEPER than what was collected).
+    """
+    upper = dict(LAYERS_SECTION["layers"][0], name="topsoil",
+                 thickness_m_min=0.3, thickness_m_max=0.5)
+    terminal = dict(LAYERS_SECTION["layers"][0], name="subsoil")
+    section = {"num_layers": 2, "soil_depth_m": 2.0, "layers": [upper, terminal]}
+
+    scene = vz.build_scene(_store(layers=section), NO_FLAGS, None, stage="layers")
+    filled = sum(l["thickness_mid_m"] for l in scene["ranges"]["layers"])
+    assert filled == pytest.approx(scene["domain"]["depth_m"])
+    assert scene["domain"]["provisional"] is True
+
+    # global_derive enlarged the column past the collected 2.0 m
+    (tmp_path / "global_derive.json").write_text(json.dumps({
+        "depth_z_m": 3.5, "dx_m": 0.01, "domain_x_m": 2.0, "domain_y_m": 4.0,
+        "ground_y_m": 3.6, "f_peak_hz": 9e8, "time_window_s": 4e-8,
+        "tx_x_m": 0.9, "rx_x_m": 1.1, "tx_y_m": 3.8, "rx_y_m": 3.8,
+    }))
+    flags = dict(NO_FLAGS, grid=True)
+    scene = vz.build_scene(_store(layers=section), flags, str(tmp_path), stage="grid")
+    layers = scene["ranges"]["layers"]
+    assert layers[-1]["terminal"] is True
+    # the terminal layer absorbs the enlargement, not a background medium
+    assert layers[-1]["thickness_mid_m"] == pytest.approx(3.5 - 0.4)
+    assert sum(l["thickness_mid_m"] for l in layers) == pytest.approx(3.5)

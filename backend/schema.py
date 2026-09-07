@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Tuple, Literal
 
 # Resistance bound for #transmission_line / #voltage_source (exclusive upper bound).
@@ -69,7 +69,9 @@ class AntennaSchema(BaseModel):
 
 class LayerSchema(BaseModel):
     name: Optional[str] = None
-    thickness_m: float
+    # None for the terminal half-space layer: nothing is drawn for it, its
+    # extent is derived at emission from soil_depth_m minus the layers above.
+    thickness_m: Optional[float] = None
     sand_pct: float
     silt_pct: float
     clay_pct: float
@@ -258,9 +260,14 @@ class ExtractedLayerParams(BaseModel):
     """
     name: Optional[str] = None
 
-    # Per-layer thickness — REQUIRED for stratified models.
-    thickness_m_min: float
-    thickness_m_max: float
+    # Per-layer thickness range. REQUIRED for every layer EXCEPT the terminal
+    # (deepest) one, which is a half-space extended to the domain floor: it has
+    # no independently realized bottom interface, so a sampled thickness for it
+    # would be an unrealizable label. Its extent is derived from the dataset's
+    # soil_depth_m minus the layers above it. See AGENT.md (terminal half-space)
+    # and ExtractedLayers._terminal_layer_has_no_thickness.
+    thickness_m_min: Optional[float] = None
+    thickness_m_max: Optional[float] = None
 
     # Texture (percent). Closure is over three fractions: sand + silt + clay = 100.
     # We store sand & clay (Peplinski's only texture inputs); silt is derived.
@@ -284,7 +291,6 @@ class ExtractedLayerParams(BaseModel):
     @model_validator(mode="after")
     def _check_ranges(self):
         for lo, hi, label in [
-            (self.thickness_m_min, self.thickness_m_max, "thickness"),
             (self.sand_pct_min, self.sand_pct_max, "sand_pct"),
             (self.clay_pct_min, self.clay_pct_max, "clay_pct"),
             (self.theta_v_min, self.theta_v_max, "theta_v"),
@@ -293,6 +299,19 @@ class ExtractedLayerParams(BaseModel):
         ]:
             if lo > hi:
                 raise ValueError(f"{label}: min ({lo}) > max ({hi})")
+        # thickness is absent for the terminal layer, but must be a complete,
+        # ordered, positive pair whenever it IS given.
+        t_lo, t_hi = self.thickness_m_min, self.thickness_m_max
+        if (t_lo is None) != (t_hi is None):
+            raise ValueError(
+                "thickness_m_min and thickness_m_max must be given together "
+                "(or both omitted, for the terminal half-space layer)"
+            )
+        if t_lo is not None:
+            if t_lo > t_hi:
+                raise ValueError(f"thickness: min ({t_lo}) > max ({t_hi})")
+            if t_lo <= 0.0:
+                raise ValueError(f"thickness_m_min must be > 0 (got {t_lo})")
         # texture closure feasibility — sand+clay must be able to be <=100
         if self.sand_pct_min + self.clay_pct_min > 100.0:
             raise ValueError("sand_pct_min + clay_pct_min > 100 (no room for silt)")
@@ -309,8 +328,17 @@ class ExtractedLayerParams(BaseModel):
 # compute peplinski eps and sig from the gprmax module itself
 
 class ExtractedLayers(BaseModel):
-    """Output of the layer extraction subagent (STAGE 1)."""
+    """Output of the layer extraction subagent (STAGE 1).
+
+    `soil_depth_m` is the total modelled soil column below the ground surface —
+    the quantity the global derive actually needs. It replaces what used to be
+    the deepest layer's thickness: that layer is a terminal half-space extended
+    to the domain floor, so it has no realizable thickness of its own and none
+    is collected. Every layer ABOVE it carries a thickness range as before; the
+    terminal layer's extent is whatever soil_depth_m leaves over.
+    """
     num_layers: int
+    soil_depth_m: float
     layers: List[ExtractedLayerParams]
 
     @model_validator(mode="after")
@@ -318,6 +346,48 @@ class ExtractedLayers(BaseModel):
         if self.num_layers != len(self.layers):
             raise ValueError(f"num_layers ({self.num_layers}) != len(layers) ({len(self.layers)})")
         return self
+
+    @model_validator(mode="after")
+    def _terminal_layer_has_no_thickness(self):
+        if not self.layers:
+            return self
+        for i, layer in enumerate(self.layers[:-1]):
+            if layer.thickness_m_min is None:
+                name = f"'{layer.name}'" if layer.name else f"layer {i + 1}"
+                raise ValueError(
+                    f"{name} needs a thickness range: only the deepest layer "
+                    "(the terminal half-space) omits one"
+                )
+        last = self.layers[-1]
+        if last.thickness_m_min is not None:
+            name = f"'{last.name}'" if last.name else f"layer {len(self.layers)}"
+            raise ValueError(
+                f"the deepest layer {name} must NOT carry a thickness range: it is a "
+                "terminal half-space extended to the domain floor, with no bottom "
+                "interface to realize. Set the dataset's soil_depth_m instead."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _soil_depth_fits_stack(self):
+        if self.soil_depth_m <= 0.0:
+            raise ValueError(f"soil_depth_m must be > 0 (got {self.soil_depth_m})")
+        upper = sum(
+            L.thickness_m_max for L in self.layers[:-1] if L.thickness_m_max is not None
+        )
+        if upper >= self.soil_depth_m:
+            raise ValueError(
+                f"soil_depth_m ({self.soil_depth_m:.4f} m) must exceed the deepest "
+                f"possible stack of the layers above the terminal one ({upper:.4f} m), "
+                "or the terminal half-space has no room"
+            )
+        return self
+
+    def upper_thickness_max_sum(self) -> float:
+        """Deepest possible stack ABOVE the terminal half-space."""
+        return sum(
+            L.thickness_m_max for L in self.layers[:-1] if L.thickness_m_max is not None
+        )
 
 
 class ExtractedWaveform(BaseModel):
@@ -341,7 +411,7 @@ class ExtractedWaveform(BaseModel):
 
 class ExtractedAntenna(BaseModel):
     """Output of the antenna extraction subagent (STAGE 3)."""
-    antenna_kind: Optional[str] = "hertzian_dipole"
+    antenna_kind: Literal["hertzian_dipole", "voltage_source", "transmission_line"] = "hertzian_dipole"
     antenna_axis: Optional[str] = "x"
     tx_rx_offset_m: float  # required: Tx-Rx offset in metres
     resistance: Optional[float] = None  # required for transmission_line / voltage_source
@@ -352,6 +422,11 @@ class ExtractedAntenna(BaseModel):
     source_height_m: Optional[float] = None
 
     rx_array: Optional[RxArrayConfigSchema] = None
+
+    @field_validator("antenna_kind", mode="before")
+    @classmethod
+    def _normalise_kind(cls, value):
+        return "_".join(value.lower().split()) if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _resistance_rules(self):
@@ -520,7 +595,9 @@ class SampledLayer(BaseModel):
     #soil_peplinski consumes a moisture BAND, not a scalar.
     """
     name: Optional[str] = None
-    thickness_m: float
+    # None for the terminal half-space layer: nothing is drawn for it, its
+    # extent is derived at emission from soil_depth_m minus the layers above.
+    thickness_m: Optional[float] = None
     sand_pct: float
     clay_pct: float
     silt_pct: float                 # derived label: 100 - sand - clay
@@ -665,7 +742,9 @@ class SampledLayerValues(BaseModel):
     so the manifest is a complete record of what was used in the dielectric computation.
     """
     name: Optional[str] = None
-    thickness_m: float
+    # None for the terminal half-space layer: nothing is drawn for it, its
+    # extent is derived at emission from soil_depth_m minus the layers above.
+    thickness_m: Optional[float] = None
     sand_pct: float
     silt_pct: float
     clay_pct: float

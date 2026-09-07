@@ -34,11 +34,10 @@ def reset_store():
 
 VALID_LAYERS = {
     "num_layers": 1,
+    "soil_depth_m": 0.5,
     "layers": [
         {
             "name": "sandy_loam",
-            "thickness_m_min": 0.3,
-            "thickness_m_max": 0.5,
             "sand_pct_min": 30.0,
             "sand_pct_max": 40.0,
             "clay_pct_min": 5.0,
@@ -96,7 +95,7 @@ def test_save_valid_section_stores_and_completes():
 
 def test_save_valid_but_incomplete_is_stored_incomplete():
     # Schema-valid (num_layers == len(layers) == 0) but essential content missing.
-    out = _save("layers", {"num_layers": 0, "layers": []})
+    out = _save("layers", {"num_layers": 0, "soil_depth_m": 1.0, "layers": []})
     assert out["status"] == "stored_incomplete"
     assert sap._STORE["layers"] is not None
     assert not sap._stage_done("layers")
@@ -146,6 +145,43 @@ def test_optional_section_skip_completes():
     assert sap._stage_done("target_ranges")
 
 
+@pytest.mark.parametrize("kind", ["custom_antenna", "", "   ", None])
+def test_invalid_source_type_does_not_replace_saved_antenna(kind):
+    valid = {"antenna_kind": "transmission_line", "resistance": 75, "tx_rx_offset_m": 0.1}
+    assert _save("antenna", valid)["status"] == "ok"
+    before = sap._store_snapshot()["antenna"]
+    out = _save("antenna", {**valid, "antenna_kind": kind})
+    assert out["error"] == "validation_failed"
+    assert sap._STORE["antenna"] == before
+
+
+@pytest.mark.parametrize("kind", ["hertzian_dipole", "voltage_source", "transmission_line"])
+@pytest.mark.parametrize("separator", ["_", " ", "  ", "\t"])
+def test_source_type_is_normalized_and_preserved_in_store(kind, separator):
+    out = _save("antenna", {
+        "antenna_kind": f" {kind.upper().replace('_', separator)} ",
+        "resistance": 75, "tx_rx_offset_m": 0.1,
+    })
+    assert out["status"] == "ok"
+    assert sap._STORE["antenna"]["antenna_kind"] == kind
+    assert sap._stage_done("antenna")
+
+
+@pytest.mark.parametrize("kind", ["VOLTAGE_SOURCE", "TRANSMISSION_LINE"])
+@pytest.mark.parametrize("resistance", [None, 0, -1, 376.73, float("inf"), float("nan")])
+def test_resistive_source_requires_valid_resistance_after_normalization(kind, resistance):
+    out = _save("antenna", {
+        "antenna_kind": kind, "resistance": resistance, "tx_rx_offset_m": 0.1,
+    })
+    assert out["error"] == "validation_failed"
+    assert sap._STORE["antenna"] is None
+
+
+def test_omitted_source_type_uses_schema_default():
+    assert _save("antenna", {"tx_rx_offset_m": 0.1})["status"] == "ok"
+    assert sap._STORE["antenna"]["antenna_kind"] == "hertzian_dipole"
+
+
 def test_target_ranges_multi_object_roundtrip():
     payload = {
         "cylinders": [{
@@ -190,7 +226,7 @@ def test_changed_sections_diff():
     _save("layers", VALID_LAYERS)
     before = sap._store_snapshot()
     edited = json.loads(json.dumps(VALID_LAYERS))
-    edited["layers"][0]["thickness_m_max"] = 0.8
+    edited["soil_depth_m"] = 0.8
     _save("layers", edited)
     _save("dataset_config", {"num_samples": 3})
     changed = sap._changed_sections(before, sap._store_snapshot())
@@ -215,7 +251,7 @@ def test_samples_stale():
     assert not sap._samples_stale(state)
     # A cross-edit to layers after sampling -> stale
     edited = json.loads(json.dumps(VALID_LAYERS))
-    edited["layers"][0]["thickness_m_max"] = 0.8
+    edited["soil_depth_m"] = 0.8
     state["layers"] = edited
     assert sap._samples_stale(state)
 
