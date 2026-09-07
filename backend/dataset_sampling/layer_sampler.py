@@ -3,7 +3,8 @@ Layer sampling for the gprMax Peplinski dataset pipeline.
 
 Runs immediately AFTER the layer-extraction stage: draws `num_samples` concrete
 parameter sets over the per-layer ranges collected in ExtractedLayers. Sand,
-clay, thickness and both densities are drawn uniformly; silt is the derived
+clay, thickness (except the terminal half-space) and both densities are drawn
+uniformly; silt is the derived
 texture-closure label (100 - sand - clay). theta_v is NOT drawn — its (min, max)
 envelope is passed straight through, because #soil_peplinski consumes a moisture
 BAND, not a scalar.
@@ -74,7 +75,13 @@ def _sample_one_layer(
         )
 
     for _ in range(max_retries):
-        thickness = rng.uniform(layer.thickness_m_min, layer.thickness_m_max)
+        # The terminal half-space carries no thickness range and none is drawn:
+        # its extent is derived at emission (soil_depth_m minus the layers
+        # above), because it has no realizable bottom interface. See AGENT.md.
+        thickness = (
+            None if layer.thickness_m_min is None
+            else rng.uniform(layer.thickness_m_min, layer.thickness_m_max)
+        )
         sand = rng.uniform(layer.sand_pct_min, layer.sand_pct_max)
         clay = rng.uniform(layer.clay_pct_min, layer.clay_pct_max)
         silt = 100.0 - sand - clay
@@ -97,7 +104,7 @@ def _sample_one_layer(
 
         sampled = SampledLayer(
             name=layer.name,
-            thickness_m=_round(thickness),
+            thickness_m=None if thickness is None else _round(thickness),
             sand_pct=_round(sand),
             clay_pct=_round(clay),
             silt_pct=_round(silt),

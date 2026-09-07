@@ -1962,6 +1962,34 @@ def _finalize_dataset_sync(payload: FinalizeDatasetPayload) -> dict[str, Any]:
     }
 
 
+def _label_layers(
+    sample: dict[str, Any], emitted: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Per-layer LABELS: the drawn material properties + the EMITTED thickness.
+
+    The drawn thickness is provenance, not a label. The terminal layer is a
+    half-space extended to the domain floor (see AGENT.md), so the value the
+    sampler drew for it was never realized as an interface; emit.py records the
+    effective non-PML extent and that is what trains. Non-terminal layers pick
+    up the cell-snapped thickness for the same reason: it, not the raw draw, is
+    what gprMax built. The raw draw is retained as `thickness_drawn_m`.
+    """
+    sampled = sample.get("layers", []) or []
+    emitted_layers = (emitted or {}).get("layers") or []
+    labelled: list[dict[str, Any]] = []
+    for i, drawn in enumerate(sampled):
+        merged = dict(drawn)
+        if i < len(emitted_layers):
+            e = emitted_layers[i]
+            merged["thickness_drawn_m"] = drawn.get("thickness_m")
+            merged["thickness_m"] = e.get("thickness_m")
+            merged["y_top_m"] = e.get("y_top_m")
+            merged["y_bottom_m"] = e.get("y_bottom_m")
+            merged["is_terminal"] = bool(e.get("is_terminal", False))
+        labelled.append(merged)
+    return labelled
+
+
 def _build_simulation_rows(
     *,
     session_uuid: uuid.UUID,
@@ -2030,7 +2058,7 @@ def _build_simulation_rows(
             "pml_cells": cfg.pml_cells,
             "num_threads": cfg.num_threads,
             "output_dir": cfg.output_dir,
-            "layers": sample.get("layers", []),
+            "layers": _label_layers(sample, emitted),
             "num_layers": len(sample.get("layers", [])),
             "derived_layers": derived_by_sample.get(sample_id) or None,
             "cylinders": cylinders or None,

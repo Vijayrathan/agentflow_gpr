@@ -1013,11 +1013,14 @@ function overviewCaveats(scene) {
 
   if (scene.domain?.provisional)
     out.push(
-      "Domain size is a placeholder (~1.2× the layer stack) — the real grid is derived later from the wavelength budget.",
+      "Domain width and cell size are placeholders — the real grid is derived later from the wavelength budget. The plotted depth is the soil depth you specified.",
     );
   if (layers.length > 0) {
     out.push(
       "Layer thicknesses are range midpoints; the shaded bands show the min–max spread each sample is drawn from.",
+    );
+    out.push(
+      "The deepest layer is a terminal half-space: no thickness is drawn for it. It fills whatever the soil depth leaves over the layers above, and continues to the base of the model.",
     );
     out.push(
       epsProvisional

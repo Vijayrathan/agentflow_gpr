@@ -91,7 +91,9 @@ def _preview_frequency(store: Mapping[str, Any]) -> tuple[float, bool]:
     return peak_frequency(float(center), bool(cfg.get("center_freq_is_peak", True))), False
 
 
-def _project_range_layers(store: Mapping[str, Any]) -> Optional[list[dict]]:
+def _project_range_layers(
+    store: Mapping[str, Any], soil_depth_m: Optional[float] = None,
+) -> Optional[list[dict]]:
     section = store.get("layers") or {}
     raw = section.get("layers") or []
     if not raw:
@@ -99,16 +101,39 @@ def _project_range_layers(store: Mapping[str, Any]) -> Optional[list[dict]]:
     freq_hz, provisional = _preview_frequency(store)
     nbins = int((store.get("dataset_config") or {}).get("fractal_nbins") or DEFAULT_NBINS)
 
+    # The terminal layer carries no collected thickness (half-space). Preview it
+    # as whatever soil_depth_m leaves over the mid/max/min stack above it, so the
+    # canvas shows the column the user actually asked for.
+    soil_depth = (
+        soil_depth_m if soil_depth_m is not None
+        else (store.get("layers") or {}).get("soil_depth_m")
+    )
+    upper = raw[:-1]
+    mid_above = sum(_mid(l["thickness_m_min"], l["thickness_m_max"]) for l in upper)
+    min_above = sum(l["thickness_m_min"] for l in upper)
+    max_above = sum(l["thickness_m_max"] for l in upper)
+
     out = []
     for i, layer in enumerate(raw):
         sand = _mid(layer["sand_pct_min"], layer["sand_pct_max"])
         clay = _mid(layer["clay_pct_min"], layer["clay_pct_max"])
         eps_dry, eps_wet, eps_mid = _preview_eps(layer, freq_hz, nbins)
+        is_terminal = i == len(raw) - 1
+        if is_terminal:
+            # min extent pairs with the DEEPEST stack above it, and vice versa.
+            t_mid = None if soil_depth is None else max(0.0, soil_depth - mid_above)
+            t_min = None if soil_depth is None else max(0.0, soil_depth - max_above)
+            t_max = None if soil_depth is None else max(0.0, soil_depth - min_above)
+        else:
+            t_mid = _mid(layer["thickness_m_min"], layer["thickness_m_max"])
+            t_min = layer["thickness_m_min"]
+            t_max = layer["thickness_m_max"]
         out.append({
             "name": layer.get("name") or f"layer_{i + 1}",
-            "thickness_mid_m": _round(_mid(layer["thickness_m_min"], layer["thickness_m_max"])),
-            "thickness_min_m": _round(layer["thickness_m_min"]),
-            "thickness_max_m": _round(layer["thickness_m_max"]),
+            "terminal": is_terminal,
+            "thickness_mid_m": _round(t_mid),
+            "thickness_min_m": _round(t_min),
+            "thickness_max_m": _round(t_max),
             "sand_pct_mid": _round(sand, 2),
             "clay_pct_mid": _round(clay, 2),
             "silt_pct_mid": _round(100.0 - sand - clay, 2),
@@ -194,9 +219,12 @@ def _provisional_domain(ranges: Optional[dict]) -> dict:
     depth = 0.0
     width = 1.0
     if ranges:
+        # The layer stack already spans the whole collected soil column (the
+        # terminal layer absorbs the remainder), so the plot depth IS that sum.
+        # Inflating it would draw a phantom gap under the deepest layer, and
+        # there is no background medium below it — it runs to the domain floor.
         for layer in ranges.get("layers") or []:
             depth += layer["thickness_mid_m"] or 0.0
-        depth *= 1.2
         for target in ranges.get("targets") or []:
             hx, hy = _target_half_extents_worst(target)
             off_worst = max(
@@ -225,6 +253,7 @@ def _project_samples(
     out_dir: Path,
     flags: Mapping[str, bool],
     range_layers: Optional[list[dict]],
+    soil_depth_m: Optional[float] = None,
 ) -> Optional[dict]:
     manifest = _load_json(out_dir / "sampled_layers.json")
     if not manifest or not manifest.get("samples"):
@@ -243,7 +272,14 @@ def _project_samples(
         sid = int(sample["sample_id"])
         dlayers = derived_by_id.get(sid, [])
         layers = []
-        for i, layer in enumerate(sample.get("layers") or []):
+        sample_layers = sample.get("layers") or []
+        # The terminal half-space draws no thickness; show the extent the column
+        # actually leaves it so the sample view renders a complete stack.
+        terminal_extent = None
+        if soil_depth_m is not None and sample_layers:
+            above = sum(l.get("thickness_m") or 0.0 for l in sample_layers[:-1])
+            terminal_extent = max(0.0, soil_depth_m - above)
+        for i, layer in enumerate(sample_layers):
             eps_dry = eps_wet = None
             if i < len(dlayers):
                 eps_dry = dlayers[i].get("eps_r_dry")
@@ -254,7 +290,11 @@ def _project_samples(
             eps_mid = None if eps_dry is None or eps_wet is None else (eps_dry + eps_wet) / 2.0
             layers.append({
                 "name": layer.get("name") or f"layer_{i + 1}",
-                "thickness_m": _round(layer["thickness_m"]),
+                "thickness_m": _round(
+                    terminal_extent if (i == len(sample_layers) - 1
+                                        and layer.get("thickness_m") is None)
+                    else layer.get("thickness_m")
+                ),
                 "sand_pct": _round(layer.get("sand_pct"), 2),
                 "clay_pct": _round(layer.get("clay_pct"), 2),
                 "silt_pct": _round(layer.get("silt_pct"), 2),
@@ -309,6 +349,25 @@ def _project_grid(out_dir: Path) -> Optional[dict]:
     }
 
 
+def _effective_soil_depth(
+    store: Mapping[str, Optional[dict]], out_dir: Optional[Path],
+    flags: Mapping[str, bool],
+) -> Optional[float]:
+    """The soil column the terminal half-space actually fills.
+
+    Before global_derive this is the collected `soil_depth_m`; afterwards it is
+    the derived `depth_z_m`, which may be DEEPER (range resolution, buried-target
+    depth floor, or the upper stack plus the terminal reservation). Previewing
+    the collected value once the grid exists would under-draw the terminal layer
+    and reopen a gap under it.
+    """
+    if out_dir is not None and flags.get("grid"):
+        grid = _load_json(out_dir / "global_derive.json")
+        if isinstance(grid, dict) and grid.get("depth_z_m"):
+            return float(grid["depth_z_m"])
+    return (store.get("layers") or {}).get("soil_depth_m")
+
+
 def build_scene(
     store: Mapping[str, Optional[dict]],
     flags: Mapping[str, bool],
@@ -321,7 +380,9 @@ def build_scene(
                                       "waveform", "antenna")):
         return None
 
-    range_layers = _project_range_layers(store)
+    out_dir_for_depth = Path(output_dir) if output_dir else None
+    soil_depth = _effective_soil_depth(store, out_dir_for_depth, flags)
+    range_layers = _project_range_layers(store, soil_depth)
     range_targets = _project_range_targets(store)
     ranges = None
     if range_layers or range_targets:
@@ -332,7 +393,9 @@ def build_scene(
     if output_dir:
         out_dir = Path(output_dir)
         if flags.get("sampled"):
-            samples = _project_samples(out_dir, flags, range_layers)
+            samples = _project_samples(
+                out_dir, flags, range_layers, soil_depth_m=soil_depth,
+            )
         if flags.get("grid"):
             grid = _project_grid(out_dir)
 

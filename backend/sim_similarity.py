@@ -167,10 +167,26 @@ def build_feature_payload(
     if len(tr.boxes) > MAX_BOXES:
         raise ValueError(f"{len(tr.boxes)} boxes exceed MAX_BOXES {MAX_BOXES}")
 
+    # The terminal half-space collects no thickness range. Keep the vector
+    # LENGTH identical by filling its slot with the extent the collected
+    # soil_depth_m leaves over the stack above it (min extent pairs with the
+    # deepest stack, and vice versa) — changing the dimensionality would
+    # invalidate every point already in the sim_sessions collection.
+    _upper = lay.layers[:-1]
+    _min_above = sum(x.thickness_m_min for x in _upper)
+    _max_above = sum(x.thickness_m_max for x in _upper)
+    _terminal_pair = [
+        max(0.0, lay.soil_depth_m - _max_above),
+        max(0.0, lay.soil_depth_m - _min_above),
+    ]
+
     layer_entries = [
         {
             "name": l.name,
-            "thickness_m": _pair(l.thickness_m_min, l.thickness_m_max),
+            "thickness_m": (
+                _terminal_pair if l.thickness_m_min is None
+                else _pair(l.thickness_m_min, l.thickness_m_max)
+            ),
             "sand_pct": _pair(l.sand_pct_min, l.sand_pct_max),
             "clay_pct": _pair(l.clay_pct_min, l.clay_pct_max),
             "theta_v": _pair(l.theta_v_min, l.theta_v_max),

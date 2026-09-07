@@ -27,8 +27,8 @@ def scenario():
     cfg = DatasetConfig(num_samples=1)
     wf = ExtractedWaveform(waveform_center_freq_hz=0.7e9, waveform_name="test pulse")
     ant = ExtractedAntenna(tx_rx_offset_m=0.1)
-    layers = ExtractedLayers(num_layers=1, layers=[{
-        "name": "soil", "thickness_m_min": 0.3, "thickness_m_max": 0.3,
+    layers = ExtractedLayers(num_layers=1, soil_depth_m=0.3, layers=[{
+        "name": "soil",
         "sand_pct_min": 35, "sand_pct_max": 35,
         "clay_pct_min": 10, "clay_pct_max": 10,
         "theta_v_min": 0.05, "theta_v_max": 0.2,
@@ -37,7 +37,7 @@ def scenario():
     }])
     grid = derive_global(cfg, wf, ant, layers, 16.0, 4.0)
     sample = SampledSample(sample_id=1, layers=[SampledLayer(
-        name="soil", thickness_m=0.3, sand_pct=35, clay_pct=10, silt_pct=55,
+        name="soil", sand_pct=35, clay_pct=10, silt_pct=55,
         theta_v_min=0.05, theta_v_max=0.2,
         bulk_density_gcm3=1.5, particle_density_gcm3=2.66,
     )])

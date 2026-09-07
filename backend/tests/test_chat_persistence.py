@@ -23,10 +23,9 @@ class FakeWS:
 
 
 VALID_LAYERS = {
-    "num_layers": 1,
+    "num_layers": 1, "soil_depth_m": 0.5,
     "layers": [{
         "name": "sandy_loam",
-        "thickness_m_min": 0.3, "thickness_m_max": 0.5,
         "sand_pct_min": 30.0, "sand_pct_max": 40.0,
         "clay_pct_min": 5.0, "clay_pct_max": 15.0,
         "theta_v_min": 0.05, "theta_v_max": 0.20,

@@ -34,11 +34,10 @@ def reset_store():
 
 VALID_LAYERS = {
     "num_layers": 1,
+    "soil_depth_m": 0.5,
     "layers": [
         {
             "name": "sandy_loam",
-            "thickness_m_min": 0.3,
-            "thickness_m_max": 0.5,
             "sand_pct_min": 30.0,
             "sand_pct_max": 40.0,
             "clay_pct_min": 5.0,
@@ -96,7 +95,7 @@ def test_save_valid_section_stores_and_completes():
 
 def test_save_valid_but_incomplete_is_stored_incomplete():
     # Schema-valid (num_layers == len(layers) == 0) but essential content missing.
-    out = _save("layers", {"num_layers": 0, "layers": []})
+    out = _save("layers", {"num_layers": 0, "soil_depth_m": 1.0, "layers": []})
     assert out["status"] == "stored_incomplete"
     assert sap._STORE["layers"] is not None
     assert not sap._stage_done("layers")
@@ -227,7 +226,7 @@ def test_changed_sections_diff():
     _save("layers", VALID_LAYERS)
     before = sap._store_snapshot()
     edited = json.loads(json.dumps(VALID_LAYERS))
-    edited["layers"][0]["thickness_m_max"] = 0.8
+    edited["soil_depth_m"] = 0.8
     _save("layers", edited)
     _save("dataset_config", {"num_samples": 3})
     changed = sap._changed_sections(before, sap._store_snapshot())
@@ -252,7 +251,7 @@ def test_samples_stale():
     assert not sap._samples_stale(state)
     # A cross-edit to layers after sampling -> stale
     edited = json.loads(json.dumps(VALID_LAYERS))
-    edited["layers"][0]["thickness_m_max"] = 0.8
+    edited["soil_depth_m"] = 0.8
     state["layers"] = edited
     assert sap._samples_stale(state)
 

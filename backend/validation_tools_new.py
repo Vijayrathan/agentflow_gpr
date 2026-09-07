@@ -345,8 +345,18 @@ def validate_antenna_placement(
 def validate_layer_thickness_and_stack(
     layer_names: Sequence[str], thicknesses_m: Sequence[float],
     max_cell_m: float, global_depth_m: float, min_cells: int = 3,
+    terminal_min_m: float = 0.0, requested_depth_m: Optional[float] = None,
+    terminal_name: str = "terminal half-space",
 ) -> Tuple[List[str], List[str]]:
-    """Each layer spans >= min_cells; total stack must fit the GLOBAL depth box."""
+    """Each layer spans >= min_cells; the stack must fit the GLOBAL depth box.
+
+    `layer_names`/`thicknesses_m` cover only the layers ABOVE the terminal
+    half-space — the terminal layer carries no collected thickness. It instead
+    reserves `terminal_min_m` of the depth budget, so the stack that must fit is
+    sum(thicknesses) + terminal_min_m. `requested_depth_m` is the user's
+    collected soil_depth_m: when the floors forced a deeper column than asked
+    for, that is reported as a warning rather than silently applied.
+    """
     e: List[str] = []; w: List[str] = []
     if max_cell_m <= 0:
         return ["max_cell_m must be > 0"], []
@@ -354,9 +364,25 @@ def validate_layer_thickness_and_stack(
         cells = t / max_cell_m
         if cells < min_cells:
             w.append(f"layer '{name}' is {cells:.1f} cells (< {min_cells})")
-    total = sum(thicknesses_m)
+    upper = sum(thicknesses_m)
+    total = upper + terminal_min_m
     if total > global_depth_m + 1e-9:
-        e.append(f"layer stack {total:.4f} m exceeds global depth {global_depth_m:.4f} m")
+        e.append(
+            f"layer stack {upper:.4f} m + {terminal_name} reservation "
+            f"{terminal_min_m:.4f} m = {total:.4f} m exceeds global depth "
+            f"{global_depth_m:.4f} m"
+        )
+    else:
+        terminal_extent = global_depth_m - upper
+        cells = terminal_extent / max_cell_m
+        if cells < min_cells:
+            w.append(f"{terminal_name} is {cells:.1f} cells (< {min_cells})")
+    if requested_depth_m is not None and global_depth_m > requested_depth_m + 1e-9:
+        w.append(
+            f"soil depth widened from the requested {requested_depth_m:.4f} m to "
+            f"{global_depth_m:.4f} m to fit the layer stack, range resolution or "
+            "target depth"
+        )
     return e, w
 
 
