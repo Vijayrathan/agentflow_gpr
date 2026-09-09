@@ -220,6 +220,9 @@ class DatasetConfig(BaseModel):
     model_basename: str = "soil_sample"   # -> #title and output filename stem
     output_dir: str = "./dataset"
     num_threads: Optional[int] = None      # OpenMP threads; None -> gprMax default
+    moisture_sampling: Literal["preserve_band", "uniform_per_sample"] = Field(
+        "preserve_band", description="Preserve each layer's moisture band, or draw one uniform moisture value per sample from its bounds.")
+    moisture_seed: int = Field(42, ge=0, description="Independent moisture seed; reuse with the same layer order and ranges for paired datasets.")
 
     # FDTD boundary / grid policy (enter the GLOBAL derive downstream)
     pml_cells: int = Field(10, ge=0)       # gprMax default; in-plane for 2D
@@ -235,7 +238,8 @@ class DatasetConfig(BaseModel):
     center_freq_is_peak: bool = True
 
     # Soil build: #soil_peplinski via #fractal_box needs a material count.
-    fractal_nbins: int = Field(50, gt=0)
+    # Native Peplinski bin construction requires two endpoints, even when equal.
+    fractal_nbins: int = Field(50, ge=2)
 
     def gprmax_pml_cells(self) -> Tuple[int, int, int, int, int, int]:
         """Six-face #pml_cells tuple in gprMax order: x0 y0 z0 xmax ymax zmax."""
@@ -254,9 +258,9 @@ class DatasetConfig(BaseModel):
 class ExtractedLayerParams(BaseModel):
     """One soil layer (STAGE 1). Ranges are sampled per-sample downstream.
 
-    The sampler must draw EVERY field declared as a range here. If a quantity
-    is meant to be fixed, set min == max. Silt is NOT collected — it is a
-    derived label (100 - sand - clay) computed downstream.
+    Texture, density and finite thickness ranges are sampled. Moisture follows
+    DatasetConfig.moisture_sampling. Fixed quantities use min == max. Silt is
+    a derived label (100 - sand - clay), not collected.
     """
     name: Optional[str] = None
 
@@ -276,9 +280,8 @@ class ExtractedLayerParams(BaseModel):
     clay_pct_min: float
     clay_pct_max: float
 
-    # Volumetric water content (fraction 0-1) — the per-layer ENVELOPE. Per
-    # sample, the sampler draws a sub-band inside this envelope and passes it to
-    # #soil_peplinski (which consumes a (min, max) range, not a scalar).
+    # Volumetric water content (fraction 0-1). DatasetConfig.moisture_sampling
+    # selects a preserved spatial band or a population range for scalar draws.
     theta_v_min: float
     theta_v_max: float
 
@@ -590,9 +593,9 @@ class SampledLayer(BaseModel):
     """One concrete layer drawn from an ExtractedLayerParams range.
 
     sand/clay/thickness and both densities are drawn uniformly; silt_pct is the
-    derived texture-closure label (100 - sand - clay). theta_v is NOT drawn — the
-    per-layer (min, max) envelope is passed straight through because
-    #soil_peplinski consumes a moisture BAND, not a scalar.
+    derived texture-closure label (100 - sand - clay). Resolved moisture bounds
+    pass straight through to #soil_peplinski. In uniform_per_sample mode both
+    endpoints contain that sample's moisture label.
     """
     name: Optional[str] = None
     # None for the terminal half-space layer: nothing is drawn for it, its
@@ -608,8 +611,8 @@ class SampledLayer(BaseModel):
 
     @model_validator(mode="after")
     def _band_ok(self):
-        if self.theta_v_min >= self.theta_v_max:
-            raise ValueError("theta_v_min must be < theta_v_max (need a real moisture band)")
+        if self.theta_v_min > self.theta_v_max:
+            raise ValueError("theta_v_min must be <= theta_v_max (equal bounds are uniform)")
         return self
 
 

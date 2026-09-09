@@ -230,6 +230,12 @@ SECTION_KICKOFF = {
 (required, > 0). NOTE: this is the number of .in files, NOT time samples.
    - model_basename: base name for the #title and output filename stem \
 (default: "soil_sample")
+   - moisture_sampling: "preserve_band" (default, spatial variation within each \
+layer) or "uniform_per_sample" (one uniform moisture value per sample, drawn \
+from each layer's supplied theta_v_min/max population range).
+   - moisture_seed: nonnegative integer (default: 42). For matched varied/static \
+thickness datasets, use uniform_per_sample with the same moisture_seed, layer \
+order, moisture ranges and sample count. Thickness uses a separate random stream.
 
    **FDTD grid / boundary policy:**
    - pml_cells: number of in-plane PML absorbing boundary cells (default: 10).
@@ -239,7 +245,7 @@ SECTION_KICKOFF = {
    - cells_per_wavelength: cells per minimum wavelength, the λ/N rule \
 (default: 10; higher = more accurate but slower)
    - fractal_nbins: number of materials in the #soil_peplinski fractal series \
-(default: 50)
+(default: 50; minimum: 2, including when moisture bounds are equal)
 
    **Resolution & frequency policy:**
    - high_freq_factor: highest SIGNIFICANT frequency as a multiple of the \
@@ -274,8 +280,13 @@ thickness_m_max, in metres) for every layer EXCEPT the deepest one
 (clay_pct_min/max), in percent. Do NOT collect silt — it is derived as \
 100 - sand - clay downstream.
    - volumetric water content range (theta_v_min / theta_v_max, \
-0.0–1.0). This is the per-layer moisture ENVELOPE; the sampler draws a \
-sub-band inside it per sample.
+0.0–1.0). In preserve_band mode these bounds pass unchanged into every sample. \
+In uniform_per_sample mode these are population bounds: the sampler draws one \
+value per sample/layer and writes that value as both native bounds. For first-layer \
+moisture estimation, vary only layer 1's moisture range and use equal bounds for \
+the lower layers. Equal bounds are allowed and must not be widened. In \
+uniform_per_sample mode the lower bound must be positive and the upper bound \
+must not exceed 0.30 or the feasible pore space.
    - density ranges — bulk_density_gcm3_min/max and \
 particle_density_gcm3_min/max (g/cm³). These are REQUIRED (porosity is \
 derived from them).

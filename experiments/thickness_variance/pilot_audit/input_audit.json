@@ -1,0 +1,75 @@
+{
+  "status": "PASS_INPUT_AUDIT",
+  "arms": {
+    "A": {
+      "n": 100,
+      "unique_moisture": 100,
+      "moisture_min": 0.10004244286392915,
+      "moisture_max": 0.2988059245606888,
+      "unique_effective_thicknesses": 20,
+      "thickness_min_m": 0.181590985949,
+      "thickness_max_m": 0.23815211272000003,
+      "shape": [
+        419,
+        869,
+        1
+      ],
+      "parsed_dt_s": 7.021481418414096e-12,
+      "iterations": 10800,
+      "moisture_decile_counts": [
+        10,
+        11,
+        13,
+        11,
+        9,
+        7,
+        8,
+        10,
+        9,
+        12
+      ],
+      "moisture_thickness_pearson": -0.021779926593352456,
+      "existing_signal_outputs": 0
+    },
+    "B": {
+      "n": 100,
+      "unique_moisture": 100,
+      "moisture_min": 0.10004244286392915,
+      "moisture_max": 0.2988059245606888,
+      "unique_effective_thicknesses": 1,
+      "thickness_min_m": 0.21136000003900002,
+      "thickness_max_m": 0.21136000003900002,
+      "shape": [
+        419,
+        869,
+        1
+      ],
+      "parsed_dt_s": 7.021481418414096e-12,
+      "iterations": 10800,
+      "moisture_decile_counts": [
+        10,
+        11,
+        13,
+        11,
+        9,
+        7,
+        8,
+        10,
+        9,
+        12
+      ],
+      "moisture_thickness_pearson": null,
+      "existing_signal_outputs": 0
+    }
+  },
+  "exact_paired_moisture": true,
+  "exact_paired_material_commands": true,
+  "exact_common_numerical_and_acquisition_commands": true,
+  "matched_ids_with_identical_geometry": [
+    9,
+    32,
+    55,
+    58
+  ],
+  "scope": "All 200 input files and native material/source parsing; no field solves in this stage"
+}

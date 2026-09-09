@@ -246,6 +246,8 @@ def build_feature_payload(
             "buffer_cells": cfg.buffer_cells,
             "fractal_nbins": cfg.fractal_nbins,
             "high_freq_factor": cfg.high_freq_factor,
+            "moisture_sampling": cfg.moisture_sampling,
+            "moisture_seed": cfg.moisture_seed,
         },
         "cylinders": cylinders,
         "boxes": boxes,
@@ -331,6 +333,8 @@ def hard_filters(payload: dict) -> dict:
         "pml_cells": gp["pml_cells"],
         "buffer_cells": gp["buffer_cells"],
         "fractal_nbins": gp["fractal_nbins"],
+        "moisture_sampling": gp.get("moisture_sampling", "preserve_band"),
+        "moisture_seed": gp.get("moisture_seed", 42) if gp.get("moisture_sampling") == "uniform_per_sample" else 0,
         # float -> int encoding for exact matching
         "high_freq_factor_x100": int(round(gp["high_freq_factor"] * 100)),
     }
@@ -511,6 +515,8 @@ class SimilarityIndex:
             "pml_cells": PayloadSchemaType.INTEGER,
             "buffer_cells": PayloadSchemaType.INTEGER,
             "fractal_nbins": PayloadSchemaType.INTEGER,
+            "moisture_sampling": PayloadSchemaType.KEYWORD,
+            "moisture_seed": PayloadSchemaType.INTEGER,
             "high_freq_factor_x100": PayloadSchemaType.INTEGER,
             "has_surface_roughness": PayloadSchemaType.BOOL,
         }

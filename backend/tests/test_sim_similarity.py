@@ -148,7 +148,19 @@ def test_hard_filters_contents():
         "buffer_cells": 10,
         "fractal_nbins": 50,
         "high_freq_factor_x100": 300,
+        "moisture_sampling": "preserve_band",
+        "moisture_seed": 0,
     }
+
+
+def test_moisture_policy_and_seed_are_reuse_boundaries():
+    band = make_payload()
+    uniform = make_payload()
+    uniform["grid_policy"].update(moisture_sampling="uniform_per_sample", moisture_seed=71)
+    assert ss.hard_filters(band) != ss.hard_filters(uniform)
+    other_seed = make_payload()
+    other_seed["grid_policy"].update(moisture_sampling="uniform_per_sample", moisture_seed=72)
+    assert ss.hard_filters(uniform) != ss.hard_filters(other_seed)
 
 
 # ---------------------------------------------------------------------------

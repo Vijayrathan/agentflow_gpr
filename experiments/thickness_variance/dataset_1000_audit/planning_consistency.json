@@ -1,0 +1,16 @@
+{
+  "A": {
+    "matches_1000_sample_plan": true,
+    "emitted_numerics_match_plan": true,
+    "frequency_and_source_height_checks": true,
+    "max_thickness_snapping_error_m": 0.001485677011746872,
+    "half_cell_m": 0.001487133808714488
+  },
+  "B": {
+    "matches_1000_sample_plan": true,
+    "emitted_numerics_match_plan": true,
+    "frequency_and_source_height_checks": true,
+    "max_thickness_snapping_error_m": 0.0012209026823293834,
+    "half_cell_m": 0.001487133808714488
+  }
+}

@@ -174,16 +174,16 @@ def validate_sampled_layer(
     bulk_density: float, particle_density: float,
     enforce_validity: bool = True,
 ) -> Tuple[List[str], List[str]]:
-    """Concrete drawn values. theta_v is a BAND (min,max) passed to #soil_peplinski.
-    Note: gprMax instantiates materials at bin MIDPOINTS, so the wettest material
-    sits half a bin above theta_v_max — bind the porosity cap on the band top with
-    a small margin in your sampler if you draw near the limit."""
+    """Concrete drawn values. theta_v bounds pass unchanged to #soil_peplinski.
+    Equal bounds produce uniform moisture. For a nonzero band, gprMax shifts
+    materials by half a bin, so the wettest material sits above theta_v_max;
+    that overshoot must also fit the physical limits."""
     e: List[str] = []; w: List[str] = []
 
     if abs(sand + silt + clay - 100.0) > 0.01:
         e.append(f"sand+silt+clay={sand+silt+clay:.2f}, must be 100")
-    if theta_v_min >= theta_v_max:
-        e.append("theta_v_min must be < theta_v_max (real moisture band)")  # ALSO in schema; cheap to re-assert
+    if theta_v_min > theta_v_max:
+        e.append("theta_v_min must be <= theta_v_max (equal bounds are uniform)")  # ALSO in schema; cheap to re-assert
 
     if bulk_density >= particle_density:
         e.append(f"bulk_density {bulk_density:.3f} >= particle_density {particle_density:.3f}")

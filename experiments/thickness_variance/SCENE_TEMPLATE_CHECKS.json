@@ -1,0 +1,55 @@
+{
+  "stage": "scene template generation checks; no field solves",
+  "arms": {
+    "A": {
+      "samples_checked": 100,
+      "errors": [],
+      "warnings": [
+        "[cfl_and_iterations] dt=5.733e-12 s, iterations=13,226 for window 7.582e-08 s"
+      ],
+      "top_thickness_requested_min": 0.180564,
+      "top_thickness_requested_max": 0.239402,
+      "top_thickness_effective_min": 0.18159098597516476,
+      "top_thickness_effective_max": 0.23815211275431447
+    },
+    "B": {
+      "samples_checked": 100,
+      "errors": [],
+      "warnings": [
+        "[cfl_and_iterations] dt=5.733e-12 s, iterations=13,226 for window 7.582e-08 s"
+      ],
+      "top_thickness_requested_min": 0.21,
+      "top_thickness_requested_max": 0.21,
+      "top_thickness_effective_min": 0.211360000069454,
+      "top_thickness_effective_max": 0.211360000069454
+    }
+  },
+  "exact_moisture_pairing": true,
+  "identical_global_plan": true,
+  "identical_emitted_acquisition_and_numerics": true,
+  "global_plan": {
+    "f_peak_hz": 750000000.0,
+    "f_min_hz": 361217250.0,
+    "f_max_hz": 1227425250.0,
+    "bandwidth_hz": 866208000.0,
+    "f_high_hz": 2250000000.0,
+    "eps_r_max_global": 20.033068048588323,
+    "eps_r_min_global": 1.0,
+    "dx_m": 0.0029769014094289275,
+    "lambda_min_m": 0.029769014094289274,
+    "lambda_max_m": 0.8299505574553818,
+    "surface_xy_m": 1.2449258361830728,
+    "source_height_m": 0.45,
+    "depth_z_m": 2.0,
+    "domain_x_m": 1.2473216905507207,
+    "domain_y_m": 2.586927324793738,
+    "dt_s": 7.021481419425786e-12,
+    "time_window_s": 7.582252499909128e-08,
+    "peplinski_gate_ok": true,
+    "ground_y_m": 2.0595380281885785,
+    "tx_x_m": 0.5836608452753603,
+    "rx_x_m": 0.6636608452753604,
+    "tx_y_m": 2.5095380281885786,
+    "rx_y_m": 2.5095380281885786
+  }
+}

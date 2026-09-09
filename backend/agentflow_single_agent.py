@@ -763,6 +763,8 @@ def layer_sampling_node(state: PipelineState) -> dict:
         output_dir=dataset_cfg.output_dir,
         seed=42,
         target_ranges=target_ranges,
+        moisture_sampling=dataset_cfg.moisture_sampling,
+        moisture_seed=dataset_cfg.moisture_seed,
     )
     print(f"  Wrote {len(samples)} sampled parameter set(s) to:\n    {path}")
     if warnings:

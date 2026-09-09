@@ -1,0 +1,1402 @@
+[
+  {
+    "arm": "A",
+    "sample_id": 1,
+    "theta": 0.2842934216721779,
+    "requested_thickness_m": 0.218366,
+    "effective_thickness_m": 0.21731380285700003
+  },
+  {
+    "arm": "A",
+    "sample_id": 2,
+    "theta": 0.16799105582616805,
+    "requested_thickness_m": 0.218993,
+    "effective_thickness_m": 0.220290704266
+  },
+  {
+    "arm": "A",
+    "sample_id": 3,
+    "theta": 0.17610593725253448,
+    "requested_thickness_m": 0.23085,
+    "effective_thickness_m": 0.23219830990200002
+  },
+  {
+    "arm": "A",
+    "sample_id": 4,
+    "theta": 0.23897680622549491,
+    "requested_thickness_m": 0.193674,
+    "effective_thickness_m": 0.19349859158500002
+  },
+  {
+    "arm": "A",
+    "sample_id": 5,
+    "theta": 0.12120813281380644,
+    "requested_thickness_m": 0.190268,
+    "effective_thickness_m": 0.190521690176
+  },
+  {
+    "arm": "A",
+    "sample_id": 6,
+    "theta": 0.22874291041971487,
+    "requested_thickness_m": 0.192659,
+    "effective_thickness_m": 0.19349859158500002
+  },
+  {
+    "arm": "A",
+    "sample_id": 7,
+    "theta": 0.27258896698649504,
+    "requested_thickness_m": 0.203964,
+    "effective_thickness_m": 0.205406197221
+  },
+  {
+    "arm": "A",
+    "sample_id": 8,
+    "theta": 0.23624462546974964,
+    "requested_thickness_m": 0.238265,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 9,
+    "theta": 0.24608994583423283,
+    "requested_thickness_m": 0.210035,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "A",
+    "sample_id": 10,
+    "theta": 0.13145450707666756,
+    "requested_thickness_m": 0.181169,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 11,
+    "theta": 0.2291258975211254,
+    "requested_thickness_m": 0.208517,
+    "effective_thickness_m": 0.20838309863
+  },
+  {
+    "arm": "A",
+    "sample_id": 12,
+    "theta": 0.28672492560987495,
+    "requested_thickness_m": 0.18726,
+    "effective_thickness_m": 0.187544788767
+  },
+  {
+    "arm": "A",
+    "sample_id": 13,
+    "theta": 0.2485968471713609,
+    "requested_thickness_m": 0.192854,
+    "effective_thickness_m": 0.19349859158500002
+  },
+  {
+    "arm": "A",
+    "sample_id": 14,
+    "theta": 0.10337249801888887,
+    "requested_thickness_m": 0.23905,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 15,
+    "theta": 0.169971717451189,
+    "requested_thickness_m": 0.21302,
+    "effective_thickness_m": 0.21433690144800002
+  },
+  {
+    "arm": "A",
+    "sample_id": 16,
+    "theta": 0.27346633704058065,
+    "requested_thickness_m": 0.195912,
+    "effective_thickness_m": 0.19647549299400002
+  },
+  {
+    "arm": "A",
+    "sample_id": 17,
+    "theta": 0.10004244286392915,
+    "requested_thickness_m": 0.18343,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 18,
+    "theta": 0.13310619971013216,
+    "requested_thickness_m": 0.215671,
+    "effective_thickness_m": 0.21433690144800002
+  },
+  {
+    "arm": "A",
+    "sample_id": 19,
+    "theta": 0.2630382302514553,
+    "requested_thickness_m": 0.184353,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 20,
+    "theta": 0.1975711949274503,
+    "requested_thickness_m": 0.216701,
+    "effective_thickness_m": 0.21731380285700003
+  },
+  {
+    "arm": "A",
+    "sample_id": 21,
+    "theta": 0.11990108496719437,
+    "requested_thickness_m": 0.223057,
+    "effective_thickness_m": 0.223267605675
+  },
+  {
+    "arm": "A",
+    "sample_id": 22,
+    "theta": 0.2013084047894778,
+    "requested_thickness_m": 0.224474,
+    "effective_thickness_m": 0.223267605675
+  },
+  {
+    "arm": "A",
+    "sample_id": 23,
+    "theta": 0.2344607468189933,
+    "requested_thickness_m": 0.227767,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 24,
+    "theta": 0.28720213059252453,
+    "requested_thickness_m": 0.228646,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 25,
+    "theta": 0.18702272895864588,
+    "requested_thickness_m": 0.193346,
+    "effective_thickness_m": 0.19349859158500002
+  },
+  {
+    "arm": "A",
+    "sample_id": 26,
+    "theta": 0.2988059245606888,
+    "requested_thickness_m": 0.238869,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 27,
+    "theta": 0.1655890444308828,
+    "requested_thickness_m": 0.203112,
+    "effective_thickness_m": 0.202429295812
+  },
+  {
+    "arm": "A",
+    "sample_id": 28,
+    "theta": 0.15080301092817322,
+    "requested_thickness_m": 0.198835,
+    "effective_thickness_m": 0.19945239440300003
+  },
+  {
+    "arm": "A",
+    "sample_id": 29,
+    "theta": 0.16366488793550665,
+    "requested_thickness_m": 0.198057,
+    "effective_thickness_m": 0.19945239440300003
+  },
+  {
+    "arm": "A",
+    "sample_id": 30,
+    "theta": 0.2847257229390813,
+    "requested_thickness_m": 0.185088,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 31,
+    "theta": 0.18744065481752975,
+    "requested_thickness_m": 0.204866,
+    "effective_thickness_m": 0.205406197221
+  },
+  {
+    "arm": "A",
+    "sample_id": 32,
+    "theta": 0.14370080128528018,
+    "requested_thickness_m": 0.211077,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "A",
+    "sample_id": 33,
+    "theta": 0.12041638783160769,
+    "requested_thickness_m": 0.229834,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 34,
+    "theta": 0.1079560712127466,
+    "requested_thickness_m": 0.196303,
+    "effective_thickness_m": 0.19647549299400002
+  },
+  {
+    "arm": "A",
+    "sample_id": 35,
+    "theta": 0.2882993879284452,
+    "requested_thickness_m": 0.215045,
+    "effective_thickness_m": 0.21433690144800002
+  },
+  {
+    "arm": "A",
+    "sample_id": 36,
+    "theta": 0.14362824320152617,
+    "requested_thickness_m": 0.193232,
+    "effective_thickness_m": 0.19349859158500002
+  },
+  {
+    "arm": "A",
+    "sample_id": 37,
+    "theta": 0.12076534135767109,
+    "requested_thickness_m": 0.181626,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 38,
+    "theta": 0.28586253849014964,
+    "requested_thickness_m": 0.181163,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 39,
+    "theta": 0.25580236524881794,
+    "requested_thickness_m": 0.213838,
+    "effective_thickness_m": 0.21433690144800002
+  },
+  {
+    "arm": "A",
+    "sample_id": 40,
+    "theta": 0.16553375739489534,
+    "requested_thickness_m": 0.23749,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 41,
+    "theta": 0.24318539463778557,
+    "requested_thickness_m": 0.205703,
+    "effective_thickness_m": 0.205406197221
+  },
+  {
+    "arm": "A",
+    "sample_id": 42,
+    "theta": 0.2794557254516554,
+    "requested_thickness_m": 0.196205,
+    "effective_thickness_m": 0.19647549299400002
+  },
+  {
+    "arm": "A",
+    "sample_id": 43,
+    "theta": 0.11743667610979391,
+    "requested_thickness_m": 0.202739,
+    "effective_thickness_m": 0.202429295812
+  },
+  {
+    "arm": "A",
+    "sample_id": 44,
+    "theta": 0.2635062633784937,
+    "requested_thickness_m": 0.209315,
+    "effective_thickness_m": 0.20838309863
+  },
+  {
+    "arm": "A",
+    "sample_id": 45,
+    "theta": 0.21033577869661219,
+    "requested_thickness_m": 0.224756,
+    "effective_thickness_m": 0.223267605675
+  },
+  {
+    "arm": "A",
+    "sample_id": 46,
+    "theta": 0.1438782681610965,
+    "requested_thickness_m": 0.238596,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 47,
+    "theta": 0.23570862347698232,
+    "requested_thickness_m": 0.232108,
+    "effective_thickness_m": 0.23219830990200002
+  },
+  {
+    "arm": "A",
+    "sample_id": 48,
+    "theta": 0.21124485698459503,
+    "requested_thickness_m": 0.183217,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 49,
+    "theta": 0.1916578418321187,
+    "requested_thickness_m": 0.239402,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 50,
+    "theta": 0.28881524617734133,
+    "requested_thickness_m": 0.215629,
+    "effective_thickness_m": 0.21433690144800002
+  },
+  {
+    "arm": "A",
+    "sample_id": 51,
+    "theta": 0.12763894533773362,
+    "requested_thickness_m": 0.218858,
+    "effective_thickness_m": 0.220290704266
+  },
+  {
+    "arm": "A",
+    "sample_id": 52,
+    "theta": 0.2659498286895787,
+    "requested_thickness_m": 0.209628,
+    "effective_thickness_m": 0.20838309863
+  },
+  {
+    "arm": "A",
+    "sample_id": 53,
+    "theta": 0.25444470173545397,
+    "requested_thickness_m": 0.182414,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 54,
+    "theta": 0.14367092599352524,
+    "requested_thickness_m": 0.199788,
+    "effective_thickness_m": 0.19945239440300003
+  },
+  {
+    "arm": "A",
+    "sample_id": 55,
+    "theta": 0.27266956715784885,
+    "requested_thickness_m": 0.212556,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "A",
+    "sample_id": 56,
+    "theta": 0.23115893429470327,
+    "requested_thickness_m": 0.216532,
+    "effective_thickness_m": 0.21731380285700003
+  },
+  {
+    "arm": "A",
+    "sample_id": 57,
+    "theta": 0.16443308660809564,
+    "requested_thickness_m": 0.196405,
+    "effective_thickness_m": 0.19647549299400002
+  },
+  {
+    "arm": "A",
+    "sample_id": 58,
+    "theta": 0.11891125395784029,
+    "requested_thickness_m": 0.210464,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "A",
+    "sample_id": 59,
+    "theta": 0.2748712199059043,
+    "requested_thickness_m": 0.191319,
+    "effective_thickness_m": 0.190521690176
+  },
+  {
+    "arm": "A",
+    "sample_id": 60,
+    "theta": 0.1281124801840074,
+    "requested_thickness_m": 0.182221,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 61,
+    "theta": 0.24299831669781993,
+    "requested_thickness_m": 0.200314,
+    "effective_thickness_m": 0.19945239440300003
+  },
+  {
+    "arm": "A",
+    "sample_id": 62,
+    "theta": 0.20296989888509195,
+    "requested_thickness_m": 0.235256,
+    "effective_thickness_m": 0.23517521131100003
+  },
+  {
+    "arm": "A",
+    "sample_id": 63,
+    "theta": 0.12158585821598066,
+    "requested_thickness_m": 0.188734,
+    "effective_thickness_m": 0.187544788767
+  },
+  {
+    "arm": "A",
+    "sample_id": 64,
+    "theta": 0.1741174946227126,
+    "requested_thickness_m": 0.180564,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 65,
+    "theta": 0.25084209728454737,
+    "requested_thickness_m": 0.208992,
+    "effective_thickness_m": 0.20838309863
+  },
+  {
+    "arm": "A",
+    "sample_id": 66,
+    "theta": 0.11591636416993306,
+    "requested_thickness_m": 0.209804,
+    "effective_thickness_m": 0.20838309863
+  },
+  {
+    "arm": "A",
+    "sample_id": 67,
+    "theta": 0.15526701606142604,
+    "requested_thickness_m": 0.21878,
+    "effective_thickness_m": 0.21731380285700003
+  },
+  {
+    "arm": "A",
+    "sample_id": 68,
+    "theta": 0.14933729034480572,
+    "requested_thickness_m": 0.229828,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 69,
+    "theta": 0.11801210095902692,
+    "requested_thickness_m": 0.238036,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 70,
+    "theta": 0.19973779198896086,
+    "requested_thickness_m": 0.181501,
+    "effective_thickness_m": 0.181590985949
+  },
+  {
+    "arm": "A",
+    "sample_id": 71,
+    "theta": 0.11057863789076716,
+    "requested_thickness_m": 0.185832,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 72,
+    "theta": 0.29327028310748837,
+    "requested_thickness_m": 0.237091,
+    "effective_thickness_m": 0.23815211272000003
+  },
+  {
+    "arm": "A",
+    "sample_id": 73,
+    "theta": 0.29049036302086884,
+    "requested_thickness_m": 0.230882,
+    "effective_thickness_m": 0.23219830990200002
+  },
+  {
+    "arm": "A",
+    "sample_id": 74,
+    "theta": 0.25995759494915316,
+    "requested_thickness_m": 0.232182,
+    "effective_thickness_m": 0.23219830990200002
+  },
+  {
+    "arm": "A",
+    "sample_id": 75,
+    "theta": 0.15733033802245106,
+    "requested_thickness_m": 0.194276,
+    "effective_thickness_m": 0.19349859158500002
+  },
+  {
+    "arm": "A",
+    "sample_id": 76,
+    "theta": 0.16099137499465066,
+    "requested_thickness_m": 0.226994,
+    "effective_thickness_m": 0.226244507084
+  },
+  {
+    "arm": "A",
+    "sample_id": 77,
+    "theta": 0.2040835713690563,
+    "requested_thickness_m": 0.183941,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 78,
+    "theta": 0.1580140064387922,
+    "requested_thickness_m": 0.22325,
+    "effective_thickness_m": 0.223267605675
+  },
+  {
+    "arm": "A",
+    "sample_id": 79,
+    "theta": 0.2536372727832575,
+    "requested_thickness_m": 0.229906,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 80,
+    "theta": 0.14989466717840821,
+    "requested_thickness_m": 0.223264,
+    "effective_thickness_m": 0.223267605675
+  },
+  {
+    "arm": "A",
+    "sample_id": 81,
+    "theta": 0.1898377312314123,
+    "requested_thickness_m": 0.230709,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 82,
+    "theta": 0.1435557421827191,
+    "requested_thickness_m": 0.232192,
+    "effective_thickness_m": 0.23219830990200002
+  },
+  {
+    "arm": "A",
+    "sample_id": 83,
+    "theta": 0.19641154703178285,
+    "requested_thickness_m": 0.185097,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 84,
+    "theta": 0.1726604573585231,
+    "requested_thickness_m": 0.220709,
+    "effective_thickness_m": 0.220290704266
+  },
+  {
+    "arm": "A",
+    "sample_id": 85,
+    "theta": 0.28036859067251213,
+    "requested_thickness_m": 0.190542,
+    "effective_thickness_m": 0.190521690176
+  },
+  {
+    "arm": "A",
+    "sample_id": 86,
+    "theta": 0.10577786052026637,
+    "requested_thickness_m": 0.22257,
+    "effective_thickness_m": 0.223267605675
+  },
+  {
+    "arm": "A",
+    "sample_id": 87,
+    "theta": 0.1332698916137186,
+    "requested_thickness_m": 0.203746,
+    "effective_thickness_m": 0.202429295812
+  },
+  {
+    "arm": "A",
+    "sample_id": 88,
+    "theta": 0.27470076749807004,
+    "requested_thickness_m": 0.188787,
+    "effective_thickness_m": 0.187544788767
+  },
+  {
+    "arm": "A",
+    "sample_id": 89,
+    "theta": 0.18743316433990853,
+    "requested_thickness_m": 0.217471,
+    "effective_thickness_m": 0.21731380285700003
+  },
+  {
+    "arm": "A",
+    "sample_id": 90,
+    "theta": 0.2829851151556389,
+    "requested_thickness_m": 0.184604,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 91,
+    "theta": 0.2239493844196121,
+    "requested_thickness_m": 0.189052,
+    "effective_thickness_m": 0.190521690176
+  },
+  {
+    "arm": "A",
+    "sample_id": 92,
+    "theta": 0.13568614970239343,
+    "requested_thickness_m": 0.196974,
+    "effective_thickness_m": 0.19647549299400002
+  },
+  {
+    "arm": "A",
+    "sample_id": 93,
+    "theta": 0.18592575437328684,
+    "requested_thickness_m": 0.200002,
+    "effective_thickness_m": 0.19945239440300003
+  },
+  {
+    "arm": "A",
+    "sample_id": 94,
+    "theta": 0.20242620127392752,
+    "requested_thickness_m": 0.229738,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 95,
+    "theta": 0.12509685024276657,
+    "requested_thickness_m": 0.18463,
+    "effective_thickness_m": 0.184567887358
+  },
+  {
+    "arm": "A",
+    "sample_id": 96,
+    "theta": 0.2530922483085276,
+    "requested_thickness_m": 0.228543,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 97,
+    "theta": 0.17565499955705993,
+    "requested_thickness_m": 0.230107,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "A",
+    "sample_id": 98,
+    "theta": 0.14711774837811992,
+    "requested_thickness_m": 0.232447,
+    "effective_thickness_m": 0.23219830990200002
+  },
+  {
+    "arm": "A",
+    "sample_id": 99,
+    "theta": 0.20407864926056635,
+    "requested_thickness_m": 0.200975,
+    "effective_thickness_m": 0.202429295812
+  },
+  {
+    "arm": "A",
+    "sample_id": 100,
+    "theta": 0.14991515522920132,
+    "requested_thickness_m": 0.229786,
+    "effective_thickness_m": 0.22922140849300002
+  },
+  {
+    "arm": "B",
+    "sample_id": 1,
+    "theta": 0.2842934216721779,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 2,
+    "theta": 0.16799105582616805,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 3,
+    "theta": 0.17610593725253448,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 4,
+    "theta": 0.23897680622549491,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 5,
+    "theta": 0.12120813281380644,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 6,
+    "theta": 0.22874291041971487,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 7,
+    "theta": 0.27258896698649504,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 8,
+    "theta": 0.23624462546974964,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 9,
+    "theta": 0.24608994583423283,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 10,
+    "theta": 0.13145450707666756,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 11,
+    "theta": 0.2291258975211254,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 12,
+    "theta": 0.28672492560987495,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 13,
+    "theta": 0.2485968471713609,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 14,
+    "theta": 0.10337249801888887,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 15,
+    "theta": 0.169971717451189,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 16,
+    "theta": 0.27346633704058065,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 17,
+    "theta": 0.10004244286392915,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 18,
+    "theta": 0.13310619971013216,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 19,
+    "theta": 0.2630382302514553,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 20,
+    "theta": 0.1975711949274503,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 21,
+    "theta": 0.11990108496719437,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 22,
+    "theta": 0.2013084047894778,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 23,
+    "theta": 0.2344607468189933,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 24,
+    "theta": 0.28720213059252453,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 25,
+    "theta": 0.18702272895864588,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 26,
+    "theta": 0.2988059245606888,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 27,
+    "theta": 0.1655890444308828,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 28,
+    "theta": 0.15080301092817322,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 29,
+    "theta": 0.16366488793550665,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 30,
+    "theta": 0.2847257229390813,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 31,
+    "theta": 0.18744065481752975,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 32,
+    "theta": 0.14370080128528018,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 33,
+    "theta": 0.12041638783160769,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 34,
+    "theta": 0.1079560712127466,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 35,
+    "theta": 0.2882993879284452,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 36,
+    "theta": 0.14362824320152617,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 37,
+    "theta": 0.12076534135767109,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 38,
+    "theta": 0.28586253849014964,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 39,
+    "theta": 0.25580236524881794,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 40,
+    "theta": 0.16553375739489534,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 41,
+    "theta": 0.24318539463778557,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 42,
+    "theta": 0.2794557254516554,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 43,
+    "theta": 0.11743667610979391,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 44,
+    "theta": 0.2635062633784937,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 45,
+    "theta": 0.21033577869661219,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 46,
+    "theta": 0.1438782681610965,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 47,
+    "theta": 0.23570862347698232,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 48,
+    "theta": 0.21124485698459503,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 49,
+    "theta": 0.1916578418321187,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 50,
+    "theta": 0.28881524617734133,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 51,
+    "theta": 0.12763894533773362,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 52,
+    "theta": 0.2659498286895787,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 53,
+    "theta": 0.25444470173545397,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 54,
+    "theta": 0.14367092599352524,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 55,
+    "theta": 0.27266956715784885,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 56,
+    "theta": 0.23115893429470327,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 57,
+    "theta": 0.16443308660809564,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 58,
+    "theta": 0.11891125395784029,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 59,
+    "theta": 0.2748712199059043,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 60,
+    "theta": 0.1281124801840074,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 61,
+    "theta": 0.24299831669781993,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 62,
+    "theta": 0.20296989888509195,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 63,
+    "theta": 0.12158585821598066,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 64,
+    "theta": 0.1741174946227126,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 65,
+    "theta": 0.25084209728454737,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 66,
+    "theta": 0.11591636416993306,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 67,
+    "theta": 0.15526701606142604,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 68,
+    "theta": 0.14933729034480572,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 69,
+    "theta": 0.11801210095902692,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 70,
+    "theta": 0.19973779198896086,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 71,
+    "theta": 0.11057863789076716,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 72,
+    "theta": 0.29327028310748837,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 73,
+    "theta": 0.29049036302086884,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 74,
+    "theta": 0.25995759494915316,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 75,
+    "theta": 0.15733033802245106,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 76,
+    "theta": 0.16099137499465066,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 77,
+    "theta": 0.2040835713690563,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 78,
+    "theta": 0.1580140064387922,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 79,
+    "theta": 0.2536372727832575,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 80,
+    "theta": 0.14989466717840821,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 81,
+    "theta": 0.1898377312314123,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 82,
+    "theta": 0.1435557421827191,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 83,
+    "theta": 0.19641154703178285,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 84,
+    "theta": 0.1726604573585231,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 85,
+    "theta": 0.28036859067251213,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 86,
+    "theta": 0.10577786052026637,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 87,
+    "theta": 0.1332698916137186,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 88,
+    "theta": 0.27470076749807004,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 89,
+    "theta": 0.18743316433990853,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 90,
+    "theta": 0.2829851151556389,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 91,
+    "theta": 0.2239493844196121,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 92,
+    "theta": 0.13568614970239343,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 93,
+    "theta": 0.18592575437328684,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 94,
+    "theta": 0.20242620127392752,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 95,
+    "theta": 0.12509685024276657,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 96,
+    "theta": 0.2530922483085276,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 97,
+    "theta": 0.17565499955705993,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 98,
+    "theta": 0.14711774837811992,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 99,
+    "theta": 0.20407864926056635,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  },
+  {
+    "arm": "B",
+    "sample_id": 100,
+    "theta": 0.14991515522920132,
+    "requested_thickness_m": 0.21,
+    "effective_thickness_m": 0.21136000003900002
+  }
+]

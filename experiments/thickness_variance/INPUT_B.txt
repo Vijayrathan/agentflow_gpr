@@ -1,0 +1,25 @@
+Generate a pilot dataset for first-layer volumetric moisture estimation.
+
+Dataset configuration:
+num_samples=1000; model_basename=moisture_B; moisture_sampling=uniform_per_sample; moisture_seed=42; dimensionality=2D; pml_cells=10; buffer_cells=10; cells_per_wavelength=10; high_freq_factor=3.0; center_freq_is_peak=true; fractal_nbins=50.
+
+Please define all 3 layers now:
+soil_depth_m=2.0.
+Layer 1: name=top_loam; sand_pct_min=40; sand_pct_max=40; clay_pct_min=15; clay_pct_max=15; theta_v_min=0.1; theta_v_max=0.3; bulk_density_gcm3_min=1.5; bulk_density_gcm3_max=1.5; particle_density_gcm3_min=2.65; particle_density_gcm3_max=2.65; thickness_m_min=0.21; thickness_m_max=0.21.
+Layer 2: name=middle_loam; sand_pct_min=40; sand_pct_max=40; clay_pct_min=15; clay_pct_max=15; theta_v_min=0.05; theta_v_max=0.05; bulk_density_gcm3_min=1.5; bulk_density_gcm3_max=1.5; particle_density_gcm3_min=2.65; particle_density_gcm3_max=2.65; thickness_m_min=0.32; thickness_m_max=0.32.
+Layer 3: name=lower_loam; sand_pct_min=40; sand_pct_max=40; clay_pct_min=15; clay_pct_max=15; theta_v_min=0.08; theta_v_max=0.08; bulk_density_gcm3_min=1.5; bulk_density_gcm3_max=1.5; particle_density_gcm3_min=2.65; particle_density_gcm3_max=2.65.
+Layer 3 is the terminal half-space; omit its thickness fields. It fills the remaining depth.
+
+Buried targets:
+Explicitly skip all buried targets. Save target_ranges as {}.
+
+Waveform:
+waveform_kind=ricker; waveform_amplitude=1.0; waveform_center_freq_hz=750000000; waveform_name=ricker_750mhz_peak.
+
+Antenna:
+antenna_kind=hertzian_dipole; antenna_axis=z; tx_rx_offset_m=0.08; resistance=null; source_height_m=0.45; rx_same_height=true.
+
+Advanced parameters:
+Explicitly skip surface roughness and snapshots. Save advanced_params as {}. No receiver array.
+
+Use the supplied values exactly. Keep texture, densities, lower-layer moisture, acquisition and numerical settings fixed. Draw first-layer moisture independently of thickness; emit each sampled moisture as equal native minimum and maximum bounds. The moisture range is a population range, not spatial moisture variation within a layer. Generate the input files; do not start simulations automatically. If validation fails, report the failure without changing the scene.

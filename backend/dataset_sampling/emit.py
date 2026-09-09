@@ -107,7 +107,7 @@ def _soil_peplinski_line(layer: SampledLayer, soil_id: str) -> str:
     return (
         f"#soil_peplinski: {_g(layer.sand_pct / 100.0)} {_g(layer.clay_pct / 100.0)} "
         f"{_g(layer.bulk_density_gcm3)} {_g(layer.particle_density_gcm3)} "
-        f"{_g(layer.theta_v_min)} {_g(layer.theta_v_max)} {soil_id}"
+        f"{layer.theta_v_min:.17g} {layer.theta_v_max:.17g} {soil_id}"
     )
 
 

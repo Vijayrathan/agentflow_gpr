@@ -1,0 +1,104 @@
+{
+  "status": "PASS_INPUT_AUDIT",
+  "arms": {
+    "A": {
+      "n": 1000,
+      "unique_moisture": 1000,
+      "moisture_min": 0.10004244286392915,
+      "moisture_max": 0.2992610038845868,
+      "waveform_identifiers": [
+        "ricker_750mh"
+      ],
+      "unique_effective_thicknesses": 62,
+      "thickness_min_m": 0.11897070468000001,
+      "thickness_max_m": 0.300401029317,
+      "shape": [
+        419,
+        869,
+        1
+      ],
+      "parsed_dt_s": 7.015269213491199e-12,
+      "iterations": 10819,
+      "moisture_decile_counts": [
+        107,
+        96,
+        120,
+        88,
+        100,
+        78,
+        113,
+        95,
+        94,
+        109
+      ],
+      "moisture_thickness_pearson": -0.02406003442231056,
+      "existing_signal_outputs": 0
+    },
+    "B": {
+      "n": 1000,
+      "unique_moisture": 1000,
+      "moisture_min": 0.10004244286392915,
+      "moisture_max": 0.2992610038845868,
+      "waveform_identifiers": [
+        "ricker_750mhz_peak"
+      ],
+      "unique_effective_thicknesses": 1,
+      "thickness_min_m": 0.21117300080700002,
+      "thickness_max_m": 0.21117300080700002,
+      "shape": [
+        419,
+        869,
+        1
+      ],
+      "parsed_dt_s": 7.015269213491199e-12,
+      "iterations": 10819,
+      "moisture_decile_counts": [
+        107,
+        96,
+        120,
+        88,
+        100,
+        78,
+        113,
+        95,
+        94,
+        109
+      ],
+      "moisture_thickness_pearson": null,
+      "existing_signal_outputs": 0
+    }
+  },
+  "exact_paired_moisture": true,
+  "exact_paired_material_commands": true,
+  "exact_common_numerical_and_acquisition_commands": false,
+  "equivalent_common_numerical_and_acquisition_commands": true,
+  "matched_ids_with_identical_geometry": [
+    9,
+    58,
+    121,
+    122,
+    150,
+    301,
+    430,
+    566,
+    602,
+    611,
+    670,
+    732,
+    740,
+    806,
+    929,
+    945,
+    962,
+    997
+  ],
+  "source_paths": {
+    "A": "/Users/vijay/Documents/langchain_agents/dataset/vijay/moisture_A__9b87ee4d",
+    "B": "/Users/vijay/Documents/langchain_agents/dataset/vijay/moisture_B__5bc60fb5"
+  },
+  "expected_a_thickness_range": [
+    0.12,
+    0.3
+  ],
+  "scope": "All 2000 input files and native material/source parsing; no field solves in this stage"
+}

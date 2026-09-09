@@ -5,9 +5,9 @@ Runs immediately AFTER the layer-extraction stage: draws `num_samples` concrete
 parameter sets over the per-layer ranges collected in ExtractedLayers. Sand,
 clay, thickness (except the terminal half-space) and both densities are drawn
 uniformly; silt is the derived
-texture-closure label (100 - sand - clay). theta_v is NOT drawn — its (min, max)
-envelope is passed straight through, because #soil_peplinski consumes a moisture
-BAND, not a scalar.
+texture-closure label (100 - sand - clay). By default the moisture envelope is
+preserved. uniform_per_sample instead draws one scalar per sample/layer from
+an independent identity-seeded stream and sets both emitted endpoints to it.
 
 Each draw is validated with validate_sampled_layer (TIER 2); infeasible draws
 (silt < 0, or theta_v_max above the sample's own porosity) are rejected and
@@ -17,6 +17,7 @@ for the downstream derive/emit stages.
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 from collections import Counter
@@ -30,13 +31,14 @@ from backend.schema import (
     SampledLayer,
     SampledSample,
 )
-from backend.validation_tools_new import validate_sampled_layer
+from backend.validation_tools_new import PEPLINSKI_THETA_V_MAX, validate_sampled_layer
 from dataset_sampling.target_shapes import draw_target, iter_ranges
 
 # Max attempts when re-drawing a target's geometry against the (later) global
 # grid in the per-sample placement pass (Stage 7). Defined here next to the
 # draw it governs; imported by the placement module.
 MAX_TARGET_ATTEMPTS = 20
+MOISTURE_STREAM_VERSION = "uniform-moisture-v1"
 
 
 def _round(x: float, ndigits: int = 6) -> float:
@@ -67,11 +69,11 @@ def _sample_one_layer(
     surfaced rather than silently dropped.
     """
     tv_min, tv_max = layer.theta_v_min, layer.theta_v_max
-    if tv_min >= tv_max:
+    if tv_min > tv_max:
         name = f"'{layer.name}'" if layer.name else "(unnamed)"
         raise ValueError(
-            f"Layer {name}: theta_v_min ({tv_min}) >= theta_v_max ({tv_max}); "
-            "#soil_peplinski needs a real moisture band (min < max)."
+            f"Layer {name}: theta_v_min ({tv_min}) > theta_v_max ({tv_max}); "
+            "moisture bounds must satisfy min <= max (equal bounds are uniform)."
         )
 
     for _ in range(max_retries):
@@ -129,6 +131,8 @@ def sample_layers(
     seed: Optional[int] = None,
     enforce_validity: bool = True,
     target_ranges: Optional[ExtractedTargetRanges] = None,
+    moisture_sampling: str = "preserve_band",
+    moisture_seed: int = 42,
 ) -> Tuple[List[SampledSample], List[str]]:
     """Draw `num_samples` concrete parameter sets over the extracted layer ranges.
 
@@ -142,6 +146,17 @@ def sample_layers(
     """
     if num_samples < 1:
         raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+    if moisture_sampling not in ("preserve_band", "uniform_per_sample"):
+        raise ValueError(f"Unknown moisture_sampling: {moisture_sampling}")
+    if not isinstance(moisture_seed, int) or moisture_seed < 0:
+        raise ValueError("moisture_seed must be a nonnegative integer")
+    if moisture_sampling == "uniform_per_sample":
+        for layer in extracted.layers:
+            lo, hi = layer.theta_v_min, layer.theta_v_max
+            if not (math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= hi <= 1):
+                raise ValueError("Uniform moisture sampling requires finite bounds 0 < min <= max <= 1")
+            if enforce_validity and hi > PEPLINSKI_THETA_V_MAX:
+                raise ValueError(f"Moisture sampling range exceeds Peplinski max {PEPLINSKI_THETA_V_MAX}")
 
     specs = iter_ranges(target_ranges) if target_ranges is not None else []
     rng = random.Random(seed)
@@ -150,7 +165,14 @@ def sample_layers(
     n_layer_records = 0
     for i in range(1, num_samples + 1):
         layers: List[SampledLayer] = []
-        for layer in extracted.layers:
+        for layer_index, layer in enumerate(extracted.layers):
+            if moisture_sampling == "uniform_per_sample":
+                # No geometry RNG consumption, shared state, or process-salted hash.
+                # Keep this draw fixed during soil-validity retries. Match by sample_id
+                # and layer index, even if targets later cause a sample to be dropped.
+                moisture_rng = random.Random(f"{MOISTURE_STREAM_VERSION}:{moisture_seed}:{i}:{layer_index}")
+                theta = moisture_rng.uniform(layer.theta_v_min, layer.theta_v_max)
+                layer = layer.model_copy(update={"theta_v_min": theta, "theta_v_max": theta})
             sampled, warnings = _sample_one_layer(layer, rng, enforce_validity)
             layers.append(sampled)
             n_layer_records += 1
@@ -171,6 +193,7 @@ def write_samples(
     output_dir: str,
     warnings: Optional[List[str]] = None,
     filename: str = "sampled_layers.json",
+    sampling_metadata: Optional[dict] = None,
 ) -> str:
     """Write the drawn samples to a JSON manifest in the dataset directory.
 
@@ -188,6 +211,8 @@ def write_samples(
         "warnings": warnings or [],
         "samples": [s.model_dump() for s in samples],
     }
+    if sampling_metadata is not None:
+        payload["sampling"] = sampling_metadata
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     return str(path)
@@ -215,6 +240,8 @@ def sample_and_write(
     enforce_validity: bool = True,
     filename: str = "sampled_layers.json",
     target_ranges: Optional[ExtractedTargetRanges] = None,
+    moisture_sampling: str = "preserve_band",
+    moisture_seed: int = 42,
 ) -> Tuple[List[SampledSample], str, List[str]]:
     """Sample the layer ranges (and any buried objects) and persist the draws.
 
@@ -223,6 +250,15 @@ def sample_and_write(
     samples, warnings = sample_layers(
         extracted, num_samples, seed=seed, enforce_validity=enforce_validity,
         target_ranges=target_ranges,
+        moisture_sampling=moisture_sampling, moisture_seed=moisture_seed,
     )
-    path = write_samples(samples, output_dir, warnings=warnings, filename=filename)
+    metadata = {
+        "geometry_seed": seed,
+        "moisture_sampling": moisture_sampling,
+        "moisture_seed": moisture_seed,
+        "moisture_stream_version": MOISTURE_STREAM_VERSION if moisture_sampling == "uniform_per_sample" else None,
+        "requested_layers": extracted.model_dump(),
+    }
+    path = write_samples(samples, output_dir, warnings=warnings, filename=filename,
+                         sampling_metadata=metadata)
     return samples, path, warnings
