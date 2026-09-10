@@ -51,3 +51,5 @@ docs/
 tmp/
 AGENTS.md
 experiments/uniform_moisture_validation/
+thickness_moisture_A.jsonl
+thickness_moisture_B.jsonl

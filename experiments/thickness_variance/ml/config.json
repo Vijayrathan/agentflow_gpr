@@ -1,0 +1,16 @@
+{
+  "datasets": {
+    "A": "dataset/vijay/moisture_A__9b87ee4d",
+    "B": "dataset/vijay/moisture_B__5bc60fb5"
+  },
+  "input_hashes": "experiments/thickness_variance/dataset_1000_audit/input_hashes.json",
+  "receipts": null,
+  "run_dir": "experiments/thickness_variance/ml/runs/main",
+  "expected_pairs": 1000,
+  "split_seed": 2026,
+  "fit_seeds": [11, 22, 33, 44, 55],
+  "bootstrap_samples": 10000,
+  "n_jobs": 1,
+  "torch_threads": 1,
+  "device": "cpu"
+}
