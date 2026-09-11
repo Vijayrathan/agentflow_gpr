@@ -2,6 +2,17 @@
 
 ## Latest checkpoint — 2026-09-10
 
+Remote continuation: the user has native A/B datasets on a Linux server in
+`~/agentflow_gpr/dataset/vijay/moisture_A__db8ef04d` and
+`moisture_B__2ba27927`, plus root JSONL exports. Use the native directories.
+Their first audit failed on old session-name-bound input hashes before inspecting
+outputs. The ML CLI now supports `snapshot-inputs` and `config.remote.json` to
+freeze those current inputs under portable arm/relative-path keys. This is not
+execution provenance. Remote output validity/receipts remain to be checked by the
+user; the local counts below do not describe remote availability. See
+[remote correction notes](ml/IMPLEMENTATION_STATUS.md). Use the existing Python
+environment only; no temporary dependency overlays or new venvs.
+
 The approved standalone ML design is now implemented in [ml/README.md](ml/README.md).
 See [implementation status](ml/IMPLEMENTATION_STATUS.md) for 44 passing tests,
 the input/output audit and training-only peak diagnostics. Production training

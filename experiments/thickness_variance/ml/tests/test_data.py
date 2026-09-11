@@ -9,6 +9,7 @@ from experiments.thickness_variance.ml.data import (
     audit,
     deck_metadata,
     make_splits,
+    snapshot_inputs,
 )
 
 
@@ -115,6 +116,105 @@ def test_outputs_without_receipts_do_not_claim_provenance(dataset_fixture):
     assert result["inputs_ready"] and not result["outputs_ready"]
     assert result["arms"]["A"]["valid_hdf5"] == 2
     assert all(i["kind"] == "provenance" for i in result["issues"])
+
+
+def test_legacy_directory_mismatch_reports_skipped_checks(dataset_fixture):
+    cfg = dataset_fixture
+    for arm, folder in list(cfg["datasets"].items()):
+        old = Path(folder)
+        new = old.with_name(f"remote_{arm}")
+        old.rename(new)
+        cfg["datasets"][arm] = str(new)
+    result = audit(cfg)
+    assert not result["inputs_ready"]
+    assert len(result["issues"]) == 2
+    assert len(result["skipped_checks"]) == 4
+    for arm in ("A", "B"):
+        stats = result["arms"][arm]
+        assert stats["status"] == "skipped_after_manifest_failure"
+        assert stats["present"] is None
+        assert stats["valid_hdf5"] is None
+        assert stats["distinct_effective_thicknesses"] is None
+
+
+def test_arm_snapshot_survives_directory_rename_and_detects_changes(dataset_fixture):
+    cfg = dataset_fixture
+    output = Path(cfg["run_dir"]).parent / "portable_inputs.json"
+    summary = snapshot_inputs(cfg, output)
+    assert summary["input_hashes"] == 12
+    cfg["input_hashes"] = str(output)
+    for arm, folder in list(cfg["datasets"].items()):
+        old = Path(folder)
+        new = old.with_name(f"remote_{arm}")
+        old.rename(new)
+        cfg["datasets"][arm] = str(new)
+    assert audit(cfg)["outputs_ready"]
+    deck = Path(cfg["datasets"]["A"]) / "in_files/A_1.in"
+    deck.write_text(deck.read_text() + "\n")
+    result = audit(cfg)
+    assert not result["inputs_ready"]
+    assert any("Input deck changed" in i["message"] for i in result["issues"])
+
+
+def test_snapshot_is_not_an_execution_receipt(dataset_fixture):
+    cfg = dataset_fixture
+    cfg["receipts"] = None
+    output = Path(cfg["run_dir"]).parent / "portable_inputs.json"
+    snapshot_inputs(cfg, output)
+    cfg["input_hashes"] = str(output)
+    result = audit(cfg)
+    assert result["inputs_ready"] and not result["outputs_ready"]
+    assert all(i["kind"] == "provenance" for i in result["issues"])
+
+
+def test_snapshot_retry_cannot_overwrite_changed_baseline(dataset_fixture):
+    cfg = dataset_fixture
+    output = Path(cfg["run_dir"]).parent / "portable_inputs.json"
+    first = snapshot_inputs(cfg, output)
+    assert snapshot_inputs(cfg, output) == first
+    saved = output.read_bytes()
+    deck = Path(cfg["datasets"]["A"]) / "in_files/A_1.in"
+    deck.write_text(deck.read_text() + "\n")
+    with pytest.raises(ValueError, match="already exists and differs"):
+        snapshot_inputs(cfg, output)
+    assert output.read_bytes() == saved
+
+
+def test_incomplete_inputs_do_not_create_snapshot(dataset_fixture):
+    cfg = dataset_fixture
+    output = Path(cfg["run_dir"]).parent / "portable_inputs.json"
+    (Path(cfg["datasets"]["B"]) / "in_files/B_1.in").unlink()
+    with pytest.raises(ValueError, match="missing/extra deck"):
+        snapshot_inputs(cfg, output)
+    assert not output.exists()
+
+
+def test_cli_remote_snapshot_then_audit(dataset_fixture, monkeypatch, capsys):
+    from experiments.thickness_variance.ml import __main__ as cli
+
+    cfg = dataset_fixture
+    cfg["receipts"] = None
+    for arm, folder in list(cfg["datasets"].items()):
+        old = Path(folder)
+        new = old.with_name(f"remote_{arm}")
+        old.rename(new)
+        cfg["datasets"][arm] = str(new)
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr("sys.argv", ["ml", "audit"])
+    assert cli.main() == 2
+    assert "Skipped:" in capsys.readouterr().out
+    cfg["input_hashes"] = str(Path(cfg["run_dir"]).parent / "remote_inputs.json")
+    monkeypatch.setattr(
+        "sys.argv", ["ml", "snapshot-inputs", "--output", cfg["input_hashes"]]
+    )
+    assert cli.main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr("sys.argv", ["ml", "audit"])
+    assert cli.main() == 2  # No execution receipts; native files are now inspected.
+    output = capsys.readouterr().out
+    assert '"valid_hdf5": 2' in output
+    assert "No execution-time" in output
+    assert "No unique audited input hash" not in output
 
 
 def test_changed_input_blocks_admission(dataset_fixture):

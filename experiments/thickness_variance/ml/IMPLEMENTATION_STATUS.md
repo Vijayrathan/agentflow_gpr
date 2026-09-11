@@ -1,5 +1,36 @@
 # Implementation checkpoint — 2026-09-10
 
+## Remote input admission correction
+
+The user runs the experiment on `~/agentflow_gpr` on a Linux server, using the
+existing activated Python environment. Their native dataset directories are
+`moisture_A__db8ef04d` and `moisture_B__2ba27927`. The initial remote audit failed
+before output inspection because the historical input-hash lookup required the
+old local session directory names. Four dependent checks then produced misleading
+additional failures. The zero output counts were uninspected counters, not
+evidence of absent remote outputs.
+
+`snapshot-inputs --output PATH` now freezes current manifests/decks by arm and
+relative filename. Schema-v2 snapshots support directory relocation/renaming,
+preserve content-change detection, and refuse to replace a differing baseline.
+This records present input integrity only; it neither recreates the historical
+scientific audit nor certifies which inputs were executed. Execution-receipt
+admission remains separate. Audit now reports null counts for skipped output
+inspection, labels partial inspections, and lists skipped dependent checks.
+
+`config.remote.json` selects the user's two remote datasets, a new snapshot path,
+and `runs/remote_v2`. README commands use the existing environment. The remote
+datasets themselves have not been accessed here; the user must sync the updated
+code and run snapshot/audit there. No production models have been fit.
+
+**45 data-admission, feature, model and evaluation tests passed in 6.70 seconds**
+with the existing `.venv/bin/python`; `git diff --check` also passed. Six new
+regressions cover skipped checks, portable snapshots, changed inputs, immutable
+baselines, incomplete inputs, and the snapshot/audit CLI sequence. The plot-based
+workflow suite was not rerun because Matplotlib is absent from this local venv.
+The historical full-suite results and local dataset counts below predate this
+remote correction.
+
 The standalone ML workflow is implemented. **No production ML model has been
 trained or evaluated**, because the full output/provenance admission gate is not
 yet satisfied. No platform code, dataset input, physical scene or solver source

@@ -123,11 +123,72 @@ def inspect_output(path, expected):
                 raise ValueError(f"Invalid {component} field")
 
 
-def expected_hash(snapshot, dataset, relative):
+def snapshot_inputs(cfg, output):
+    """Freeze current input bytes by arm/relative path; never certify execution."""
+    output = Path(output).resolve()
+    snapshot = {
+        "schema_version": 2,
+        "scope": "Current input snapshot only; not historical execution provenance",
+        "datasets": {},
+    }
+    for arm, folder in cfg["datasets"].items():
+        p = Path(folder).resolve()
+        if output == p or p in output.parents:
+            raise ValueError("Input snapshot must be outside source dataset directories")
+        manifest_paths = [p / name for name in MANIFESTS]
+        before = {str(path): sha256(path) for path in manifest_paths}
+        emission = read_json(p / "emitted_files.json")
+        records = emission["files"]
+        ids = [r["sample_id"] for r in records]
+        names = [r["filename"] for r in records]
+        if (
+            emission["errors"]
+            or len(ids) != cfg["expected_pairs"]
+            or set(ids) != set(range(1, cfg["expected_pairs"] + 1))
+            or len(set(names)) != len(names)
+            or any(Path(n).name != n or not n.endswith(".in") for n in names)
+        ):
+            raise ValueError(f"{arm}: invalid emission identities or filenames")
+        if set(names) != {path.name for path in (p / "in_files").glob("*.in")}:
+            raise ValueError(f"{arm}: missing/extra deck files")
+        paths = manifest_paths + [p / "in_files" / n for n in sorted(names)]
+        hashes = {path.relative_to(p).as_posix(): sha256(path) for path in paths}
+        if any(sha256(path) != h for path, h in before.items()) or any(
+            sha256(p / relative) != h for relative, h in hashes.items()
+        ):
+            raise ValueError(f"{arm}: inputs changed while snapshotting")
+        snapshot["datasets"][arm] = {
+            "source_directory": str(p),
+            "files": hashes,
+        }
+    # Never replace an established baseline with changed inputs, even on retry.
+    if output.exists():
+        if read_json(output) != snapshot:
+            raise ValueError("Input snapshot already exists and differs; choose a new path")
+    else:
+        write_json(output, snapshot)
+    return {
+        "path": str(output),
+        "input_hashes": sum(len(d["files"]) for d in snapshot["datasets"].values()),
+        "scope": snapshot["scope"],
+    }
+
+
+def expected_hash(snapshot, dataset, relative, arm=None):
+    if snapshot.get("schema_version") == 2:
+        try:
+            return snapshot["datasets"][arm]["files"][relative]
+        except KeyError as error:
+            raise ValueError(f"No input snapshot hash for {arm}/{relative}") from error
     suffix = f"/{dataset.name}/{relative}"
     matches = [v for k, v in snapshot.items() if ("/" + k).endswith(suffix)]
     if len(matches) != 1:
-        raise ValueError(f"No unique audited input hash for {dataset.name}/{relative}")
+        raise ValueError(
+            f"No unique audited input hash for {dataset.name}/{relative}. "
+            "The configured baseline does not identify this dataset. "
+            "Use snapshot-inputs for the configured datasets and set input_hashes "
+            "to that snapshot; execution provenance remains a separate check."
+        )
     return matches[0]
 
 
@@ -147,7 +208,9 @@ def audit(cfg):
         "inputs_ready": True,
         "outputs_ready": False,
         "issues": [],
+        "skipped_checks": [],
         "rows": [],
+        "input_baseline_scope": snapshot.get("scope", "Historical input hash baseline"),
         "hashes": {str(Path(cfg["input_hashes"])): sha256(cfg["input_hashes"])},
         "arms": {},
     }
@@ -169,13 +232,15 @@ def audit(cfg):
             "present": 0,
             "valid_hdf5": 0,
             "verified_receipts": 0,
+            "status": "checking",
+            "inputs_checked": 0,
         }
         report["arms"][arm] = stats
         try:
             for name in MANIFESTS:
                 h = sha256(p / name)
-                if h != expected_hash(snapshot, p, name):
-                    raise ValueError(f"Audited manifest changed: {name}")
+                if h != expected_hash(snapshot, p, name, arm):
+                    raise ValueError(f"Manifest differs from configured input baseline: {name}")
                 report["hashes"][str(p / name)] = h
             emission, sampled = (
                 read_json(p / "emitted_files.json"),
@@ -212,6 +277,12 @@ def audit(cfg):
                 )
         except (ValueError, KeyError, OSError) as error:
             issue("input", arm, None, str(error))
+            stats.update(
+                status="skipped_after_manifest_failure",
+                present=None,
+                valid_hdf5=None,
+                verified_receipts=None,
+            )
             continue
         by_arm[arm] = {}
         for sid in sorted(files):
@@ -220,8 +291,8 @@ def audit(cfg):
             output = p / "out_files" / deck.with_suffix(".out").name
             try:
                 h = sha256(deck)
-                if h != expected_hash(snapshot, p, f"in_files/{deck.name}"):
-                    raise ValueError("Input deck changed after scientific input audit")
+                if h != expected_hash(snapshot, p, f"in_files/{deck.name}", arm):
+                    raise ValueError("Input deck changed relative to configured input baseline")
                 report["hashes"][str(deck)] = h
                 meta = deck_metadata(deck)
                 moistures = [
@@ -239,7 +310,6 @@ def audit(cfg):
                     common = acquisition
                 if common != acquisition:
                     raise ValueError("A/B acquisition or time plan differs")
-                by_arm[arm][sid] = moistures
                 row = {
                     "arm": arm,
                     "sample_id": sid,
@@ -252,6 +322,8 @@ def audit(cfg):
                     "provenance_verified": False,
                 }
                 report["rows"].append(row)
+                by_arm[arm][sid] = moistures
+                stats["inputs_checked"] += 1
             except (ValueError, KeyError, OSError) as error:
                 issue("input", arm, sid, str(error))
                 continue
@@ -296,13 +368,22 @@ def audit(cfg):
                 stats["verified_receipts"] += 1
             except (ValueError, KeyError, OSError) as error:
                 issue("output", arm, sid, str(error))
-    if (
-        by_arm.get("A") != by_arm.get("B")
-        or len(by_arm.get("A", {})) != cfg["expected_pairs"]
-    ):
+        stats["status"] = (
+            "scanned" if stats["inputs_checked"] == cfg["expected_pairs"]
+            else "partially_scanned_after_input_failure"
+        )
+    complete = {
+        arm: len(by_arm.get(arm, {})) == cfg["expected_pairs"]
+        for arm in ("A", "B")
+    }
+    if not all(complete.values()):
+        report["skipped_checks"].append("A/B moisture pairing: incomplete input inspection")
+    elif by_arm["A"] != by_arm["B"]:
         issue("input", None, None, "A/B moisture pairing incomplete or inconsistent")
     theta = [r["theta"] for r in report["rows"] if r["arm"] == "A"]
-    if len(set(theta)) != cfg["expected_pairs"]:
+    if not complete["A"]:
+        report["skipped_checks"].append("Unique moisture identities: incomplete A inspection")
+    elif len(set(theta)) != cfg["expected_pairs"]:
         issue(
             "input",
             None,
@@ -310,6 +391,10 @@ def audit(cfg):
             "Expected unique moisture identities; duplicate scenes need grouped allocation",
         )
     for arm in ("A", "B"):
+        if not complete[arm]:
+            report["arms"][arm]["distinct_effective_thicknesses"] = None
+            report["skipped_checks"].append(f"{arm} thickness role: incomplete input inspection")
+            continue
         thicknesses = {r["thickness_m"] for r in report["rows"] if r["arm"] == arm}
         report["arms"][arm]["distinct_effective_thicknesses"] = len(thicknesses)
         if (arm == "A" and len(thicknesses) <= 1) or (

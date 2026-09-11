@@ -6,26 +6,50 @@ All run products live under `run_dir` (default `ml/runs/main`, ignored by Git).
 
 ## Execution
 
-Run from the repository root. The isolated `uv` invocation avoids changing the
-platform dependencies or lockfile:
+Run from the repository root using the existing project environment. On the
+inspected local host only Matplotlib was missing. Install it into that same
+environment if needed (no new environment or dependency overlay):
 
 ```bash
-uv run --no-project --python 3.12 --with-requirements experiments/thickness_variance/ml/requirements.txt python -m experiments.thickness_variance.ml --help
+uv pip install --python .venv/bin/python matplotlib==3.10.8
+.venv/bin/python -m experiments.thickness_variance.ml --help
 ```
 
-Use that command prefix in place of `python` below. If using the existing project
-interpreter, it already has the scientific/ML dependencies except Matplotlib on
-the inspected host; the tested overlay is:
+In the commands below, `python` means the activated existing project interpreter;
+alternatively use `.venv/bin/python` explicitly. `requirements.txt` records the
+tested versions. Runs record their actual environment and reject changes midway.
+
+### Remote datasets with different session names
+
+The supplied `config.remote.json` selects `moisture_A__db8ef04d` and
+`moisture_B__2ba27927`, with a new run directory `runs/remote_v2`. First snapshot
+their manifests and emitted decks, then audit their contents and native outputs:
 
 ```bash
-uv run --quiet --no-project --python .venv/bin/python --with matplotlib==3.10.8 --with numpy==2.4.2 python -m experiments.thickness_variance.ml audit
+python -m experiments.thickness_variance.ml --config experiments/thickness_variance/ml/config.remote.json snapshot-inputs --output experiments/thickness_variance/ml/runs/remote_inputs.json
+python -m experiments.thickness_variance.ml --config experiments/thickness_variance/ml/config.remote.json audit
 ```
 
-The configuration is `config.json`. Relative dataset/hash/run/receipt paths resolve
+Use the same `--config experiments/thickness_variance/ml/config.remote.json`
+before every subsequent subcommand. The snapshot records current input integrity,
+not successful historical execution. Without execution receipts, the audit can
+inspect all native outputs and report their actual validity, but training remains
+blocked by provenance. The snapshot command creates no receipts, reads no output
+signals, and refuses to overwrite a differing snapshot. A retry of unchanged
+inputs is safe.
+
+Schema-v2 snapshots use arm labels and paths relative to each dataset, so moving
+or renaming the enclosing directory does not break hash lookup. The old flat
+historical hash format remains supported, with its original directory-name binding.
+Manifest failures now produce `status=skipped_after_manifest_failure` and null
+output counts; dependent pairing/thickness checks appear under `skipped_checks`.
+Null means uninspected, not missing. Audit prints the first ten actual issues.
+
+The default configuration is `config.json`. Relative dataset/hash/run/receipt paths resolve
 against the repository root, not the working directory or config location.
 `--config /path/to/config.json` is a global option before the subcommand. Copy
-the config for another host and preserve dataset directory basenames so audited
-hash keys resolve after relocation. Do not edit source manifests to relocate data.
+the config for another host. Use a dataset-specific snapshot for different input
+populations. Do not edit source manifests to relocate data.
 `n_jobs`, `torch_threads`, and `device` control local compute. Defaults are one
 thread per worker and CPU. CUDA only applies to NN fitting, with explicit failure
 if unavailable; NN inference and serialized models use CPU. The RF uses CPU.

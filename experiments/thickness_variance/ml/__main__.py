@@ -4,8 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
-from .common import DEFAULT_CONFIG, load_config
-from .data import audit, split
+from .common import DEFAULT_CONFIG, load_config, resolve
+from .data import audit, snapshot_inputs, split
 from .models import RECIPES
 from .reporting import report
 from .workflow import diagnostics, evaluate, prepare_features, train
@@ -15,6 +15,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     commands = parser.add_subparsers(dest="command", required=True)
+    s = commands.add_parser(
+        "snapshot-inputs",
+        help="Freeze configured manifests/decks by arm; does not certify prior execution",
+    )
+    s.add_argument("--output", required=True, help="New input-hash snapshot path")
     commands.add_parser(
         "audit", help="Read inputs/outputs and emit admission report; exit 2 if blocked"
     )
@@ -52,7 +57,9 @@ def main():
     args = parser.parse_args()
     try:
         cfg = load_config(args.config)
-        if args.command == "report":
+        if args.command == "snapshot-inputs":
+            result = snapshot_inputs(cfg, resolve(args.output))
+        elif args.command == "report":
             # Reports summarize bound artifacts without needing to read source datasets.
             result = str(report(Path(cfg["run_dir"])))
         else:
@@ -70,6 +77,12 @@ def main():
                 print(
                     f"Issues: {len(admission['issues'])}; details: {cfg['run_dir']}/audit.json"
                 )
+                for issue in admission["issues"][:10]:
+                    print(f"{issue['arm'] or 'A/B'}: {issue['message']}")
+                if len(admission["issues"]) > 10:
+                    print("Remaining issues are in audit.json")
+                for skipped in admission["skipped_checks"]:
+                    print(f"Skipped: {skipped}")
                 return 0 if admission["outputs_ready"] else 2
             splits = split(cfg, admission)
             if args.command == "split":
