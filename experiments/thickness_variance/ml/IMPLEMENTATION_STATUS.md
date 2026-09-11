@@ -1,5 +1,29 @@
 # Implementation checkpoint — 2026-09-10
 
+## Current remote admission — existing outputs
+
+The user has now reported all 2,000 native outputs present and valid under the
+input/HDF5 audit, with 62 A thickness levels and one B level. The remaining
+2,000 issues were solely missing execution-time receipts, a requirement added by
+this implementation rather than produced by the existing dataset workflow.
+
+The remote configuration now explicitly uses `provenance_policy=existing_outputs`
+and a fresh `runs/remote_v3`, reusing the remote input snapshot. Historical
+execution remains unverified, with that limitation saved in the audit, validation
+summary, evaluation results, and report. Integrity, finite arrays, timing,
+acquisition, pairing, supplied receipt consistency and known mixed-backend checks
+remain mandatory. No retrospective receipt is created. Missing-receipt-only
+audits can now pass for training under this declared admission revision.
+
+**59 targeted tests passed in 7.92 seconds** in the existing local `.venv`.
+They cover both provenance policies, rejection of corrupt/missing outputs and
+changed inputs, contradictory receipts, CLI admission, and preservation of the
+limitation in a validation report. The full plot-based workflow suite was not
+rerun because local Matplotlib is absent. No production model was fit locally;
+remote training/evaluation have not yet been reported.
+
+The checkpoints below are historical and retain the earlier receipt-only gate.
+
 ## Remote input admission correction
 
 The user runs the experiment on `~/agentflow_gpr` on a Linux server, using the

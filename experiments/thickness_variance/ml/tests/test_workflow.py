@@ -29,6 +29,12 @@ def experiment(tmp_path, monkeypatch):
         "data_digest": "unit-test-data",
         "metadata": {"dt_s": 1e-10, "f_peak_hz": 750e6},
         "rows": [],
+        "provenance": {
+            "policy": "existing_outputs", "valid_outputs": 200,
+            "verified_receipts": 0, "unverified_outputs": 200,
+            "historical_execution_verified": False,
+            "limitation": "Synthetic fixture: execution provenance is unverified.",
+        },
     }
     t = np.arange(128)
 
@@ -69,6 +75,7 @@ def test_full_workflow_test_lock_resume_and_reporting(experiment):
     summaries = workflow.train(cfg, admission, splits)
     assert set(summaries) == {"primary", "mean_control", "raw_svr"}
     assert read_json(run / "validation_summary.json")["complete"]
+    assert read_json(run / "validation_summary.json")["provenance"] == admission["provenance"]
     assert "Validation only" in report(run).read_text()
     checkpoint = run / "models/primary/A_11.joblib"
     saved_hash = sha256(checkpoint)
@@ -78,9 +85,11 @@ def test_full_workflow_test_lock_resume_and_reporting(experiment):
         workflow.evaluate(cfg, admission, splits)
     assert not workflow.feature_path(run, "A", "test").exists()
     comparisons = workflow.evaluate(cfg, admission, splits, review_validation=True)
+    assert read_json(run / "evaluation.json")["provenance"] == admission["provenance"]
     assert set(comparisons) == {"A", "B"}
     assert comparisons == workflow.evaluate(cfg, admission, splits)
     text = report(run).read_text()
+    assert admission["provenance"]["limitation"] in text
     assert (
         "Prespecified primary result" in text
         and "Secondary models do not replace a null" in text

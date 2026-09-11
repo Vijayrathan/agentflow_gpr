@@ -26,6 +26,27 @@ of a paper-guided study, not a reproduction of unavailable private source code.
 
 The raw benchmark, four feature representations, model comparisons, validation,
 test evaluation and controls are executable. Dataset generation and forward solves
-are upstream dependencies. The pipeline blocks unverified/partial output ingestion
-instead of treating earlier input or uniform-moisture fixture audits as production
-signal qualification.
+are upstream dependencies. The pipeline blocks partial or inconsistent output
+ingestion. Earlier input or uniform-moisture fixture audits do not qualify
+production signals.
+
+## Admission revision 2 — existing remote outputs, before model fitting
+
+The user reported 1,000/1,000 outputs per arm passing native HDF5 inspection,
+paired input checks, and the expected 62/1 thickness levels. The only remaining
+block was the implementation's additional execution-time receipt requirement.
+Those receipts are not native gprMax artifacts and were not supplied by the
+existing generation workflow. Requiring them universally was an implementation
+choice, not a paper-prescribed step or an explicit user requirement.
+
+`provenance_policy=existing_outputs` now admits the user's existing native files
+when all content checks pass, with current file hashes and a documented absence
+of independently verified historical input/output linkage, executor completion,
+and backend. No receipts are manufactured and no outputs are marked historically
+verified without a matching receipt. Strict receipt admission remains available.
+This revises the earlier fail-on-any-missing-receipt implementation; it does not
+complete the original aspiration to independently verify historical provenance.
+Results remain conditional on correct upstream file association. The remote
+configuration uses a fresh `remote_v3` run and the prior input snapshot. No test
+performance was observed before this revision. No extraction thresholds, feature
+definitions, model settings, split seeds, or evaluation procedures changed.

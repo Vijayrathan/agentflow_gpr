@@ -51,8 +51,12 @@ def resolve(path):
 
 def load_config(path=DEFAULT_CONFIG):
     cfg = read_json(path)
-    if set(cfg) != set(read_json(DEFAULT_CONFIG)):
-        raise ValueError("Configuration keys must match config.json exactly")
+    required = set(read_json(DEFAULT_CONFIG)) - {"provenance_policy"}
+    if not required <= set(cfg) or set(cfg) - required - {"provenance_policy"}:
+        raise ValueError("Configuration keys must match config.json plus optional provenance_policy")
+    cfg.setdefault("provenance_policy", "require_receipts")
+    if cfg["provenance_policy"] not in ("require_receipts", "existing_outputs"):
+        raise ValueError("provenance_policy must be require_receipts or existing_outputs")
     if set(cfg["datasets"]) != {"A", "B"}:
         raise ValueError("Exactly A and B are required")
     if cfg["expected_pairs"] != 1000 or cfg["split_seed"] != 2026:

@@ -432,6 +432,7 @@ def train(cfg, audit, splits, requested=None):
             "primary": "primary",
             "test_data_used": False,
             "training_samples_per_arm": len(splits["train"]),
+            "provenance": audit.get("provenance", {}),
         },
     )
     register(run, [run / "validation_summary.json"])
@@ -512,6 +513,7 @@ def evaluate(cfg, audit, splits, review_validation=False):
         "primary_endpoint": "RF peaks: delta RMSE on A test geometry",
         "validation_sha256": sha256(validation),
         "data_digest": audit["data_digest"],
+        "provenance": audit.get("provenance", {}),
     }
     write_json(run / "evaluation.json", result)
     with (run / "predictions.csv").open("w", newline="") as f:

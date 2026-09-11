@@ -2,6 +2,15 @@
 
 ## Latest checkpoint — 2026-09-10
 
+Latest remote result: the user ran the corrected audit and reported all 1,000 A
+and 1,000 B outputs present and HDF5-valid, inputs paired, thickness levels 62/1.
+The only remaining errors were absent execution receipts. The remote profile
+now uses explicit `provenance_policy=existing_outputs` with run `remote_v3`,
+recording historical execution linkage/backend as unverified while retaining
+all content checks. This supersedes the receipt-only training block below; see
+[admission revision](ml/PAPER_DECISIONS.md). 59 targeted tests passed locally;
+no production training or held-out result has been reported.
+
 Remote continuation: the user has native A/B datasets on a Linux server in
 `~/agentflow_gpr/dataset/vijay/moisture_A__db8ef04d` and
 `moisture_B__2ba27927`, plus root JSONL exports. Use the native directories.

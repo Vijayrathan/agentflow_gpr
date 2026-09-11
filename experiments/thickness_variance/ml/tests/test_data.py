@@ -118,6 +118,52 @@ def test_outputs_without_receipts_do_not_claim_provenance(dataset_fixture):
     assert all(i["kind"] == "provenance" for i in result["issues"])
 
 
+def test_existing_outputs_admitted_with_honest_provenance(dataset_fixture):
+    cfg = dataset_fixture
+    cfg.update(receipts=None, provenance_policy="existing_outputs")
+    result = audit(cfg)
+    assert result["inputs_ready"] and result["outputs_ready"]
+    assert result["issues"] == [] and len(result["warnings"]) == 1
+    assert result["provenance"]["unverified_outputs"] == 4
+    assert not result["provenance"]["historical_execution_verified"]
+    assert all(not r["provenance_verified"] for r in result["rows"])
+    assert all(r["output_sha256"] and r["input_sha256"] for r in result["rows"])
+    assert not (Path(cfg["run_dir"]) / "receipts.json").exists()
+
+
+def test_provenance_policy_is_explicit_and_validated(tmp_path):
+    from experiments.thickness_variance.ml.common import DEFAULT_CONFIG, load_config
+
+    path = tmp_path / "config.json"
+    cfg = read_json(DEFAULT_CONFIG)
+    cfg.pop("provenance_policy", None)
+    write_json(path, cfg)
+    assert load_config(path)["provenance_policy"] == "require_receipts"
+    cfg["provenance_policy"] = "existing_outputs"
+    write_json(path, cfg)
+    assert load_config(path)["provenance_policy"] == "existing_outputs"
+    cfg["provenance_policy"] = "ignore_everything"
+    write_json(path, cfg)
+    with pytest.raises(ValueError, match="provenance_policy"):
+        load_config(path)
+    with pytest.raises(ValueError, match="provenance_policy"):
+        audit(cfg)
+
+
+def test_cli_existing_output_admission(dataset_fixture, monkeypatch, capsys):
+    from experiments.thickness_variance.ml import __main__ as cli
+
+    cfg = dataset_fixture
+    cfg.update(receipts=None, provenance_policy="existing_outputs")
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr("sys.argv", ["ml", "audit"])
+    assert cli.main() == 0
+    text = capsys.readouterr().out
+    assert '"outputs_ready": true' in text and "Issues: 0" in text
+    assert '"historical_execution_verified": false' in text
+    assert "Limitation:" in text
+
+
 def test_legacy_directory_mismatch_reports_skipped_checks(dataset_fixture):
     cfg = dataset_fixture
     for arm, folder in list(cfg["datasets"].items()):
@@ -217,7 +263,9 @@ def test_cli_remote_snapshot_then_audit(dataset_fixture, monkeypatch, capsys):
     assert "No unique audited input hash" not in output
 
 
-def test_changed_input_blocks_admission(dataset_fixture):
+@pytest.mark.parametrize("policy", ["require_receipts", "existing_outputs"])
+def test_changed_input_blocks_admission(dataset_fixture, policy):
+    dataset_fixture["provenance_policy"] = policy
     deck = Path(dataset_fixture["datasets"]["A"]) / "in_files/A_1.in"
     deck.write_text(deck.read_text() + "\n")
     result = audit(dataset_fixture)
@@ -228,7 +276,9 @@ def test_changed_input_blocks_admission(dataset_fixture):
     "fault",
     ["nonfinite", "length", "time", "identity", "position", "missing_component"],
 )
-def test_bad_output_blocks_admission(dataset_fixture, fault):
+@pytest.mark.parametrize("policy", ["require_receipts", "existing_outputs"])
+def test_bad_output_blocks_admission(dataset_fixture, fault, policy):
+    dataset_fixture["provenance_policy"] = policy
     p = Path(dataset_fixture["datasets"]["A"]) / "out_files/A_1.out"
     with h5py.File(p, "a") as f:
         if fault == "nonfinite":
@@ -249,7 +299,9 @@ def test_bad_output_blocks_admission(dataset_fixture, fault):
     assert result["arms"]["A"]["valid_hdf5"] == 1
 
 
-def test_changed_finite_output_fails_receipt(dataset_fixture):
+@pytest.mark.parametrize("policy", ["require_receipts", "existing_outputs"])
+def test_changed_finite_output_fails_receipt(dataset_fixture, policy):
+    dataset_fixture["provenance_policy"] = policy
     p = Path(dataset_fixture["datasets"]["A"]) / "out_files/A_1.out"
     with h5py.File(p, "a") as f:
         f["rxs/rx1/Ez"][10] = 9
@@ -258,7 +310,9 @@ def test_changed_finite_output_fails_receipt(dataset_fixture):
     assert not result["outputs_ready"]
 
 
-def test_missing_output_blocks(dataset_fixture):
+@pytest.mark.parametrize("policy", ["require_receipts", "existing_outputs"])
+def test_missing_output_blocks(dataset_fixture, policy):
+    dataset_fixture["provenance_policy"] = policy
     (Path(dataset_fixture["datasets"]["B"]) / "out_files/B_1.out").unlink()
     result = audit(dataset_fixture)
     assert not result["outputs_ready"] and result["arms"]["B"]["present"] == 1
@@ -311,7 +365,9 @@ def test_broken_moisture_pair_rejected_even_if_locally_consistent(dataset_fixtur
     assert any("pairing" in issue["message"] for issue in result["issues"])
 
 
-def test_mixed_backends_not_silently_compared(dataset_fixture):
+@pytest.mark.parametrize("policy", ["require_receipts", "existing_outputs"])
+def test_mixed_backends_not_silently_compared(dataset_fixture, policy):
+    dataset_fixture["provenance_policy"] = policy
     ledger = read_json(dataset_fixture["receipts"])
     ledger["runs"][-1]["backend"] = "cuda"
     write_json(dataset_fixture["receipts"], ledger)

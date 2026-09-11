@@ -28,6 +28,16 @@ def report(run):
         "No AGC, label-informed alignment, geometry input, or per-trace normalization.",
         "",
     ]
+    provenance = summary.get("provenance", {})
+    if provenance:
+        lines.extend([
+            f"Data admission policy: `{provenance['policy']}`. "
+            f"Execution receipts verified for {provenance['verified_receipts']} of "
+            f"{provenance['valid_outputs']} valid outputs.",
+            "",
+        ])
+        if provenance.get("limitation"):
+            lines.extend([f"**Provenance limitation:** {provenance['limitation']}", ""])
     if (run / "evaluation.json").exists():
         verify_artifacts(run, [run / "evaluation.json"])
         evaluation = read_json(run / "evaluation.json")

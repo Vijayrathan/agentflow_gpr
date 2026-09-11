@@ -1,8 +1,8 @@
 """Read-only dataset admission and paired, locked splits.
 
-Native HDF5 contains no input digest or completion receipt. An externally
-recorded execution ledger is required to close that provenance gap; this module
-never manufactures historical run receipts from existing files.
+Native HDF5 contains no input digest or completion receipt. Existing outputs
+can be admitted with that historical linkage explicitly unverified. Strict
+receipt admission remains available; neither mode manufactures historical receipts.
 """
 
 from __future__ import annotations
@@ -193,6 +193,9 @@ def expected_hash(snapshot, dataset, relative, arm=None):
 
 
 def audit(cfg):
+    policy = cfg.get("provenance_policy", "require_receipts")
+    if policy not in ("require_receipts", "existing_outputs"):
+        raise ValueError("Unknown provenance_policy")
     snapshot = read_json(cfg["input_hashes"])
     receipts = {}
     if cfg["receipts"]:
@@ -208,6 +211,7 @@ def audit(cfg):
         "inputs_ready": True,
         "outputs_ready": False,
         "issues": [],
+        "warnings": [],
         "skipped_checks": [],
         "rows": [],
         "input_baseline_scope": snapshot.get("scope", "Historical input hash baseline"),
@@ -344,12 +348,14 @@ def audit(cfg):
                 stats["valid_hdf5"] += 1
                 receipt = receipts.get((arm, sid))
                 if receipt is None:
-                    issue(
-                        "provenance",
-                        arm,
-                        sid,
-                        "No execution-time input/output completion receipt",
-                    )
+                    row["provenance_status"] = "unverified_existing_output"
+                    if policy == "require_receipts":
+                        issue(
+                            "provenance",
+                            arm,
+                            sid,
+                            "No execution-time input/output completion receipt",
+                        )
                     continue
                 if (
                     receipt.get("status") != "completed"
@@ -364,6 +370,7 @@ def audit(cfg):
                         "Execution receipt is incomplete or disagrees with artifacts"
                     )
                 row["provenance_verified"] = True
+                row["provenance_status"] = "verified_execution_receipt"
                 row["backend"] = receipt["backend"]
                 stats["verified_receipts"] += 1
             except (ValueError, KeyError, OSError) as error:
@@ -415,6 +422,24 @@ def audit(cfg):
             "Mixed execution backends require separate parity evidence/protocol review",
         )
     report["metadata"] = common
+    valid = sum(r["hdf5_valid"] for r in report["rows"])
+    verified = sum(r["provenance_verified"] for r in report["rows"])
+    limitation = (
+        "Existing input/output bytes are hashed and native metadata and signals checked. "
+        "Without execution receipts, historical input-to-output linkage, successful "
+        "executor completion and solver backend are not independently verified. "
+        "Results are conditional on the supplied files belonging to their stated inputs."
+    )
+    report["provenance"] = {
+        "policy": policy,
+        "valid_outputs": valid,
+        "verified_receipts": verified,
+        "unverified_outputs": valid - verified,
+        "historical_execution_verified": verified == 2 * cfg["expected_pairs"],
+        "limitation": limitation if valid > verified else "",
+    }
+    if policy == "existing_outputs" and valid > verified:
+        report["warnings"].append(f"{valid - verified} outputs: {limitation}")
     report["outputs_ready"] = report["inputs_ready"] and not report["issues"]
     input_hashes = {
         p: h
@@ -424,7 +449,8 @@ def audit(cfg):
     report["input_digest"] = digest(input_hashes)
     report["data_digest"] = digest(report["hashes"])
     report["scope"] = (
-        "Input integrity, HDF5 structure and execution receipts; not a convergence or CPU/GPU parity qualification"
+        "Input integrity and HDF5 consistency; historical execution status is in provenance. "
+        "Not a convergence or CPU/GPU parity qualification."
     )
     write_json(Path(cfg["run_dir"]) / "audit.json", report)
     return report

@@ -22,7 +22,7 @@ tested versions. Runs record their actual environment and reject changes midway.
 ### Remote datasets with different session names
 
 The supplied `config.remote.json` selects `moisture_A__db8ef04d` and
-`moisture_B__2ba27927`, with a new run directory `runs/remote_v2`. First snapshot
+`moisture_B__2ba27927`, with a new run directory `runs/remote_v3`. First snapshot
 their manifests and emitted decks, then audit their contents and native outputs:
 
 ```bash
@@ -32,9 +32,11 @@ python -m experiments.thickness_variance.ml --config experiments/thickness_varia
 
 Use the same `--config experiments/thickness_variance/ml/config.remote.json`
 before every subsequent subcommand. The snapshot records current input integrity,
-not successful historical execution. Without execution receipts, the audit can
-inspect all native outputs and report their actual validity, but training remains
-blocked by provenance. The snapshot command creates no receipts, reads no output
+not successful historical execution. The remote profile explicitly sets
+`provenance_policy=existing_outputs`: missing historical receipts are a recorded
+limitation, allowing training once every input/output check passes. Verified
+receipt counts stay at zero when no receipts exist. The snapshot command creates
+no receipts, reads no output
 signals, and refuses to overwrite a differing snapshot. A retry of unchanged
 inputs is safe.
 
@@ -58,7 +60,7 @@ if unavailable; NN inference and serialized models use CPU. The RF uses CPU.
 python -m experiments.thickness_variance.ml audit
 python -m experiments.thickness_variance.ml split
 python -m experiments.thickness_variance.ml features --available-training
-# Once all outputs and execution provenance pass admission:
+# Once all outputs pass the configured admission policy:
 python -m experiments.thickness_variance.ml features
 python -m experiments.thickness_variance.ml train --recipe primary
 python -m experiments.thickness_variance.ml train
@@ -100,8 +102,25 @@ or repaired. Symbolic waveform aliases may differ.
 
 Native gprMax HDF5 does **not** record the input digest or establish that a run
 completed under the current deck. Matching filenames, titles and finite signals
-alone cannot prove provenance. For final training, configure `receipts` to point
-to a trusted executor's execution-time ledger:
+alone cannot prove provenance. Two explicit admission policies are available:
+
+- `require_receipts` (default when omitted): every output also needs a trusted
+  execution-time receipt. Missing receipts block training.
+- `existing_outputs` (remote profile): missing receipts become a provenance
+  limitation. All input hashes, pairing, geometry roles, native timing/acquisition,
+  six-field finiteness, recording length, and output metadata checks still apply.
+  Supplied receipts must still agree with the files; contradictory receipts and
+  known mixed backends still block admission. An unknown backend stays unknown.
+
+The policy is saved in run identity. Audit, validation/evaluation JSON and the
+human-readable report preserve verified/unverified counts and the historical
+linkage limitation. Results under `existing_outputs` are conditional on the
+supplied files belonging to the stated inputs; admission does not independently
+establish execution completion or backend. The statistical and peak recipes are
+unchanged. This admission revision is documented in `PAPER_DECISIONS.md`.
+
+To use real execution evidence, configure `receipts` to point to the executor's
+ledger (these records are not a standard gprMax output):
 
 ```json
 {
@@ -125,13 +144,14 @@ to a trusted executor's execution-time ledger:
 The executor must record input bytes at execution, successful solver completion,
 and the completed output digest. `backend` is `cpu` or `cuda`. This package
 verifies receipts but deliberately does not create them retrospectively from
-unverified `.out` files. Recover original execution evidence or rerun those decks
-with a recording executor when that evidence is absent. Receipts are trusted
+unverified `.out` files. The strict policy requires original execution evidence;
+the existing-output policy preserves its absence explicitly. Receipts are trusted
 provenance assertions, not cryptographic attestations by the ML package. Mixed
 backends are blocked in this protocol; parity qualification is separate work.
 
-Passing admission establishes integrity, metadata consistency and provenance.
-It is not proof of waveform convergence, CPU/GPU parity or lab calibration.
+Passing admission establishes the checked integrity and metadata consistency.
+Historical provenance verification is reported separately. Neither policy proves
+waveform convergence, CPU/GPU parity or lab calibration.
 
 ## Scientific procedure
 

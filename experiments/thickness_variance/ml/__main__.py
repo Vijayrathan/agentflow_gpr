@@ -69,7 +69,7 @@ def main():
                     json.dumps(
                         {
                             k: admission[k]
-                            for k in ("inputs_ready", "outputs_ready", "arms")
+                            for k in ("inputs_ready", "outputs_ready", "arms", "provenance")
                         },
                         indent=2,
                     )
@@ -83,6 +83,8 @@ def main():
                     print("Remaining issues are in audit.json")
                 for skipped in admission["skipped_checks"]:
                     print(f"Skipped: {skipped}")
+                for warning in admission["warnings"]:
+                    print(f"Limitation: {warning}")
                 return 0 if admission["outputs_ready"] else 2
             splits = split(cfg, admission)
             if args.command == "split":
